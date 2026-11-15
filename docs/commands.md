@@ -47,6 +47,8 @@ agyva usage --all               # other accounts use the cache
 agyva usage work --no-refresh   # cached data only
 agyva health --no-refresh       # health for every saved account
 agyva watch                     # foreground observer, Ctrl+C stops
+agyva models                    # cached model catalog per account
+agyva models --refresh          # run `agy models` for the active account
 ```
 
 `usage` and `health` accept a selector, `--json`, `--no-refresh`, and
@@ -66,8 +68,19 @@ exclusion reason, with the next weekly reset countdown. `--interval` accepts
 `15s`, `30`, `2m`, `1h` with a 5s floor (a faster loop changes nothing — the
 evaluation is cache-only). The active account's quota refresh runs on its own
 300s cadence through the existing single-flight refresh guard, so several
-monitors and a manual `usage` collapse to one run. `monitor` never switches
-accounts. (A dedicated interactive TUI route tab is not in 0.1.1; the route
+monitors and a manual `usage` collapse to one run; the same tick also keeps
+the active account's model catalog current (bounded `agy models`, throttled
+by `models_cache_secs`, skipped entirely while that observation is fresh).
+`monitor` never switches accounts unless the group explicitly opts in — see
+[Opt-in auto-switch](#opt-in-auto-switch).
+
+`agyva models [--refresh] [--json]` shows the cached catalog behind
+`--for-model`: each account's families, when agy last reported them and
+whether that observation is still fresh. Without `--refresh` it never runs
+agy. `--refresh` forces one bounded `agy models` run for the active account
+only (10s timeout, refresh lock, attribution checked before and after), and
+a failure keeps the prior observation. Accounts other than the active one
+only get a catalog by being active when it runs. (A dedicated interactive TUI route tab is not in 0.1.1; the route
 pane ships in this watch-style terminal monitor instead.)
 
 ## Plan a route
@@ -80,17 +93,21 @@ considers all saved accounts. Activation is manual.
 ```toml
 [groups.work]
 accounts = ["work", "personal"] # selectors; stable account IDs are recommended
-ranking = "smart" # or "priority" to use the listed order and priorities
+auto_switch = false # opt-in automation; see "Opt-in auto-switch" below
+ranking = "smart" # or "priority" (listed order + priorities) / "least-used"
 [groups.work.priorities]
 work = 10 # higher values first with priority ranking
 [groups.work.models]
 "gemini-4-carbon" = "Gemini Pro" # maps a family to its quota group
+[groups.work.plans]
+work = "pro" # declared plan for least-used ranking (alias or id)
 ```
 
 `route inspect|plan --for-model <model>` keeps only accounts whose observed model
 catalog offers the family. The catalog comes from a bounded `agy models` run
 for the active account only, cached for `models_cache_secs` (default one
-day); failures keep the prior observation. A missing or stale catalog never
+day); `agyva models --refresh` runs it on demand, `agyva monitor`'s tick keeps
+it current, and a failure keeps the prior observation. A missing or stale catalog never
 proves support, and the built-in reference list is descriptive only. When a
 quota group maps to the family (declared mapping first, then group names),
 the ranked share follows that group's windows — an exhausted unrelated
@@ -106,6 +123,12 @@ switching, apply refuses and says so (`--force` overrides the drift check,
 never the recovery check). `agyva route history [--limit N]` shows the most
 recent decisions with their reasons — aliases and outcomes only, never
 credentials.
+
+`least-used` orders by declared plan instead — free before pro before ultra,
+with undeclared accounts last and smart's ordering breaking ties — so a
+cheaper subscription is spent first. `route list` names each group's ranking
+and its real activation mode (`manual activation`, an opt-in still missing
+the policy acknowledgement, or `auto-switch enabled (acknowledged)`).
 
 Smart ranks the fullest counting-window share, holds near-full five-hour rate
 caps back, and spends weekly budgets renewing sooner first. Ties retain listed

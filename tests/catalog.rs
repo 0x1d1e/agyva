@@ -314,3 +314,215 @@ fn static_reference_catalog_never_proves_support() {
     assert!(!alice.eligible, "static catalog is descriptive only");
     assert!(alice.why.contains("unknown"), "{}", alice.why);
 }
+
+/// The review's counterexample: an exhausted bucket in an UNRELATED group
+/// must not exclude an account whose requested family still has quota. Here
+/// whole-account ranking says "quota exhausted" (Claude / GPT is at 0%), but
+/// Gemini Pro weekly still holds 60%.
+#[test]
+fn for_model_ignores_exhausted_unrelated_bucket() {
+    use agyva::core::health::{AccountHealth, HealthRecord, HealthSource};
+    use agyva::core::quota::{ModelQuota, QuotaSource, QuotaWindow};
+
+    let rig = Rig::new();
+    rig.add_all(&[ALICE]);
+    let app = rig.app();
+    let now = Utc::now();
+    let window = |pct: f64, reset_in: Duration| QuotaWindow {
+        remaining_percent: pct,
+        reset_at: Some(now + reset_in),
+        observed_at: now,
+        source: QuotaSource::AgyUsageCommand,
+    };
+    app.quota_cache()
+        .update(|c| {
+            c.accounts.insert(
+                id_of(ALICE),
+                agyva::core::quota_cache::CacheEntry {
+                    quota: Some(agyva::core::quota_cache::CachedQuota {
+                        observed_at: now,
+                        groups: vec![
+                            ModelQuota {
+                                group: "Gemini Pro".into(),
+                                model: None,
+                                disabled: false,
+                                five_hour: Some(window(90.0, Duration::hours(3))),
+                                weekly: Some(window(60.0, Duration::days(2))),
+                            },
+                            ModelQuota {
+                                group: "Claude / GPT".into(),
+                                model: None,
+                                disabled: false,
+                                five_hour: Some(window(0.0, Duration::hours(3))),
+                                weekly: Some(window(0.0, Duration::days(2))),
+                            },
+                        ],
+                    }),
+                    health: Some(HealthRecord {
+                        state: AccountHealth::Healthy,
+                        observed_at: Some(now),
+                        source: HealthSource::AgyUsageCommand,
+                        evidence: "synthetic".into(),
+                    }),
+                    ..Default::default()
+                },
+            );
+        })
+        .unwrap();
+    std::fs::write(
+        app.dirs.config.join("routing.toml"),
+        "[groups._x.models]\n'gemini-4-carbon' = 'Gemini Pro'\n",
+    )
+    .unwrap();
+    ModelsCache::new(&app.dirs)
+        .record(
+            &id_of(ALICE),
+            vec![agyva::agy::models::ModelFamily {
+                id: "gemini-4-carbon".into(),
+                display_name: "Gemini 4 Carbon".into(),
+                variants: vec!["high".into()],
+            }],
+            now,
+        )
+        .unwrap();
+
+    // The plain plan excludes the account: some bucket is empty.
+    let plain = app.route_group_at(None, now).unwrap();
+    let row = plain.accounts.first().unwrap();
+    assert!(!row.eligible, "whole-account plan sees the empty bucket");
+    assert_eq!(row.why, "quota exhausted");
+
+    // Asking for the family re-scopes eligibility to its own group.
+    let plan = app
+        .route_group_for(None, Some("gemini-4-carbon"), now)
+        .unwrap();
+    let alice = plan.accounts.first().unwrap();
+    assert!(
+        alice.eligible,
+        "Gemini Pro still holds quota; why was {:?}",
+        alice.why
+    );
+    assert_eq!(
+        alice.remaining_percent,
+        Some(60.0),
+        "the mapped group's tightest window, not the account-wide 0%"
+    );
+    assert_eq!(plan.recommendation.as_deref(), Some(id_of(ALICE).as_str()));
+
+    // ...and when the requested group itself empties, the exclusion names it.
+    app.quota_cache()
+        .update(|c| {
+            if let Some(entry) = c.accounts.get_mut(&id_of(ALICE))
+                && let Some(q) = entry.quota.as_mut()
+            {
+                for g in &mut q.groups {
+                    if g.group == "Gemini Pro" {
+                        for w in [&mut g.five_hour, &mut g.weekly].into_iter().flatten() {
+                            w.remaining_percent = 0.0;
+                        }
+                    }
+                }
+            }
+        })
+        .unwrap();
+    let plan = app
+        .route_group_for(None, Some("gemini-4-carbon"), now)
+        .unwrap();
+    let alice = plan.accounts.first().unwrap();
+    assert!(!alice.eligible);
+    assert!(
+        alice.why.contains("mapped quota exhausted"),
+        "{}",
+        alice.why
+    );
+}
+
+/// `agyva models` is the documented way to make `--for-model` work on a real
+/// install: a missing catalog names it as the fix, and `--refresh` records one.
+#[test]
+fn models_command_makes_for_model_reachable() {
+    let rig = Rig::new();
+    rig.add_all(&[ALICE]);
+    let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
+    let app = rig.app_with_agy(&fake);
+    rig.login(ALICE);
+    let now = Utc::now();
+    seed_fresh(&app, ALICE, now);
+    std::fs::write(
+        app.dirs.config.join("routing.toml"),
+        "[groups._x.models]\n'gemini-4-carbon' = 'Gemini Pro'\n",
+    )
+    .unwrap();
+
+    // With no catalog, the exclusion reason names the command that fixes it.
+    let plan = app
+        .route_group_for(None, Some("gemini-4-carbon"), now)
+        .unwrap();
+    let alice = plan.accounts.first().unwrap();
+    assert!(!alice.eligible);
+    assert!(
+        alice.why.contains("agyva models"),
+        "the reason must name the fix: {}",
+        alice.why
+    );
+
+    // The report is cache-only until --refresh is asked for.
+    let quiet = app.models_report(false, now).unwrap();
+    assert!(quiet.refresh.is_none(), "no spawn without --refresh");
+    assert_eq!(quiet.accounts.len(), 1);
+    assert_eq!(quiet.accounts[0].state, "missing");
+    assert!(quiet.accounts[0].families.is_empty());
+    assert!(quiet.accounts[0].active);
+    assert_eq!(fake.model_calls(), 0, "reading the cache never spawns agy");
+
+    // `--refresh` runs one bounded `agy models` for the active account.
+    fake.models(MODELS_TSV);
+    let report = app.models_report(true, now).unwrap();
+    let refresh = report.refresh.expect("refresh outcome reported");
+    assert_eq!(
+        refresh.status,
+        agyva::core::catalog::ModelsRefreshStatus::Refreshed
+    );
+    assert_eq!(fake.model_calls(), 1);
+    assert_eq!(report.accounts[0].state, "fresh");
+    assert_eq!(report.accounts[0].age_secs, Some(0));
+    assert!(
+        report.accounts[0]
+            .families
+            .iter()
+            .any(|f| f.id == "gemini-4-carbon"),
+        "{:?}",
+        report.accounts[0].families
+    );
+
+    // Now the same query is answerable.
+    let plan = app
+        .route_group_for(None, Some("gemini-4-carbon"), now)
+        .unwrap();
+    let alice = plan.accounts.first().unwrap();
+    assert!(alice.eligible, "{}", alice.why);
+    assert_eq!(alice.remaining_percent, Some(40.0));
+    // The monitor's tick uses the THROTTLED path (`force = false`): a fresh
+    // catalog means no spawn at all, so a 15s loop cannot hammer agy.
+    let calls = fake.model_calls();
+    assert_eq!(
+        app.refresh_models_at(false, now).unwrap().status,
+        agyva::core::catalog::ModelsRefreshStatus::Skipped
+    );
+    assert_eq!(
+        fake.model_calls(),
+        calls,
+        "no spawn when the catalog is fresh"
+    );
+
+    // `--refresh` is an explicit request, so it always runs.
+    assert_eq!(
+        app.models_report(true, now)
+            .unwrap()
+            .refresh
+            .unwrap()
+            .status,
+        agyva::core::catalog::ModelsRefreshStatus::Refreshed
+    );
+    assert_eq!(fake.model_calls(), calls + 1);
+}

@@ -29,6 +29,15 @@ fn w(e: std::io::Error) -> Error {
     Error::io("writing output", e)
 }
 
+/// The ranking mode as `routing.toml` spells it.
+fn ranking_label(ranking: crate::core::route_config::Ranking) -> &'static str {
+    match ranking {
+        crate::core::route_config::Ranking::Smart => "smart",
+        crate::core::route_config::Ranking::Priority => "priority",
+        crate::core::route_config::Ranking::LeastUsed => "least-used",
+    }
+}
+
 fn print_json<T: Serialize>(io: &mut Io<'_>, value: &T) -> Result<()> {
     let text = serde_json::to_string_pretty(value).map_err(|e| Error::format(e.to_string()))?;
     writeln!(io.out, "{text}").map_err(w)
@@ -219,11 +228,23 @@ fn dispatch(app: &App, command: Command, io: &mut Io<'_>, st: Style) -> Result<i
                 if a.json {
                     print_json(io, &cfg)?;
                 } else {
+                    let ack = app.config.auto_switch_ack;
                     for (name, group) in &cfg.groups {
+                        // Report the real activation mode, not a blanket
+                        // "manual": an opted-in group with the policy
+                        // acknowledged is automated.
+                        let mode = match (group.auto_switch, ack) {
+                            (false, _) => "manual activation".to_owned(),
+                            (true, false) => {
+                                "auto-switch opted in; run `agyva config set auto_switch_ack true`"
+                                    .to_owned()
+                            }
+                            (true, true) => "auto-switch enabled (acknowledged)".to_owned(),
+                        };
                         writeln!(
                             io.out,
-                            "{name}: {:?} (manual activation), {} listed account(s)",
-                            group.ranking,
+                            "{name}: {}, {mode}, {} listed account(s)",
+                            ranking_label(group.ranking),
                             group.accounts.len()
                         )
                         .map_err(w)?;
@@ -241,25 +262,21 @@ fn dispatch(app: &App, command: Command, io: &mut Io<'_>, st: Style) -> Result<i
                 let history = crate::core::route_apply::RouteHistory::new(&app.dirs);
                 let now = chrono::Utc::now();
                 let plan = app.route_apply_plan(group, now)?;
-                if a.json {
-                    #[derive(Serialize)]
-                    struct ApplyPlanJson<'a> {
-                        group: &'a str,
-                        target: &'a str,
-                        reason: &'a str,
-                        declared_plan: &'a Option<String>,
-                        session_warning: &'a Option<String>,
+                let mut plan_warnings = Vec::new();
+                if let Some(w) = &plan.session_warning {
+                    plan_warnings.push(w.clone());
+                }
+                // `--json` means exactly one JSON value on stdout: no prompt,
+                // no human lines. Without `--yes` there is no way to agree,
+                // so that combination is a usage error rather than a prompt.
+                if a.json && !*yes {
+                    for warning in &plan_warnings {
+                        writeln!(io.err, "warning: {warning}").map_err(w)?;
                     }
-                    print_json(
-                        io,
-                        &ApplyPlanJson {
-                            group: &plan.group,
-                            target: &plan.target_alias,
-                            reason: &plan.reason,
-                            declared_plan: &plan.declared_plan,
-                            session_warning: &plan.session_warning,
-                        },
-                    )?;
+                    return Err(Error::usage(
+                        "`route apply --json` needs --yes: it never prompts on stdout",
+                    )
+                    .hint("add --yes to confirm non-interactively"));
                 }
                 if !*yes {
                     let mut question = format!(
@@ -276,23 +293,60 @@ fn dispatch(app: &App, command: Command, io: &mut Io<'_>, st: Style) -> Result<i
                     }
                 }
                 let outcome = app.route_apply(group, *force, true, &history, now)?;
-                if outcome.already_active {
-                    writeln!(io.out, "{} is already active.", outcome.alias).map_err(w)?;
+                if a.json {
+                    #[derive(Serialize)]
+                    struct AppliedJson<'a> {
+                        group: &'a str,
+                        target: &'a str,
+                        target_alias: &'a str,
+                        changed: bool,
+                        already_active: bool,
+                        reason: &'a str,
+                        declared_plan: &'a Option<String>,
+                        warnings: Vec<String>,
+                    }
+                    print_json(
+                        io,
+                        &AppliedJson {
+                            group: &plan.group,
+                            target: &plan.target_id,
+                            target_alias: &plan.target_alias,
+                            changed: !outcome.already_active,
+                            already_active: outcome.already_active,
+                            reason: &plan.reason,
+                            declared_plan: &plan.declared_plan,
+                            warnings: plan_warnings
+                                .iter()
+                                .cloned()
+                                .chain(outcome.warnings.iter().cloned())
+                                .collect(),
+                        },
+                    )?;
                 } else {
-                    writeln!(io.out, "Switched to {}", outcome.alias).map_err(w)?;
-                }
-                for warning in &outcome.warnings {
-                    writeln!(io.err, "note: {warning}").map_err(w)?;
+                    if outcome.already_active {
+                        writeln!(io.out, "{} is already active.", outcome.alias).map_err(w)?;
+                    } else {
+                        writeln!(io.out, "Switched to {}", outcome.alias).map_err(w)?;
+                    }
+                    for warning in &outcome.warnings {
+                        writeln!(io.err, "note: {warning}").map_err(w)?;
+                    }
                 }
                 return Ok(exit::OK);
             }
             if let Some(super::RouteCommand::History { limit }) = &a.command {
                 let limit = (*limit).clamp(1, crate::core::route_apply::MAX_HISTORY_ENTRIES);
-                let file = crate::core::route_apply::RouteHistory::new(&app.dirs).load();
+                let mut file = crate::core::route_apply::RouteHistory::new(&app.dirs).load();
+                // Newest first, clamped for BOTH renderings: `--json` is the
+                // same document a human sees, never the whole unbounded log.
+                file.entries = file
+                    .entries
+                    .split_off(file.entries.len().saturating_sub(limit));
+                file.entries.reverse();
                 if a.json {
                     print_json(io, &file)?;
                 } else {
-                    for e in file.entries.iter().rev().take(limit) {
+                    for e in &file.entries {
                         writeln!(
                             io.out,
                             "{} {} group={} target={} {}",
@@ -349,6 +403,14 @@ fn dispatch(app: &App, command: Command, io: &mut Io<'_>, st: Style) -> Result<i
         }
         Command::Watch => return super::watch_cmd::watch(app, io),
         Command::Monitor(a) => return super::monitor_cmd::monitor(app, io, &a),
+        Command::Models(a) => {
+            let report = app.models_report(a.refresh, chrono::Utc::now())?;
+            if a.json {
+                print_json(io, &report)?
+            } else {
+                write!(io.out, "{}", usage_out::render_models(&report, st)).map_err(w)?
+            }
+        }
         Command::Health(a) => {
             let report = app.health_report(&UsageOptions {
                 selector: a.selector.clone(),

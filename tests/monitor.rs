@@ -279,6 +279,21 @@ fn least_used_ranks_by_declared_plan_and_degrades_to_share() {
     let plan = app.route_group_at(Some("work"), now).unwrap();
     assert_eq!(plan.accounts[0].alias, "alice");
 
+    // A plan declared against the stable ID is honoured too: an id-only
+    // group must not silently degrade to smart's ordering. bob is `free`
+    // by id, so least-used now prefers bob despite his lower share.
+    let bob_id = id_of(BOB);
+    std::fs::write(
+        app.dirs.config.join("routing.toml"),
+        format!("[groups.work]\nranking = 'least-used'\n[groups.work.plans]\nalice = 'ultra'\n'{bob_id}' = 'free'\n"),
+    )
+    .unwrap();
+    let plan = app.route_group_at(Some("work"), now).unwrap();
+    assert_eq!(
+        plan.accounts[0].alias, "bob",
+        "a plan keyed by account id ranks like one keyed by alias"
+    );
+
     // The enum deserializes the kebab spelling; Smart stays the default.
     assert_eq!(
         serde_json::from_str::<Ranking>("\"smart\"").unwrap(),
@@ -314,4 +329,50 @@ fn priority_ranking_unchanged_and_every_ranking_value_works() {
         assert_eq!(plan.accounts[0].alias, first_alias, "{toml_ranking}");
         assert!(plan.accounts[0].eligible);
     }
+}
+
+/// The monitor's tick also keeps the model catalog current, on the same
+/// single-flight path and only when `models_cache_secs` says it is due —
+/// without it, `--for-model` would stay "catalog unknown" forever on a real
+/// install.
+#[test]
+fn monitor_tick_refreshes_the_model_catalog_on_its_throttle() {
+    // Two variants fold into the family id; a lone raw id stays standalone.
+    const TSV: &str = "Fetching available models...\n\
+gemini-4-carbon-high\tGemini 4 Carbon (High)\n\
+gemini-4-carbon-low\tGemini 4 Carbon (Low)\n";
+    let rig = Rig::new();
+    rig.add_all(&[ALICE]);
+    let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
+    let app = rig.app_with_agy(&fake);
+    rig.login(ALICE);
+    let now = Utc::now();
+    seed(&app, ALICE, now, 90.0, AccountHealth::Healthy);
+
+    // First cycle with no catalog: one `agy models` run, attributed to the
+    // active account. `ok()` resets scenario files, so set models after it.
+    fake.ok(0.9, 0.9).models(TSV);
+    let mut probe = MonitorProbe::new(&app, None, None, StdDuration::ZERO);
+    probe.cycle(now);
+    assert_eq!(fake.model_calls(), 1, "the tick records a catalog");
+    assert!(
+        app.models_cache()
+            .read_state(&id_of(ALICE), 86_400, now)
+            .families()
+            .iter()
+            .any(|f| f.id == "gemini-4-carbon"),
+        "the parsed catalog lands in the cache"
+    );
+
+    // The catalog is fresh, so later ticks do not spawn `agy models` again
+    // even though they do refresh quota.
+    fake.ok(0.9, 0.9);
+    let calls = fake.model_calls();
+    probe.cycle(now + Duration::seconds(5));
+    probe.cycle(now + Duration::seconds(10));
+    assert_eq!(
+        fake.model_calls(),
+        calls,
+        "a fresh catalog means no catalog spawn"
+    );
 }

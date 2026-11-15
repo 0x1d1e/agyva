@@ -43,7 +43,7 @@ vault passphrase). AGYVA_FAILPOINT works only with AGYVA_TEST_MODE=1.";
                   Switching is manual unless a route group opts in to automation\n\
                   (auto_switch = true plus `config set auto_switch_ack true`).",
     after_help = EXIT_CODES,
-    help_template = "{name} {version}\n{about-with-newline}\n{usage-heading} {usage}\n\nAccounts:\n  add          Save the current agy login\n  list         List saved accounts\n  use          Switch manually, then restart agy\n  current      Inspect agy's login\n  rename       Change an alias\n  remove       Forget a saved account\n\nQuota and health:\n  usage        Remaining quota by group and window\n  health       Account health and evidence\n  watch        Read-only foreground monitor\n  monitor      Route-aware cache-only monitor (--interval)\n\nDiagnostics and recovery:\n  status       State and pending recovery\n  doctor       Read-only checks\n  recover      Finish or undo an interrupted switch\n\nTransfer and updates:\n  export       Save accounts to a portable encrypted archive\n  import       Add accounts from an archive (skips existing)\n  update       Check GitHub for a newer release; install on request\n\nSetup:\n  config       View or change settings\n  completions  Fish, Bash or Zsh completion\n  version      agyva and agy versions\n  help         Help for a command\n\nOptions:\n{options}\n{after-help}",
+    help_template = "{name} {version}\n{about-with-newline}\n{usage-heading} {usage}\n\nAccounts:\n  add          Save the current agy login\n  list         List saved accounts\n  use          Switch manually, then restart agy\n  current      Inspect agy's login\n  rename       Change an alias\n  remove       Forget a saved account\n\nQuota and health:\n  usage        Remaining quota by group and window\n  health       Account health and evidence\n  models       Cached model catalog (--refresh to update)\n  watch        Read-only foreground monitor\n  monitor      Route-aware cache-only monitor (--interval)\n\nDiagnostics and recovery:\n  status       State and pending recovery\n  doctor       Read-only checks\n  recover      Finish or undo an interrupted switch\n\nTransfer and updates:\n  export       Save accounts to a portable encrypted archive\n  import       Add accounts from an archive (skips existing)\n  update       Check GitHub for a newer release; install on request\n\nSetup:\n  config       View or change settings\n  completions  Fish, Bash or Zsh completion\n  version      agyva and agy versions\n  help         Help for a command\n\nOptions:\n{options}\n{after-help}",
     propagate_version = true
 )]
 pub struct Cli {
@@ -80,6 +80,8 @@ pub enum Command {
     Monitor(MonitorArgs),
     /// Show per-account health (refreshes the active account).
     Health(HealthArgs),
+    /// Show the cached model catalog (`agy models`); `--refresh` runs it now.
+    Models(ModelsArgs),
     /// Summarize agyva's state and any pending recovery.
     Status(JsonFlag),
     /// Diagnose problems (read-only).
@@ -112,6 +114,16 @@ pub enum Command {
     },
     /// Print agyva and agy versions.
     Version,
+}
+
+#[derive(Debug, Args)]
+pub struct ModelsArgs {
+    /// Run `agy models` for the active account instead of reading the cache.
+    #[arg(long)]
+    pub refresh: bool,
+    /// Machine-readable output.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]

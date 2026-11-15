@@ -143,9 +143,15 @@ impl App {
         self.check_agy_extras(&mut c);
 
         let s = sessions::detect(&self.agy);
-        match s.warning() {
-            Some(w) => c.add("sessions", Level::Info, w, None),
-            None => c.ok("sessions", "no running agy detected"),
+        match (s.is_known(), s.warning()) {
+            (false, w) => c.add(
+                "sessions",
+                Level::Warn,
+                w.unwrap_or_default(),
+                Some("check the AGY home's permissions"),
+            ),
+            (true, Some(w)) => c.add("sessions", Level::Info, w, None),
+            (true, None) => c.ok("sessions", "no running agy detected"),
         }
 
         match self.checkpoints().list() {

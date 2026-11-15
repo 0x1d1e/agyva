@@ -487,3 +487,69 @@ fn gates_are_evaluated_in_the_documented_order() {
         other => panic!("expected a switch, got {other:?}"),
     }
 }
+
+/// "Could not look" is not "nothing is running": when the presence path
+/// cannot be listed, detection is UNKNOWN and automation DEFERS instead of
+/// switching blind. A regular file where the presence directory belongs
+/// makes `read_dir` fail for every user (root included), so the test is
+/// deterministic rather than permission-dependent.
+#[test]
+fn unknown_session_detection_defers_instead_of_switching() {
+    let rig = Rig::new();
+    rig.add_all(&[ALICE, BOB]);
+    let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
+    let mut app = rig.app_with_agy(&fake);
+    let now = Utc::now();
+    seed(&app, ALICE, now, 90.0, AccountHealth::Healthy);
+    seed(&app, BOB, now, 50.0, AccountHealth::Healthy);
+    enable_auto(&mut app, true);
+
+    // `presence` is a file, so the session check cannot complete.
+    let dir = app.agy.presence_dir();
+    std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+    std::fs::write(&dir, b"not a directory").unwrap();
+
+    let report = agyva::agy::sessions::detect(&app.agy);
+    assert!(
+        !report.is_known(),
+        "an unlistable presence path is an unknown answer, not zero sessions"
+    );
+    assert!(
+        report
+            .uncertain
+            .as_deref()
+            .unwrap_or_default()
+            .contains("presence"),
+        "{report:?}"
+    );
+    assert!(
+        report
+            .warning()
+            .is_some_and(|w| w.contains("could not check")),
+        "humans are told the check failed, never that nothing is running"
+    );
+
+    let plan = fresh_plan(&app, now);
+    match decide(&app, "work", &plan, true, now) {
+        AutoDecision::Defer(reason) => assert!(
+            reason.contains("could not determine"),
+            "defer reason names the unknown detection: {reason}"
+        ),
+        other => panic!("unknown detection must defer, got {other:?}"),
+    }
+
+    // The whole switch path agrees: nothing moves, and the defer is recorded.
+    let history = RouteHistory::new(&app.dirs);
+    let out = app
+        .auto_switch_for("work", &plan, true, &history, now)
+        .unwrap();
+    assert!(out.is_none(), "no switch on an unknown session answer");
+    assert_eq!(rig.live_id(), Some(id_of(BOB)), "the login never moved");
+    let entries = history.load().entries;
+    assert!(
+        entries
+            .last()
+            .is_some_and(|e| e.reason.contains("could not determine")),
+        "the defer reason is recorded: {entries:?}"
+    );
+}

@@ -12,6 +12,7 @@ agyva list --json
 agyva current --json
 agyva usage --all --no-refresh --json
 agyva health --no-refresh --json
+agyva models --json
 agyva status --json
 agyva doctor --json
 ```
@@ -41,6 +42,16 @@ and `weekly` windows. A present window has `remaining_percent`, `reset_at`,
 `observed_at` and `source` (`cache` or `agy_usage_command`). A missing window is
 `null`, not zero, and not full. Reset timestamps may also be `null`.
 
+`agyva models [--refresh] --json` returns
+`{"schema_version", "generated_at", "refresh", "accounts"}`. `refresh` is
+`null` unless `--refresh` was passed; then it carries the attempt's
+`account_id`, `status` (`refreshed`/`skipped`/`failed`) and an optional
+`note`. Each account has `id`, `alias`, `active`, `observed_at` (or `null`),
+`age_secs`, `fresh`, `state` (`fresh`/`stale`/`missing`) and `families`
+(`id`, `display_name`, `variants`). Only a fresh catalog proves
+`--for-model` support; when it is missing, every account is excluded and the
+`why` names `agyva models` as the fix.
+
 `agyva route plan [--for-model MODEL] [--json]` (named groups via
 `route plan GROUP` / `route inspect GROUP`) returns
 `{"schema_version", "generated_at", "recommendation", "accounts"}`. The
@@ -52,10 +63,14 @@ machine-readable eligibility signal) and `command`. Rows are ranked
 best-first with ineligible accounts last. `remaining_percent` is the raw
 cached value even when `eligible` is false; the human tables print `-`
 instead, so only an eligible row's share reads as available quota. `agyva
-route history --json`
+route history --json [--limit N]`
 returns `{"schema_version", "entries"}` with `at`, `target`, `outcome`
 (`applied`, `refused`, `failed`), an optional `group` and a bounded `reason`
-per entry (automatic decisions included).
+per entry (automatic decisions included), newest first and clamped to
+`--limit` exactly like the human table. `route apply GROUP --json` requires
+`--yes` — it never prompts on stdout — and emits one object with `group`,
+`target`, `target_alias`, `changed`, `already_active`, `reason`,
+`declared_plan` and `warnings`.
 
 `refreshed_now` says that run got data from agy. `health.verified_now` says agy
 answered during that run. Neither boolean changes a historical timestamp into

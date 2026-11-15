@@ -11,14 +11,30 @@ pub struct SessionReport {
     pub presence_locks: usize,
     /// PIDs of processes whose name is exactly `agy`.
     pub agy_pids: Vec<u32>,
+    /// Why the check could not be completed (unreadable presence directory,
+    /// an empty process table). `None` means the answer is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uncertain: Option<String>,
 }
 
 impl SessionReport {
+    /// Positive evidence that agy is running.
     pub fn any(&self) -> bool {
         self.presence_locks > 0 || !self.agy_pids.is_empty()
     }
 
+    /// Whether the check actually completed. Automation defers when it did
+    /// not: "not detected" and "could not look" are different answers.
+    pub fn is_known(&self) -> bool {
+        self.uncertain.is_none()
+    }
+
     pub fn warning(&self) -> Option<String> {
+        if let Some(why) = &self.uncertain {
+            return Some(format!(
+                "could not check for running agy sessions ({why}); any session that IS running keeps its old login."
+            ));
+        }
         if !self.any() {
             return None;
         }
@@ -37,15 +53,27 @@ impl SessionReport {
 }
 
 pub fn detect(paths: &AgyPaths) -> SessionReport {
-    let presence_locks = std::fs::read_dir(paths.presence_dir())
-        .map(|rd| {
-            rd.filter_map(Result::ok)
+    // An AGY home that has never existed really has no sessions; one that
+    // exists but cannot be read is an unknown answer, never "no sessions".
+    let (presence_locks, uncertain) = match std::fs::read_dir(paths.presence_dir()) {
+        Ok(rd) => {
+            let count = rd
+                .filter_map(Result::ok)
                 .filter(|e| e.path().extension().is_some_and(|x| x == "lock"))
-                .count()
-        })
-        .unwrap_or(0);
+                .count();
+            (count, None)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (0, None),
+        Err(e) => (
+            0,
+            Some(format!(
+                "presence directory {}: {e}",
+                paths.presence_dir().display()
+            )),
+        ),
+    };
     let mut sys = System::new();
-    sys.refresh_processes(ProcessesToUpdate::All, true);
+    let seen = sys.refresh_processes(ProcessesToUpdate::All, true);
     let mut agy_pids: Vec<u32> = sys
         .processes()
         .iter()
@@ -53,8 +81,14 @@ pub fn detect(paths: &AgyPaths) -> SessionReport {
         .map(|(pid, _)| pid.as_u32())
         .collect();
     agy_pids.sort_unstable();
+    let uncertain = uncertain.or_else(|| {
+        // Every Unix host has at least an init process; zero means the
+        // process table could not be read, not that agy is absent.
+        (seen == 0 && agy_pids.is_empty()).then(|| "the process table could not be read".to_owned())
+    });
     SessionReport {
         presence_locks,
         agy_pids,
+        uncertain,
     }
 }

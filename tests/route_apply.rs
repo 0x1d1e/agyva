@@ -200,3 +200,74 @@ fn history_is_bounded_redacted_and_json_roundtrips() {
     let bounded = agyva::core::route_apply::tests_bounded_reason_for_docs(&long);
     assert!(bounded.chars().count() <= 201);
 }
+
+/// Concurrent recorders must not lose entries: `record` is a locked
+/// read-modify-write, so N threads appending N entries each end with 4N.
+#[test]
+fn concurrent_recorders_never_drop_an_entry() {
+    let rig = Rig::new();
+    let app = rig.app();
+    let dirs = app.dirs.clone();
+    const THREADS: usize = 4;
+    const PER_THREAD: usize = 5;
+    let mut handles = Vec::new();
+    for t in 0..THREADS {
+        let dirs = dirs.clone();
+        handles.push(std::thread::spawn(move || {
+            let history = RouteHistory::new(&dirs);
+            for i in 0..PER_THREAD {
+                history
+                    .record(agyva::core::route_apply::HistoryEntry {
+                        at: Utc::now(),
+                        group: Some(format!("g{t}")),
+                        target: format!("target-{t}-{i}"),
+                        outcome: HistoryOutcome::Applied,
+                        reason: "concurrent".into(),
+                    })
+                    .expect("record");
+            }
+        }));
+    }
+    for h in handles {
+        h.join().expect("thread");
+    }
+    let file = RouteHistory::new(&dirs).load();
+    assert_eq!(
+        file.entries.len(),
+        THREADS * PER_THREAD,
+        "every concurrent append survived"
+    );
+    let mut targets: Vec<&str> = file.entries.iter().map(|e| e.target.as_str()).collect();
+    targets.sort_unstable();
+    targets.dedup();
+    assert_eq!(targets.len(), THREADS * PER_THREAD);
+}
+
+/// Refusals carry the injected decision clock, never a second `Utc::now()`:
+/// history ordering must be deterministic under a fixed clock.
+#[test]
+fn refusals_are_stamped_with_the_injected_clock() {
+    let rig = Rig::new();
+    rig.add_all(&[BOB, ALICE]);
+    // An interrupted switch leaves a journal, which makes apply refuse.
+    let _ = rig
+        .app_with(agyva::core::failpoint::Failpoints::armed(
+            "after-native-write",
+            agyva::core::failpoint::Fault::Crash,
+        ))
+        .switch("bob", false);
+    let app = rig.app();
+    let now = Utc::now() - Duration::hours(5);
+    seed_fresh(&app, BOB, now);
+    write_group(&app, "[groups.work]\naccounts = ['bob']\n");
+    let history = RouteHistory::new(&app.dirs);
+    let err = app
+        .route_apply("work", false, true, &history, now)
+        .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::RecoveryRequired);
+    let entry = &history.load().entries[0];
+    assert_eq!(
+        entry.at, now,
+        "the refusal is stamped with the decision clock, not wall time"
+    );
+}

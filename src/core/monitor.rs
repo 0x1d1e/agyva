@@ -112,6 +112,13 @@ impl Probe for MonitorProbe<'_> {
                 .app
                 .refresh_active_at(false, now)
                 .is_ok_and(|o| matches!(o.status, crate::core::refresh::RefreshStatus::Refreshed));
+            // Keep the active account's model catalog current on the same
+            // tick so `--for-model` works without a manual `agyva models`.
+            // The call self-throttles on `models_cache_secs` and shares the
+            // refresh lock, so a fresh catalog means no spawn at all.
+            if let Err(e) = self.app.refresh_models_at(false, now) {
+                tracing::warn!("catalog refresh skipped: {}", e.message());
+            }
             self.last_refresh = Some(now);
         }
         let plan = self

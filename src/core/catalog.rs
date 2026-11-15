@@ -434,6 +434,77 @@ impl App {
     }
 }
 
+/// One account's cached catalog, as `agyva models` reports it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AccountCatalog {
+    pub id: String,
+    pub alias: String,
+    pub active: bool,
+    /// When the observation was made; `None` when there is no catalog yet.
+    pub observed_at: Option<DateTime<Utc>>,
+    /// Age of the observation in seconds (negative if the clock moved back).
+    pub age_secs: Option<i64>,
+    /// Within `models_cache_secs`, i.e. usable as `--for-model` proof.
+    pub fresh: bool,
+    /// `fresh` | `stale` | `missing`.
+    pub state: &'static str,
+    pub families: Vec<ModelFamily>,
+}
+
+impl App {
+    /// The cached model catalogs of every saved account, optionally after
+    /// one bounded refresh of the active account. Read-only on the refresh
+    /// path beyond that single `agy models` run.
+    pub fn models_report(&self, refresh: bool, now: DateTime<Utc>) -> Result<ModelsReport> {
+        let refresh = if refresh {
+            Some(self.refresh_models_at(true, now)?)
+        } else {
+            None
+        };
+        let reg = self.load_registry()?;
+        let cache = self.models_cache();
+        let accounts = reg
+            .accounts
+            .iter()
+            .map(|a| {
+                let state = cache.read_state(&a.id, self.config.models_cache_secs, now);
+                let observed_at = state.observed_at();
+                AccountCatalog {
+                    id: a.id.clone(),
+                    alias: a.alias.clone(),
+                    active: reg.active.as_deref() == Some(a.id.as_str()),
+                    observed_at,
+                    age_secs: observed_at.map(|at| (now - at).num_seconds()),
+                    fresh: state.is_fresh(),
+                    state: match state {
+                        CatalogState::Fresh(_) => "fresh",
+                        CatalogState::Stale(_) => "stale",
+                        CatalogState::Missing => "missing",
+                    },
+                    families: state.families().to_vec(),
+                }
+            })
+            .collect();
+        Ok(ModelsReport {
+            schema_version: 1,
+            generated_at: now,
+            refresh,
+            accounts,
+        })
+    }
+}
+
+/// `agyva models`: every saved account's cached catalog plus, when
+/// `--refresh` asked for one, what that run did.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ModelsReport {
+    pub schema_version: u32,
+    pub generated_at: DateTime<Utc>,
+    /// Present only for `--refresh`.
+    pub refresh: Option<ModelsRefresh>,
+    pub accounts: Vec<AccountCatalog>,
+}
+
 /// Outcome of a catalog refresh attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ModelsRefresh {

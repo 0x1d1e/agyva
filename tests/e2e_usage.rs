@@ -566,3 +566,144 @@ fn route_plan_and_inspect_json_expose_the_documented_shape() {
     assert_eq!(sj["accounts"][0]["eligible"], false);
     assert!(sj["accounts"][0]["remaining_percent"].as_f64().is_some());
 }
+
+/// `route apply --json` promises ONE JSON value on stdout: the prompt, the
+/// cancellation line and the "Switched to X" line are human-only. Without
+/// `--yes` there is no way to agree, so that combination is a usage error.
+#[test]
+fn route_apply_json_emits_exactly_one_json_value() {
+    fn single_value(sb: &Sandbox, args: &[&str]) -> serde_json::Value {
+        let r = sb.run(args);
+        assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+        let mut values =
+            serde_json::Deserializer::from_str(&r.out).into_iter::<serde_json::Value>();
+        let first = values
+            .next()
+            .unwrap_or_else(|| panic!("no JSON on stdout: {:?}", r.out))
+            .expect("valid JSON");
+        assert!(
+            values.next().is_none(),
+            "stdout must hold exactly one JSON value, got: {:?}",
+            r.out
+        );
+        assert!(
+            !r.out.contains("Switched to") && !r.out.contains("Cancelled"),
+            "human lines must not reach a --json stdout: {:?}",
+            r.out
+        );
+        first
+    }
+
+    let sb = Sandbox::new();
+    sb.with_account();
+    sb.fake.ok(0.72, 0.4);
+    std::fs::write(
+        sb.p("cfg/routing.toml"),
+        "[groups.work]\naccounts = [\"alice\"]\n",
+    )
+    .expect("routing.toml");
+    let warm = sb.run(&["usage"]);
+    assert_eq!(warm.code, 0, "{}{}", warm.out, warm.err);
+
+    // Without --yes: exit 2, nothing on stdout, the reason on stderr.
+    let r = sb.run(&["route", "apply", "work", "--json"]);
+    assert_eq!(r.code, 2, "expected a usage error: {}{}", r.out, r.err);
+    assert!(r.out.is_empty(), "stdout must stay empty: {:?}", r.out);
+    assert!(
+        r.err.contains("--yes"),
+        "stderr explains the fix: {:?}",
+        r.err
+    );
+
+    // With --yes: exactly one JSON value, no human lines.
+    let v = single_value(&sb, &["route", "apply", "work", "--json", "--yes"]);
+    assert_eq!(v["group"], "work");
+    assert_eq!(v["target_alias"], "alice");
+    assert_eq!(v["changed"], false, "alice was already active");
+    assert_eq!(v["already_active"], true);
+}
+
+/// `route history --json` is the same bounded document a human sees: it
+/// honours `--limit` instead of dumping the whole retained log.
+#[test]
+fn route_history_json_honours_limit() {
+    let sb = Sandbox::new();
+    sb.with_account();
+    sb.fake.ok(0.72, 0.4);
+    std::fs::write(
+        sb.p("cfg/routing.toml"),
+        "[groups.work]\naccounts = [\"alice\"]\n",
+    )
+    .expect("routing.toml");
+    let warm = sb.run(&["usage"]);
+    assert_eq!(warm.code, 0, "{}{}", warm.out, warm.err);
+    // Each apply records exactly one entry, so repeat them to build a log.
+    for _ in 0..4 {
+        let r = sb.run(&["route", "apply", "work", "--yes"]);
+        assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+    }
+    let all = json(&sb.run(&["route", "history", "--json"]));
+    assert_eq!(all["entries"].as_array().unwrap().len(), 4);
+
+    let two = sb.run(&["route", "history", "--json", "--limit", "2"]);
+    assert_eq!(two.code, 0, "{}{}", two.out, two.err);
+    let v = json(&two);
+    let entries = v["entries"].as_array().expect("entries array");
+    assert_eq!(entries.len(), 2, "--json honours --limit: {:?}", two.out);
+    // Newest first, matching the human rendering.
+    let human = sb.run(&["route", "history", "--limit", "2"]);
+    assert_eq!(human.code, 0, "{}{}", human.out, human.err);
+    assert_eq!(
+        human.out.lines().filter(|l| l.contains("applied")).count(),
+        2,
+        "{}",
+        human.out
+    );
+    for entry in entries {
+        assert_eq!(entry["outcome"], "applied");
+        assert_eq!(entry["group"], "work");
+    }
+}
+
+/// `route list` reports each group's REAL activation mode, not a blanket
+/// "manual", and spells the ranking the way `routing.toml` does.
+#[test]
+fn route_list_reports_real_activation_mode() {
+    let sb = Sandbox::new();
+    sb.with_account();
+    std::fs::write(
+        sb.p("cfg/routing.toml"),
+        "[groups.manual]\naccounts = [\"alice\"]\nranking = \"least-used\"\n\
+         [groups.opted]\naccounts = [\"alice\"]\nauto_switch = true\n",
+    )
+    .expect("routing.toml");
+
+    // Policy not acknowledged yet: opted-in is reported as pending the ack.
+    let r = sb.run(&["route", "list"]);
+    assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+    assert!(
+        r.out.contains("manual: least-used, manual activation"),
+        "{}",
+        r.out
+    );
+    assert!(
+        r.out.contains("auto_switch_ack"),
+        "an opted-in group names the missing acknowledgement: {}",
+        r.out
+    );
+
+    let ack = sb.run(&["config", "set", "auto_switch_ack", "true"]);
+    assert_eq!(ack.code, 0, "{}{}", ack.out, ack.err);
+    let r = sb.run(&["route", "list"]);
+    assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+    assert!(
+        r.out.contains("auto-switch enabled (acknowledged)"),
+        "an enabled group is not reported as manual: {}",
+        r.out
+    );
+    assert!(
+        !r.out.contains("opted]") || !r.out.contains("opted: smart, manual activation"),
+        "{}",
+        r.out
+    );
+}

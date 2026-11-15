@@ -54,12 +54,14 @@ pub struct HistoryFile {
 /// Bounded, redacted decision history at `<state>/route-history.json`.
 pub struct RouteHistory {
     file: PathBuf,
+    lock: PathBuf,
 }
 
 impl RouteHistory {
     pub fn new(dirs: &Dirs) -> Self {
         Self {
             file: dirs.state.join("route-history.json"),
+            lock: dirs.state.join("route-history.lock"),
         }
     }
 
@@ -67,27 +69,40 @@ impl RouteHistory {
         &self.file
     }
 
-    /// Lenient load: junk or unknown versions read as empty history.
+    /// Lenient load: junk or unknown versions read as empty history. An
+    /// absent file still reports the current schema version, so `--json`
+    /// never presents an empty log as a different contract.
     pub fn load(&self) -> HistoryFile {
+        let empty = || HistoryFile {
+            schema_version: HISTORY_SCHEMA,
+            entries: Vec::new(),
+        };
         let Ok(bytes) = fsutil::read_optional(&self.file) else {
-            return HistoryFile::default();
+            return empty();
         };
         let Some(bytes) = bytes else {
-            return HistoryFile::default();
+            return empty();
         };
         if bytes.len() > MAX_HISTORY_BYTES {
-            return HistoryFile::default();
+            return empty();
         }
         match serde_json::from_slice::<HistoryFile>(&bytes) {
             Ok(f) if f.schema_version == HISTORY_SCHEMA => f,
-            _ => HistoryFile::default(),
+            _ => empty(),
         }
     }
 
+    /// Append one entry. Load → push → write happens under a state lock:
+    /// `route apply` and monitor automation may record concurrently, and an
+    /// unlocked read-modify-write would drop one side's entry.
     pub fn record(&self, entry: HistoryEntry) -> Result<()> {
         if let Some(dir) = self.file.parent() {
             fsutil::create_private_dir(dir).map_err(|e| Error::io("creating state dir", e))?;
         }
+        let _guard = crate::storage::lock::StateLock::acquire(
+            &self.lock,
+            std::time::Duration::from_secs(3),
+        )?;
         let mut file = self.load();
         file.schema_version = HISTORY_SCHEMA;
         file.entries.push(entry);
@@ -194,6 +209,7 @@ impl App {
                     group,
                     &plan.target_id,
                     "recommendation changed while preparing the switch",
+                    now,
                 ))?;
                 return Err(Error::refused(format!(
                     "the recommendation for `{group}` changed while preparing the switch (now {}); re-run `agyva route plan {group}`",
@@ -205,6 +221,7 @@ impl App {
                     group,
                     &plan.target_id,
                     "an interrupted switch awaits recovery",
+                    now,
                 ))?;
                 return Err(Error::recovery_required(format!(
                     "an interrupted switch to account {} ({}) must be recovered first",
@@ -228,6 +245,7 @@ impl App {
                     group,
                     &plan.target_id,
                     "cached evidence no longer supports the recommendation",
+                    now,
                 ))?;
                 return Err(Error::refused(format!(
                     "cached evidence no longer supports `{}` as the recommendation for `{group}`; refresh and re-plan, or pass --force",
@@ -271,9 +289,11 @@ pub fn tests_bounded_reason_for_docs(text: &str) -> String {
     bounded_reason(text)
 }
 
-fn refused_entry(group: &str, target: &str, why: &str) -> HistoryEntry {
+/// A refusal stamped with the decision clock, so an injected clock makes
+/// history ordering deterministic (never a second `Utc::now()`).
+fn refused_entry(group: &str, target: &str, why: &str, now: DateTime<Utc>) -> HistoryEntry {
     HistoryEntry {
-        at: Utc::now(),
+        at: now,
         group: Some(group.to_owned()),
         target: target.to_owned(),
         outcome: HistoryOutcome::Refused,

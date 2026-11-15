@@ -164,16 +164,20 @@ pub fn decide(
             MIN_SWITCH_INTERVAL.as_secs()
         ));
     }
-    // Session gate: detected sessions defer; an unknown detection outcome
-    // (process table unreadable) also defers.
-    match crate::agy::sessions::detect(&app.agy).warning() {
-        None => {}
-        Some(_) => {
-            return AutoDecision::Defer(
-                "agy sessions detected (or detection uncertain); switching would not retarget them"
-                    .to_owned(),
-            );
-        }
+    // Session gate: detected sessions defer, and so does an UNKNOWN answer
+    // (unreadable presence directory or process table): automation never
+    // treats "could not look" as "nothing is running".
+    let sessions = crate::agy::sessions::detect(&app.agy);
+    if !sessions.is_known() {
+        return AutoDecision::Defer(format!(
+            "could not determine whether agy sessions are running ({}); refusing to switch blind",
+            sessions.uncertain.as_deref().unwrap_or("unknown cause")
+        ));
+    }
+    if sessions.any() {
+        return AutoDecision::Defer(
+            "agy sessions detected; switching would not retarget them".to_owned(),
+        );
     }
     // Candidate: the plan's top eligible row, which must be fresh and not
     // the active account. `rank()` already blocks TermsSuspended and other

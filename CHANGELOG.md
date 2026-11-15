@@ -48,18 +48,26 @@ Routing, route automation, transfer and self-update, building on `0.1.0`.
   reference list is descriptive only. User-declared quota-group mappings
   (`[groups.X.models]`) apply the requested family's windows, specific pools
   before broad ones; plans stay user-declared, never inferred.
+- `agyva models [--refresh] [--json]`: the cached model catalog behind
+  `--for-model` — each account's families, observation age and freshness.
+  Without `--refresh` it never runs agy; `--refresh` forces one bounded
+  `agy models` run for the active account only (refresh lock, attribution
+  checked before and after, prior observation kept on failure).
 - `agyva monitor [--interval 15s] [--group NAME] [--for-model FAMILY]`: a
   route-aware foreground monitor. Evaluation is cache-only (default every
   15s; `15s`/`30`/`2m`/`1h`, 5s floor) and shows the sticky recommendation,
   every account's share, freshness and exclusion reason, and the next weekly
   reset countdown; the active account refreshes on a single-flight 300s
-  cadence. Never switches by itself.
+  cadence, and the same tick keeps the active account's model catalog
+  current on the `models_cache_secs` throttle (no spawn while fresh). Never
+  switches by itself.
 - `ranking = "least-used"` in `routing.toml`: orders eligible accounts by
   declared-plan share used (free < pro < ultra); without declared plans it
   degrades to `smart`'s ordering, stated in the docs — never an imagined
   absolute capacity. `smart` remains the default.
 - `agyva route apply GROUP`: activate a group's recommended account with one
-  journaled switch, confirmed by default (`--yes` non-interactively) and
+  journaled switch, confirmed by default (`--yes` non-interactively; with
+  `--json` it is required, so stdout stays one JSON value) and
   revalidated under the lock against pending recovery, a changed group file
   and evidence drift before any mutation. `agyva route history` shows a
   bounded, redacted log of routing decisions (applied/refused/failed with
@@ -86,6 +94,17 @@ Routing, route automation, transfer and self-update, building on `0.1.0`.
 
 ### Fixed
 
+- `--for-model` no longer excludes an account whose requested family still has
+  quota just because an unrelated group is exhausted: catalog support and the
+  mapped group's windows are evaluated first, and eligibility plus the
+  headline share come from that group.
+- `route history --json` honours `--limit` like the human table, `route apply
+  --json` emits exactly one JSON value (warnings go to stderr), refusals are
+  stamped with the decision clock, and concurrent `RouteHistory` writers are
+  serialized by a state lock instead of losing entries.
+- Session detection reports "unknown" (unreadable presence directory or
+  process table) instead of "no sessions": auto-switch defers and `doctor`
+  warns rather than claiming nothing is running.
 - Terminal overlays pin confirmation/cancel controls on short screens and scroll
   wrapped Help/Details content. Usage and Diagnostics scroll to their rendered
   final row, including after repeated page navigation.

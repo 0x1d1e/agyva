@@ -198,3 +198,56 @@ pub fn render_event(at: DateTime<Utc>, e: &WatchEvent) -> String {
     };
     format!("{ts} {body}")
 }
+
+/// `agyva models`: each account's cached catalog, families indented under it.
+pub fn render_models(r: &crate::core::catalog::ModelsReport, st: Style) -> String {
+    use crate::core::catalog::ModelsRefreshStatus;
+    if r.accounts.is_empty() {
+        return "No saved accounts. Log in with `agy`, then run `agyva add`.\n".to_owned();
+    }
+    let mut out = String::new();
+    if let Some(refresh) = &r.refresh {
+        let line = match (&refresh.status, &refresh.note) {
+            (ModelsRefreshStatus::Refreshed, _) => "Catalog refreshed from agy models.".to_owned(),
+            (_, Some(note)) => format!("Catalog not refreshed: {note}"),
+            _ => "Catalog refresh failed.".to_owned(),
+        };
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out.push_str(&st.dim(&format!(
+        "{:<3} {:<18} {:<8} {:<12} FAMILIES",
+        "#", "ALIAS", "STATE", "OBSERVED"
+    )));
+    out.push('\n');
+    for a in &r.accounts {
+        let observed = a
+            .observed_at
+            .map_or_else(|| "never".to_owned(), |t| ago(r.generated_at, t));
+        let line = format!(
+            "{}{:<2} {} {} {} {}",
+            if a.active { "*" } else { " " },
+            r.accounts.iter().position(|x| x.id == a.id).unwrap_or(0) + 1,
+            fit(&a.alias, 18),
+            fit(a.state, 8),
+            fit(&observed, 12),
+            a.families.len()
+        );
+        out.push_str(&if a.active { st.bold(&line) } else { line });
+        out.push('\n');
+        for family in &a.families {
+            let variants = if family.variants.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", family.variants.join(", "))
+            };
+            out.push_str(&format!("      {}{variants}\n", family.id));
+        }
+        if a.families.is_empty() {
+            out.push_str(
+                "      (no catalog; `agyva models --refresh` records one for the active account)\n",
+            );
+        }
+    }
+    out
+}
