@@ -101,8 +101,10 @@ Routing, route automation, transfer and self-update, building on `0.1.0`.
   (`gemini-4-carbon-high`, any case) now inherits its family's declared
   mapping instead of falling back to the whole-account verdict; a standalone
   id that merely ends in an effort word keeps its own identity. Rows are
-  re-ranked on the mapped numbers (ineligible last, then the group's ranking,
-  then its listed order), so position always agrees with the printed share.
+  re-ranked on the mapped numbers, so position always agrees with the printed
+  share: `smart` by tier, `priority` and `least-used` demoting only ineligible
+  accounts and then applying their declared order — a rate-capped `free`
+  account is never displaced by an `ultra` one.
 - A family the catalog offers but no group maps is excluded with the fix
   spelled out, instead of inheriting whole-account eligibility that says
   nothing about that family.
@@ -111,11 +113,13 @@ Routing, route automation, transfer and self-update, building on `0.1.0`.
   same family rather than the whole account.
 - The monitor's `agy models` tick respects the suspension marker, the cached
   `TermsSuspended` health and the agy compatibility gate: a suspended or
-  unverified account is never spawned against from a background tick.
+  unverified account is never spawned against from a background tick, and the
+  skip note names `--allow-untested` as the bypass (a refresh never is).
 - The catalog cache is pruned with the quota cache and on `agyva rm`, so dead
   account ids no longer linger in `cache/models.json`.
-- A routing refusal is no longer masked by history-lock contention: recording
-  the line is best-effort, so the user sees the real refusal.
+- A routing refusal — and an auto-switch hold or defer — is no longer masked
+  by history-lock contention: recording the line is best-effort, so the user
+  sees the real decision instead of "another agyva is running".
 - `route history --json` honours `--limit` like the human table, `route apply
   --json` emits exactly one JSON value (warnings go to stderr), refusals are
   stamped with the decision clock, and concurrent `RouteHistory` writers are

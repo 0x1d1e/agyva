@@ -398,11 +398,17 @@ impl App {
             }
         }
         // Same compatibility gate as `add`/`switch`: an agy build we were
-        // never verified against is not spawned from a background tick.
+        // never verified against is not spawned at all. Like the quota
+        // reader, `--force` does not bypass this gate — only the explicit
+        // `--allow-untested` / `allow_untested_agy` opt-in does, so the note
+        // names that instead of suggesting a check that would refuse again.
         if let Err(e) = self.require_compat() {
             return Ok(ModelsRefresh::skipped(
                 id,
-                format!("{}; catalog refresh skipped", e.message()),
+                format!(
+                    "{}; catalog refresh skipped (see `agyva version`; `--allow-untested` opts in)",
+                    e.message()
+                ),
             ));
         }
         // Same attribution rule as quota: only the account agy is logged in

@@ -688,3 +688,56 @@ fn auto_switch_activates_the_family_capable_account_not_the_overall_best() {
         "the journal names alice"
     );
 }
+
+/// The under-lock hold paths must keep their decision when the history lock
+/// is contended: the operator needs "cooldown re-check failed" (or "disabled
+/// while preparing"), not "another agyva is running". A manual switch lands
+/// between `decide` and the lock, which is exactly what the re-check exists
+/// to catch.
+#[test]
+fn hold_survives_history_lock_contention() {
+    use agyva::storage::lock::StateLock;
+
+    let rig = Rig::new();
+    // bob is added last, so bob is ACTIVE; alice is the healthy candidate.
+    rig.add_all(&[ALICE, BOB]);
+    let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
+    fake.ok(0.5, 0.5);
+    let mut app = rig.app_with_agy(&fake);
+    let now = Utc::now();
+    seed(&app, BOB, now, 20.0, AccountHealth::Healthy);
+    seed(&app, ALICE, now, 90.0, AccountHealth::Healthy);
+    enable_auto(&mut app, true);
+    let plan = fresh_plan(&app, now);
+    assert!(
+        matches!(
+            decide(&app, "work", &plan, true, now),
+            AutoDecision::Switch { .. }
+        ),
+        "fixture: automation would switch"
+    );
+    // A manual switch lands after the decision: the under-lock re-check must
+    // hold, and that hold must survive the contended history lock.
+    let _ = note_switch(&app.dirs, now, false);
+
+    let history = RouteHistory::new(&app.dirs);
+    let lock_path = app.dirs.state.join("route-history.lock");
+    let held = std::thread::spawn(move || {
+        let guard = StateLock::acquire(&lock_path, std::time::Duration::from_millis(500)).ok();
+        std::thread::sleep(std::time::Duration::from_millis(3500));
+        drop(guard);
+    });
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    let started = std::time::Instant::now();
+    let out = app
+        .auto_switch_for("work", &plan, None, true, &history, now)
+        .unwrap();
+    let waited = started.elapsed();
+    let _ = held.join();
+    assert!(out.is_none(), "a hold is not a switch");
+    assert_eq!(rig.live_id(), Some(id_of(BOB)), "no switch happened");
+    assert!(
+        waited >= std::time::Duration::from_secs(2),
+        "the test really did contend for the history lock (waited {waited:?})"
+    );
+}

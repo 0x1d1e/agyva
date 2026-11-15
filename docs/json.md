@@ -61,12 +61,13 @@ recommendation is an account id or `null`. Each account row carries `id`,
 two reset timestamps, each possibly `null`), `why` (a human reason, the
 machine-readable eligibility signal) and `command`. Rows are ranked
 best-first with ineligible accounts last — including under `--for-model`,
-where the order is recomputed from the mapped group's windows (then the
-group's own ranking, then its listed order), so a row's `remaining_percent`
-always reads consistently with its position. `remaining_percent` is the raw
-cached value even when `eligible` is false; the human tables print `-`
-instead, so only an eligible row's share reads as available quota. `agyva
-route history --json [--limit N]`
+where the order is recomputed from the mapped group's windows and then the
+group's own ranking (`smart` by tier; `priority` and `least-used` demoting
+only ineligible rows before applying their declared order; ties by the listed
+order), so a row's `remaining_percent` always reads consistently with its
+position. `remaining_percent` is the raw cached value even when `eligible`
+is false; the human tables print `-` instead, so only an eligible row's
+share reads as available quota. `agyva route history --json [--limit N]`
 returns `{"schema_version", "entries"}` with `at`, `target`, `outcome`
 (`applied`, `refused`, `failed`), an optional `group` and a bounded `reason`
 per entry (automatic decisions included), newest first and clamped to

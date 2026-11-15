@@ -1068,13 +1068,16 @@ fn untested_agy_version_skips_the_models_tick() {
         out.status,
         agyva::core::catalog::ModelsRefreshStatus::Skipped
     );
+    let note = out.note.clone().unwrap_or_default();
     assert!(
-        out.note
-            .as_deref()
-            .unwrap_or_default()
-            .contains("unparseable"),
-        "the note carries the compat refusal: {:?}",
-        out.note
+        note.contains("unparseable"),
+        "the note carries the compat refusal: {note:?}"
+    );
+    // The escape hatch is the untested opt-in, not another refresh: `--force`
+    // does not bypass the compat gate (same as the quota reader).
+    assert!(
+        note.contains("--allow-untested") && !note.contains("--refresh"),
+        "the note names the real escape hatch: {note:?}"
     );
     assert_eq!(fake.model_calls(), 0, "unsupported agy is never spawned");
 }
@@ -1159,4 +1162,129 @@ fn quota_refresh_prunes_the_catalog_cache() {
             .contains_key(&id_of(ALICE)),
         "the live entry survives"
     );
+}
+
+/// `least-used` and `priority` exist to spend the cheaper / preferred
+/// account first. The `--for-model` re-rank must not demote by tier before
+/// the group's ranking: a rate-capped `free` account (tier 1) must still
+/// come before an `ultra` one (tier 0), or the filtered plan spends the
+/// expensive plan the plain plan avoided.
+#[test]
+fn for_model_keeps_least_used_and_priority_plans_ahead_of_tier() {
+    use agyva::core::quota::{ModelQuota, QuotaSource, QuotaWindow};
+
+    let rig = Rig::new();
+    rig.add_all(&[ALICE, BOB]);
+    let app = rig.app();
+    let now = Utc::now();
+    let window = |pct: f64, reset_in: Duration| QuotaWindow {
+        remaining_percent: pct,
+        reset_at: Some(now + reset_in),
+        observed_at: now,
+        source: QuotaSource::AgyUsageCommand,
+    };
+    // alice: 60% weekly, but a 5% five-hour cap → tier 1 under `smart`.
+    // bob: 40/40 → tier 0.
+    let alice = agyva::core::quota_cache::CacheEntry {
+        quota: Some(agyva::core::quota_cache::CachedQuota {
+            observed_at: now,
+            groups: vec![ModelQuota {
+                group: "Gemini Pro".into(),
+                model: None,
+                disabled: false,
+                five_hour: Some(window(5.0, Duration::hours(2))),
+                weekly: Some(window(60.0, Duration::hours(20))),
+            }],
+        }),
+        ..Default::default()
+    };
+    let bob = agyva::core::quota_cache::CacheEntry {
+        quota: Some(agyva::core::quota_cache::CachedQuota {
+            observed_at: now,
+            groups: vec![ModelQuota {
+                group: "Gemini Pro".into(),
+                model: None,
+                disabled: false,
+                five_hour: Some(window(40.0, Duration::hours(3))),
+                weekly: Some(window(40.0, Duration::hours(30))),
+            }],
+        }),
+        ..Default::default()
+    };
+    app.quota_cache()
+        .update(|c| {
+            c.accounts.insert(id_of(ALICE), alice);
+            c.accounts.insert(id_of(BOB), bob);
+        })
+        .unwrap();
+    for who in [ALICE, BOB] {
+        ModelsCache::new(&app.dirs)
+            .record(
+                &id_of(who),
+                vec![agyva::agy::models::ModelFamily {
+                    id: "gemini-4-carbon".into(),
+                    display_name: "Gemini 4 Carbon".into(),
+                    variants: vec!["high".into()],
+                }],
+                now,
+            )
+            .unwrap();
+    }
+
+    // least-used: alice is on the cheaper plan and must stay ahead.
+    std::fs::write(
+        app.dirs.config.join("routing.toml"),
+        "[groups.work]\nranking = 'least-used'\naccounts = ['alice', 'bob']\n\
+         plans = { alice = 'free', bob = 'ultra' }\n\
+         [groups.work.models]\n'gemini-4-carbon' = 'Gemini Pro'\n",
+    )
+    .unwrap();
+    let plain = app.route_group_at(Some("work"), now).unwrap();
+    assert_eq!(plain.recommendation, Some(id_of(ALICE)));
+    let plan = app
+        .route_group_for(Some("work"), Some("gemini-4-carbon"), now)
+        .unwrap();
+    let order: Vec<&str> = plan.accounts.iter().map(|r| r.alias.as_str()).collect();
+    assert_eq!(
+        order,
+        ["alice", "bob"],
+        "least-used stays authoritative under --for-model (no tier demotion)"
+    );
+    assert_eq!(
+        plan.recommendation,
+        Some(id_of(ALICE)),
+        "the cheap plan is the one applied"
+    );
+
+    // priority: alice is the user's preferred account and must stay ahead.
+    std::fs::write(
+        app.dirs.config.join("routing.toml"),
+        "[groups.work]\nranking = 'priority'\naccounts = ['alice', 'bob']\n[groups.work.priorities]\n\
+         alice = 10\nbob = 1\n[groups.work.models]\n'gemini-4-carbon' = 'Gemini Pro'\n",
+    )
+    .unwrap();
+    let plain = app.route_group_at(Some("work"), now).unwrap();
+    assert_eq!(plain.recommendation, Some(id_of(ALICE)));
+    let plan = app
+        .route_group_for(Some("work"), Some("gemini-4-carbon"), now)
+        .unwrap();
+    let order: Vec<&str> = plan.accounts.iter().map(|r| r.alias.as_str()).collect();
+    assert_eq!(
+        order,
+        ["alice", "bob"],
+        "declared priority stays authoritative under --for-model"
+    );
+    assert_eq!(plan.recommendation, Some(id_of(ALICE)));
+
+    // Smart keeps its tier-first behaviour: the rate cap demotes alice.
+    std::fs::write(
+        app.dirs.config.join("routing.toml"),
+        "[groups.work]\nranking = 'smart'\naccounts = ['alice', 'bob']\n[groups.work.models]\n'gemini-4-carbon' = 'Gemini Pro'\n",
+    )
+    .unwrap();
+    let plan = app
+        .route_group_for(Some("work"), Some("gemini-4-carbon"), now)
+        .unwrap();
+    let order: Vec<&str> = plan.accounts.iter().map(|r| r.alias.as_str()).collect();
+    assert_eq!(order, ["bob", "alice"], "smart still ranks by tier");
 }

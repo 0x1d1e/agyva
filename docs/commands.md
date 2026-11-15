@@ -61,6 +61,11 @@ account can refresh. [Windows, groups and freshness](antigravity.md#read-quota-a
 transient failures, and never switches or warms quota windows. Optional desktop
 notifications contain an alias and state, not credentials.
 
+`agyva models --refresh` runs `agy models` for the active account under the
+same version gate as every write path: an untested agy is skipped, and
+`--allow-untested` (or `allow_untested_agy = true`) is the only bypass:
+`--refresh` does not override the gate.
+
 `agyva monitor [--interval 15s] [--group NAME] [--for-model FAMILY]` is the
 route-aware variant: every tick re-ranks the cached evidence (never an agy
 spawn) and prints the sticky pick plus each account's share, freshness and
@@ -123,10 +128,12 @@ excluded with a reason naming that fix — the whole-account share is not
 evidence about a family no local group pays for. When a group does map to
 the family (declared mapping first, then group names), the ranked share and
 eligibility follow that group's windows — an exhausted unrelated bucket
-cannot hide a usable one — and rows are re-ranked on those numbers:
-ineligible accounts last, then the group's ranking (smart by tier,
-freshness and renewal; priority by declared number; least-used by declared
-plan), then the group's listed order.
+cannot hide a usable one — and rows are re-ranked on those numbers.
+`smart` ranks by tier, freshness and renewal; `priority` and `least-used`
+demote only ineligible accounts and then apply their own order (declared
+number, declared plan), exactly as the unfiltered plan does, so a cheap or
+preferred account is never displaced by a rate cap; ties keep the group's
+listed order.
 
 `agyva route apply GROUP` activates the group's recommended account through
 the same journaled, checkpointed switch as `agyva use` — exactly one switch,

@@ -272,8 +272,10 @@ impl App {
     /// quota is healthy is eligible even if another bucket on the same
     /// account is empty. Health and a missing reading still block. Because
     /// every row's evidence changed, the plan is then RE-RANKED on the
-    /// re-scoped values (ineligible last, then the group's ranking, then its
-    /// listed order, then the id), so ordering never contradicts the share.
+    /// re-scoped values using the group's own rule (`smart`: tier, freshness,
+    /// renewal; `priority`/`least-used`: ineligible last, then the declared
+    /// order; ties by listed order, then id), so ordering never contradicts
+    /// the share.
     pub fn route_group_for(
         &self,
         group: Option<&str>,
@@ -497,10 +499,24 @@ impl App {
                 .unwrap_or_default()
         };
         let ranking = group_config.as_ref().map(|g| g.ranking).unwrap_or_default();
+        // The demotion key must match `route_group_at`: Priority and
+        // LeastUsed demote ONLY the ineligible, and their ranking decides
+        // the rest. Applying the full `tier()` first would make a rate-capped
+        // `free` account fall below an `ultra` one — spending exactly the
+        // expensive plan `least-used` exists to avoid, and inverting the
+        // `priority` order the user declared.
+        let smart = ranking == crate::core::route_config::Ranking::Smart;
+        let demotion = |row: &RouteRow| -> u8 {
+            if smart {
+                tier(row)
+            } else {
+                u8::from(!row.eligible)
+            }
+        };
         plan.accounts.sort_by(|a, b| {
-            let by_tier = tier(a).cmp(&tier(b));
-            if by_tier != Ordering::Equal {
-                return by_tier;
+            let by_demotion = demotion(a).cmp(&demotion(b));
+            if by_demotion != Ordering::Equal {
+                return by_demotion;
             }
             let by_ranking = match ranking {
                 crate::core::route_config::Ranking::Priority => {
@@ -512,17 +528,22 @@ impl App {
             if by_ranking != Ordering::Equal {
                 return by_ranking;
             }
+            if !smart {
+                // Priority/least-used decide the order above; ties keep the
+                // plain plan's order (`declared_order` is post-`route_group_at`,
+                // so this is a stable refinement of what `route plan` shows),
+                // and the id makes it total.
+                return declared_order
+                    .iter()
+                    .position(|id| id == &a.id)
+                    .cmp(&declared_order.iter().position(|id| id == &b.id))
+                    .then_with(|| a.id.cmp(&b.id));
+            }
             freshness_rank(a.freshness)
                 .cmp(&freshness_rank(b.freshness))
                 .then_with(|| {
-                    if tier(a) == 0 {
-                        known_time(a.renewals[0], b.renewals[0])
-                            .then_with(|| known_time(a.renewals[1], b.renewals[1]))
-                    } else {
-                        b.remaining_percent
-                            .partial_cmp(&a.remaining_percent)
-                            .unwrap_or(Ordering::Equal)
-                    }
+                    known_time(a.renewals[0], b.renewals[0])
+                        .then_with(|| known_time(a.renewals[1], b.renewals[1]))
                 })
                 .then_with(|| {
                     declared_order

@@ -130,6 +130,18 @@ fn record_once(history: &RouteHistory, entry: HistoryEntry) -> Result<()> {
     history.record(entry)
 }
 
+/// A hold is a decision, and a contended history lock must not replace it
+/// with "another agyva is running" — the same rule `route_apply` follows for
+/// its refusals. One of these runs while `auto_switch_for` holds the login
+/// lock (the under-lock re-checks), where the confusion is worst. Recording
+/// is best effort; `record_once`'s dedupe still applies, and the
+/// applied/failed path keeps propagating its errors.
+fn record_hold_best_effort(history: &RouteHistory, entry: HistoryEntry) {
+    if let Err(e) = record_once(history, entry) {
+        tracing::warn!("could not record the auto-switch hold: {}", e.message());
+    }
+}
+
 /// Evaluate the auto-switch decision for `group` against fresh evidence.
 /// `plan` must come from a run whose active account was just refreshed
 /// (`RefreshStatus::Refreshed`); the caller passes `refreshed` to prove it.
@@ -210,7 +222,7 @@ impl crate::core::app::App {
     ) -> Result<Option<crate::core::route_apply::ApplyOutcome>> {
         match decide(self, group, plan, refreshed, now) {
             AutoDecision::Hold(reason) => {
-                record_once(
+                record_hold_best_effort(
                     history,
                     HistoryEntry {
                         at: now,
@@ -219,11 +231,11 @@ impl crate::core::app::App {
                         outcome: HistoryOutcome::Refused,
                         reason: format!("auto-switch held: {reason}"),
                     },
-                )?;
+                );
                 Ok(None)
             }
             AutoDecision::Defer(reason) => {
-                record_once(
+                record_hold_best_effort(
                     history,
                     HistoryEntry {
                         at: now,
@@ -232,7 +244,7 @@ impl crate::core::app::App {
                         outcome: HistoryOutcome::Refused,
                         reason: format!("auto-switch deferred: {reason}"),
                     },
-                )?;
+                );
                 Ok(None)
             }
             AutoDecision::Switch { id, .. } => {
@@ -244,7 +256,7 @@ impl crate::core::app::App {
                     let _lock = self.lock_login()?;
                     let config = RoutingFile::load(&self.dirs.config.join("routing.toml"))?;
                     if !enabled_for(self, group, &config)? {
-                        record_once(
+                        record_hold_best_effort(
                             history,
                             HistoryEntry {
                                 at: now,
@@ -253,13 +265,13 @@ impl crate::core::app::App {
                                 outcome: HistoryOutcome::Refused,
                                 reason: "auto-switch held: disabled while preparing".into(),
                             },
-                        )?;
+                        );
                         return Ok(None);
                     }
                     let st = AutoState::load(&self.dirs);
                     let min = chrono::Duration::from_std(MIN_SWITCH_INTERVAL).unwrap_or_default();
                     if st.last_any_switch.is_some_and(|last| now - last < min) {
-                        record_once(
+                        record_hold_best_effort(
                             history,
                             HistoryEntry {
                                 at: now,
@@ -268,7 +280,7 @@ impl crate::core::app::App {
                                 outcome: HistoryOutcome::Refused,
                                 reason: "auto-switch held: cooldown re-check failed".into(),
                             },
-                        )?;
+                        );
                         return Ok(None);
                     }
                     if let Some(p) = self.pending_journal()? {
