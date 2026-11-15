@@ -44,6 +44,16 @@ tagged; release artifacts are built by pushing a `v*` tag (see
   reference list is descriptive only. User-declared quota-group mappings
   (`[groups.X.models]`) apply the requested family's windows, specific pools
   before broad ones; plans stay user-declared, never inferred.
+- `agyva monitor [--interval 15s] [--group NAME] [--for-model FAMILY]`: a
+  route-aware foreground monitor. Evaluation is cache-only (default every
+  15s; `15s`/`30`/`2m`/`1h`, 5s floor) and shows the sticky recommendation,
+  every account's share, freshness and exclusion reason, and the next weekly
+  reset countdown; the active account refreshes on a single-flight 300s
+  cadence. Never switches by itself.
+- `ranking = "least-used"` in `routing.toml`: orders eligible accounts by
+  declared-plan share used (free < pro < ultra); without declared plans it
+  degrades to `smart`'s ordering, stated in the docs — never an imagined
+  absolute capacity. `smart` remains the default.
 - `agyva route apply GROUP`: activate a group's recommended account with one
   journaled switch, confirmed by default (`--yes` non-interactively) and
   revalidated under the lock against pending recovery, a changed group file

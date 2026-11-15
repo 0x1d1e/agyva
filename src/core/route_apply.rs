@@ -156,6 +156,7 @@ impl App {
         let session_warning = crate::agy::sessions::detect(&self.agy).warning();
         let ranking = match g.ranking {
             Ranking::Priority => "priority order",
+            Ranking::LeastUsed => "least-used ranking",
             Ranking::Smart => "smart ranking",
         };
         Ok(ApplyPlan {

@@ -1,10 +1,10 @@
 //! Command-line definition (clap) and dispatch.
 
 mod commands;
+mod monitor_cmd;
 pub mod output;
 pub mod usage_out;
 mod watch_cmd;
-
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 pub use commands::{Io, run};
@@ -42,7 +42,7 @@ vault passphrase). AGYVA_FAILPOINT works only with AGYVA_TEST_MODE=1.";
     long_about = "Save agy logins in an encrypted vault and switch between them on request.\n\
                   Switching is always manual: agyva never rotates accounts by itself.",
     after_help = EXIT_CODES,
-    help_template = "{name} {version}\n{about-with-newline}\n{usage-heading} {usage}\n\nAccounts:\n  add          Save the current agy login\n  list         List saved accounts\n  use          Switch manually, then restart agy\n  current      Inspect agy's login\n  rename       Change an alias\n  remove       Forget a saved account\n\nQuota and health:\n  usage        Remaining quota by group and window\n  health       Account health and evidence\n  watch        Read-only foreground monitor\n\nDiagnostics and recovery:\n  status       State and pending recovery\n  doctor       Read-only checks\n  recover      Finish or undo an interrupted switch\n\nTransfer and updates:\n  export       Save accounts to a portable encrypted archive\n  import       Add accounts from an archive (skips existing)\n  update       Check GitHub for a newer release; install on request\n\nSetup:\n  config       View or change settings\n  completions  Fish, Bash or Zsh completion\n  version      agyva and agy versions\n  help         Help for a command\n\nOptions:\n{options}\n{after-help}",
+    help_template = "{name} {version}\n{about-with-newline}\n{usage-heading} {usage}\n\nAccounts:\n  add          Save the current agy login\n  list         List saved accounts\n  use          Switch manually, then restart agy\n  current      Inspect agy's login\n  rename       Change an alias\n  remove       Forget a saved account\n\nQuota and health:\n  usage        Remaining quota by group and window\n  health       Account health and evidence\n  watch        Read-only foreground monitor\n  monitor      Route-aware cache-only monitor (--interval)\n\nDiagnostics and recovery:\n  status       State and pending recovery\n  doctor       Read-only checks\n  recover      Finish or undo an interrupted switch\n\nTransfer and updates:\n  export       Save accounts to a portable encrypted archive\n  import       Add accounts from an archive (skips existing)\n  update       Check GitHub for a newer release; install on request\n\nSetup:\n  config       View or change settings\n  completions  Fish, Bash or Zsh completion\n  version      agyva and agy versions\n  help         Help for a command\n\nOptions:\n{options}\n{after-help}",
     propagate_version = true
 )]
 pub struct Cli {
@@ -74,6 +74,9 @@ pub enum Command {
     Route(RouteArgs),
     /// Monitor usage and health in the foreground (read-only; never switches).
     Watch,
+    /// Route-aware monitor: cache-only ranking per interval, single-flight
+    /// active refresh, never switches by itself.
+    Monitor(MonitorArgs),
     /// Show per-account health (refreshes the active account).
     Health(HealthArgs),
     /// Summarize agyva's state and any pending recovery.
@@ -290,4 +293,17 @@ pub enum ShellName {
     Fish,
     Bash,
     Zsh,
+}
+
+#[derive(Debug, Args)]
+pub struct MonitorArgs {
+    /// Evaluation interval (cache-only), e.g. 15s, 30s, 1m.
+    #[arg(long)]
+    pub interval: Option<String>,
+    /// Restrict ranking to this routing group.
+    #[arg(long)]
+    pub group: Option<String>,
+    /// Only accounts whose catalog offers this model family.
+    #[arg(long)]
+    pub for_model: Option<String>,
 }

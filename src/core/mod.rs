@@ -13,6 +13,7 @@ pub mod health;
 pub mod health_report;
 pub mod ids;
 pub mod manage;
+pub mod monitor;
 pub mod policy;
 pub mod provider;
 pub mod quota;

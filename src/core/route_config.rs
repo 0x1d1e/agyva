@@ -11,6 +11,11 @@ use crate::storage::fsutil;
 #[serde(rename_all = "kebab-case")]
 pub enum Ranking {
     Priority,
+    /// Like `smart`, but accounts with equal tier and freshness sort by the
+    /// share already used (least first, from declared plans where given).
+    /// Without declared plans it degenerates to `smart`'s share-remaining
+    /// ordering — documented, never an imagined absolute capacity.
+    LeastUsed,
     #[default]
     Smart,
 }

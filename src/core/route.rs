@@ -182,7 +182,7 @@ impl App {
     }
 
     pub fn route_group_at(&self, group: Option<&str>, now: DateTime<Utc>) -> Result<RoutePlan> {
-        use crate::core::route_config::{Ranking, RoutingFile};
+        use crate::core::route_config::{DeclaredPlan, Ranking, RoutingFile};
         let config = RoutingFile::load(&self.dirs.config.join("routing.toml"))?;
         let group = config.group(group)?;
         let mut accounts = self.account_usages(None, now)?;
@@ -216,6 +216,26 @@ impl App {
         if group.ranking == Ranking::Priority {
             plan.accounts
                 .sort_by_key(|row| (!row.eligible, accounts.iter().position(|a| a.id == row.id)));
+            plan.recommendation = plan
+                .accounts
+                .iter()
+                .find(|r| r.eligible)
+                .map(|r| r.id.clone());
+        }
+        if group.ranking == Ranking::LeastUsed {
+            // Share used, least first: declared plans rank free < pro <
+            // ultra; unknown shares stay behind any declared plan. Equal
+            // shares keep smart's ordering (stable sort).
+            let used_rank = |alias: &str| -> u8 {
+                match group.plans.get(alias) {
+                    Some(DeclaredPlan::Free) => 0,
+                    Some(DeclaredPlan::Pro) => 1,
+                    Some(DeclaredPlan::Ultra) => 2,
+                    None => 3,
+                }
+            };
+            plan.accounts
+                .sort_by_key(|row| (!row.eligible, used_rank(&row.alias)));
             plan.recommendation = plan
                 .accounts
                 .iter()

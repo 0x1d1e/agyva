@@ -59,6 +59,16 @@ account can refresh. [Windows, groups and freshness](antigravity.md#read-quota-a
 transient failures, and never switches or warms quota windows. Optional desktop
 notifications contain an alias and state, not credentials.
 
+`agyva monitor [--interval 15s] [--group NAME] [--for-model FAMILY]` is the
+route-aware variant: every tick re-ranks the cached evidence (never an agy
+spawn) and prints the sticky pick plus each account's share, freshness and
+exclusion reason, with the next weekly reset countdown. `--interval` accepts
+`15s`, `30`, `2m`, `1h` with a 5s floor (a faster loop changes nothing — the
+evaluation is cache-only). The active account's quota refresh runs on its own
+300s cadence through the existing single-flight refresh guard, so several
+monitors and a manual `usage` collapse to one run. `monitor` never switches
+accounts.
+
 ## Plan a route
 
 `agyva route list` lists named groups from `routing.toml` beside `config.toml`.

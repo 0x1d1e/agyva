@@ -347,6 +347,7 @@ fn dispatch(app: &App, command: Command, io: &mut Io<'_>, st: Style) -> Result<i
             }
         }
         Command::Watch => return super::watch_cmd::watch(app, io),
+        Command::Monitor(a) => return super::monitor_cmd::monitor(app, io, &a),
         Command::Health(a) => {
             let report = app.health_report(&UsageOptions {
                 selector: a.selector.clone(),
