@@ -261,16 +261,16 @@ impl App {
     }
 
     /// `route inspect|plan --for-model <model>`: the plain plan with a
-    /// catalog-aware eligibility pass. A model never makes an account MORE
-    /// eligible — it only excludes, with an explicit reason. The declared
-    /// mapping (routing.toml `models`) selects which quota group's windows
-    /// apply when the catalog offers the family; unknown mapping or unknown
-    /// catalog excludes without ever claiming support.
+    /// catalog-aware eligibility pass. The model never grants eligibility on
+    /// its own: a missing or stale catalog, an absent mapping, exhausted or
+    /// stale mapped windows, or bad health still excludes, with a reason.
+    /// The declared mapping (routing.toml `models`) selects which quota
+    /// group's windows apply when the catalog offers the family.
     ///
-    /// For a requested family the mapped group's own windows decide the
-    /// headline share AND eligibility: an exhausted bucket belonging to a
-    /// different group must not hide a usable requested one. Health and a
-    /// missing reading still block, exactly as in [`rank`].
+    /// When a mapping resolves, that group's windows — not the whole-account
+    /// aggregate — decide both share and eligibility, so a family whose own
+    /// quota is healthy is eligible even if another bucket on the same
+    /// account is empty. Health and a missing reading still block.
     pub fn route_group_for(
         &self,
         group: Option<&str>,
