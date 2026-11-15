@@ -41,7 +41,7 @@ and `weekly` windows. A present window has `remaining_percent`, `reset_at`,
 `observed_at` and `source` (`cache` or `agy_usage_command`). A missing window is
 `null`, not zero, and not full. Reset timestamps may also be `null`.
 
-`agyva route plan [--for MODEL] [--json]` (named groups via
+`agyva route plan [--for-model MODEL] [--json]` (named groups via
 `route plan GROUP` / `route inspect GROUP`) returns
 `{"schema_version", "generated_at", "recommendation", "accounts"}`. The
 recommendation is an account id or `null`. Each account row carries `id`,

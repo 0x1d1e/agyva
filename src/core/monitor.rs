@@ -18,6 +18,7 @@ use serde::Serialize;
 
 use crate::core::app::App;
 use crate::core::route::RoutePlan;
+use crate::core::route_apply::RouteHistory;
 use crate::core::watch::{Clock, Jitter, Probe, Sink, WatchConfig, run_watch};
 
 /// Evaluation (cache-only ranking) defaults to 15s; the user may raise or
@@ -43,6 +44,12 @@ pub struct MonitorProbe<'a> {
     sticky: Option<String>,
     /// The most recent cycle's plan, for the sink/renderers.
     last_plan: Option<RoutePlan>,
+    /// The pick that cycle settled on, so renderers can label it sticky
+    /// without recomputing the selection.
+    last_pick: Option<Picked>,
+    /// What automation did on this cycle (an error, or the applied alias);
+    /// `None` when automation is off or had nothing to say.
+    last_auto: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,6 +76,8 @@ impl<'a> MonitorProbe<'a> {
             last_refresh: None,
             sticky: None,
             last_plan: None,
+            last_pick: None,
+            last_auto: None,
         }
     }
 
@@ -76,16 +85,33 @@ impl<'a> MonitorProbe<'a> {
     pub fn last_plan(&self) -> Option<&RoutePlan> {
         self.last_plan.as_ref()
     }
+
+    /// The account the last cycle picked, and whether it changed then.
+    pub fn last_pick(&self) -> Option<&Picked> {
+        self.last_pick.as_ref()
+    }
+
+    /// What opt-in automation did on the last cycle, if it ran and had
+    /// anything to report (applied switch or an error).
+    pub fn last_auto(&self) -> Option<&str> {
+        self.last_auto.as_deref()
+    }
 }
 
 impl Probe for MonitorProbe<'_> {
     fn cycle(&mut self, now: DateTime<Utc>) -> crate::core::watch::CycleReport {
         // Periodic single-flight refresh of the ACTIVE account only: the
-        // refresh guard skips (TooSoon / RefreshBusy) instead of queueing,
+        // refresh guard skips (TooSoon / RefreshBusy) instead of queueing.
+        // `refreshed` is the freshness proof automation requires: only a run
+        // that actually got a live reading this cycle may authorize a switch.
+        let mut refreshed = false;
         if self.last_refresh.is_none_or(|at| {
             now - at >= chrono::Duration::from_std(self.refresh_interval).unwrap_or_default()
         }) {
-            let _ = self.app.refresh_active_at(false, now);
+            refreshed = self
+                .app
+                .refresh_active_at(false, now)
+                .is_ok_and(|o| matches!(o.status, crate::core::refresh::RefreshStatus::Refreshed));
             self.last_refresh = Some(now);
         }
         let plan = self
@@ -149,6 +175,32 @@ impl Probe for MonitorProbe<'_> {
             ),
             None => "route pick: none eligible".to_owned(),
         });
+        self.last_pick = picked;
+        // Opt-in automation: only for a named group (there is no group to
+        // declare `auto_switch` on otherwise), only with this cycle's live
+        // reading as proof, and only through the journaled path. Every
+        // hold/defer/applied outcome lands in the route history.
+        self.last_auto = None;
+        if let Some(group) = self.group.clone() {
+            let history = RouteHistory::new(&self.app.dirs);
+            match self
+                .app
+                .auto_switch_for(&group, &plan, refreshed, &history, now)
+            {
+                Ok(Some(outcome)) => {
+                    self.last_auto = Some(format!("auto-switch applied: {}", outcome.alias));
+                    report.note = Some(format!(
+                        "{}; {}",
+                        report.note.unwrap_or_default(),
+                        self.last_auto.clone().unwrap_or_default()
+                    ));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    self.last_auto = Some(format!("auto-switch error: {}", e.message()));
+                }
+            }
+        }
         self.last_plan = Some(plan);
         report
     }

@@ -43,7 +43,7 @@ Routing, route automation, transfer and self-update, building on `0.1.0`.
 - A per-account model catalog: a bounded `agy models` run for the active
   account only (config `models_cache_secs`, default one day), parsed into
   effort-suffixed families and versioned into `cache/models.json`. `route
-  inspect|plan --for <model>` filters eligibility by observed catalog
+  inspect|plan --for-model <model>` filters eligibility by observed catalog
   support — a stale or missing catalog never proves support, and the static
   reference list is descriptive only. User-declared quota-group mappings
   (`[groups.X.models]`) apply the requested family's windows, specific pools
@@ -66,8 +66,9 @@ Routing, route automation, transfer and self-update, building on `0.1.0`.
   reasons; never credentials).
 - Opt-in auto-switch (`core::auto`): a `routing.toml` group with
   `auto_switch = true` — and only after `agyva config set auto_switch_ack
-  true` — is driven by the same evaluation as `agyva monitor` (15s tick,
-  single-flight 300s active refresh). It switches only on fresh live
+  true` — is driven by `agyva monitor --group NAME`'s evaluation cycle (15s
+  tick, single-flight 300s active refresh; the pane reports an applied
+  switch). It switches only on fresh live
   evidence, never picks a suspended or otherwise ineligible account, defers
   while agy sessions are detected (or detection is uncertain) or a switch
   journal awaits recovery, waits at least 900 seconds between any two

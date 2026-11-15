@@ -10,13 +10,11 @@ use common::*;
 use agyva::core::app::App;
 use agyva::core::auto::{AutoDecision, MIN_SWITCH_INTERVAL, decide, enabled_for, note_switch};
 use agyva::core::health::{AccountHealth, HealthRecord, HealthSource};
-use agyva::core::monitor::MonitorProbe;
 use agyva::core::quota::{ModelQuota, QuotaSource, QuotaWindow};
 use agyva::core::quota_cache::{CacheEntry, CachedQuota};
 use agyva::core::route::RoutePlan;
 use agyva::core::route_apply::RouteHistory;
 use agyva::core::route_config::{Ranking, RoutingFile};
-use agyva::core::watch::Probe;
 
 fn seed(
     app: &App,
@@ -63,17 +61,15 @@ fn seed(
         .unwrap();
 }
 
+/// Establish the freshness proof the way the monitor does (a live active
+/// reading this cycle) and then rank the group. This deliberately does not
+/// go through `MonitorProbe`: the probe drives automation itself now, and a
+/// decision test must observe the gates, not pre-empt them. A fixture
+/// without a usable reading still returns a plan — the tests that need a
+/// real one install the fake; the rest pass the proof explicitly.
 fn fresh_plan(app: &App, now: chrono::DateTime<Utc>) -> RoutePlan {
-    // The "just refreshed" proof: evaluate through the monitor probe, which
-    // runs the active refresh first (single-flight guard).
-    let mut probe = MonitorProbe::new(
-        app,
-        Some("work".into()),
-        None,
-        std::time::Duration::from_secs(300),
-    );
-    let _ = probe.cycle(now);
-    probe.last_plan().unwrap().clone()
+    let _ = app.refresh_active_at(false, now);
+    app.route_group_for(Some("work"), None, now).unwrap()
 }
 
 fn enable_auto(app: &mut App, ack: bool) {
@@ -170,10 +166,12 @@ fn cooldown_holds_and_manual_switch_resets_it() {
     )
     .unwrap();
     let plan = fresh_plan(&app, now);
-    assert!(matches!(
-        decide(&app, "work", &plan, true, now),
-        AutoDecision::Switch { .. }
-    ));
+    let d0 = decide(&app, "work", &plan, true, now);
+    assert!(
+        matches!(d0, AutoDecision::Switch { .. }),
+        "expected switch, got {d0:?}, plan={plan:?}, sessions={:?}",
+        agyva::agy::sessions::detect(&app.agy)
+    );
     // A switch just now (as a manual `use` does) re-arms the 900s cooldown.
     note_switch(&app.dirs, now, false).unwrap();
     let d = decide(&app, "work", &plan, true, now);
@@ -349,4 +347,143 @@ fn ranking_default_stays_smart_and_cooldown_file_is_private() {
         assert_eq!(mode.map(|m| m & 0o777), Some(0o600));
     }
     let _ = Ranking::Priority;
+}
+
+/// The wiring that makes automation real: the monitor's evaluation loop is
+/// the only driver, so a named-group probe must apply the switch on a cycle
+/// that got a fresh reading, and must hold (not act) when it did not.
+#[test]
+fn the_monitor_cycle_is_the_driver_that_actually_switches() {
+    use agyva::core::monitor::MonitorProbe;
+    use agyva::core::watch::Probe;
+
+    // 1. Fresh reading + gate pass: the cycle switches.
+    let rig = Rig::new();
+    rig.add_all(&[ALICE, BOB]);
+    let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
+    fake.ok(0.9, 0.9);
+    let mut app = rig.app_with_agy(&fake);
+    let now = Utc::now();
+    seed(&app, ALICE, now, 90.0, AccountHealth::Healthy);
+    seed(&app, BOB, now, 50.0, AccountHealth::Healthy);
+    enable_auto(&mut app, true);
+    // bob is active; alice is the strictly better pick.
+    let mut probe = MonitorProbe::new(&app, Some("work".into()), None, std::time::Duration::ZERO);
+    probe.cycle(now);
+    assert_eq!(rig.live_id(), Some(id_of(ALICE)), "the cycle switched");
+    let note = probe.last_auto().unwrap_or_default().to_owned();
+    assert!(note.contains("alice"), "cycle reports it: {note}");
+    let history = RouteHistory::new(&app.dirs);
+    assert!(
+        history
+            .load()
+            .entries
+            .iter()
+            .any(|e| e.outcome == agyva::core::route_apply::HistoryOutcome::Applied),
+        "applied outcome recorded"
+    );
+
+    // 2. No group declared: no automation, even with the ack set.
+    let rig = Rig::new();
+    rig.add_all(&[ALICE, BOB]);
+    let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy2"));
+    fake.ok(0.9, 0.9);
+    let mut app = rig.app_with_agy(&fake);
+    seed(&app, ALICE, now, 90.0, AccountHealth::Healthy);
+    seed(&app, BOB, now, 50.0, AccountHealth::Healthy);
+    app.config.auto_switch_ack = true;
+    let mut probe = MonitorProbe::new(&app, None, None, std::time::Duration::ZERO);
+    probe.cycle(now);
+    assert_eq!(rig.live_id(), Some(id_of(BOB)), "no group, no switch");
+    assert!(probe.last_auto().is_none());
+
+    // 3. A repeated hold does not flood the bounded history.
+    let rig = Rig::new();
+    rig.add_all(&[ALICE, BOB]);
+    let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy3"));
+    fake.ok(0.9, 0.9);
+    let mut app = rig.app_with_agy(&fake);
+    seed(&app, ALICE, now, 90.0, AccountHealth::Healthy);
+    seed(&app, BOB, now, 50.0, AccountHealth::Healthy);
+    // Enabled but cooling down: every tick holds for the same reason.
+    enable_auto(&mut app, true);
+    note_switch(&app.dirs, now, false).unwrap();
+    let mut probe = MonitorProbe::new(&app, Some("work".into()), None, std::time::Duration::ZERO);
+    for i in 0..5 {
+        probe.cycle(now + Duration::seconds(i));
+    }
+    assert_eq!(rig.live_id(), Some(id_of(BOB)), "cooldown holds");
+    // Cycle 1 got a live reading (hold: cooling down); cycles 2-5 were
+    // throttled (defer: no fresh proof). Repeats collapse, so five ticks add
+    // exactly two entries instead of five.
+    let entries = RouteHistory::new(&app.dirs).load().entries;
+    assert_eq!(entries.len(), 2, "repeated outcomes are recorded once each");
+    assert!(entries.iter().any(|e| e.reason.contains("cooling down")));
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.reason.contains("fresh live reading")),
+        "a throttled cycle has no freshness proof"
+    );
+}
+
+/// Gate order is part of the contract: enabled/ack -> fresh proof ->
+/// cooldown -> sessions -> eligibility. With several gates failing at once,
+/// the earliest one is the one reported, so a test can pin the order.
+#[test]
+fn gates_are_evaluated_in_the_documented_order() {
+    let rig = Rig::new();
+    rig.add_all(&[ALICE, BOB]);
+    let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
+    fake.ok(0.9, 0.9);
+    let mut app = rig.app_with_agy(&fake);
+    let now = Utc::now();
+    seed(&app, ALICE, now, 90.0, AccountHealth::Healthy);
+    seed(&app, BOB, now, 50.0, AccountHealth::Healthy);
+
+    // Nothing enabled: disabled/unacknowledged wins over everything.
+    std::fs::write(
+        app.dirs.config.join("routing.toml"),
+        "[groups.work]\naccounts = ['alice', 'bob']\n",
+    )
+    .unwrap();
+    let plan = app.route_group_for(Some("work"), None, now).unwrap();
+    let d = decide(&app, "work", &plan, false, now);
+    assert!(
+        matches!(&d, AutoDecision::Hold(r) if r.contains("not enabled")),
+        "{d:?}"
+    );
+
+    // Enabled but no fresh reading: the proof gate precedes the cooldown.
+    enable_auto(&mut app, true);
+    note_switch(&app.dirs, now, false).unwrap(); // cooldown also failing
+    let d = decide(&app, "work", &plan, false, now);
+    assert!(
+        matches!(&d, AutoDecision::Defer(r) if r.contains("fresh live reading")),
+        "{d:?}"
+    );
+
+    // With proof, the cooldown is next (sessions are clean here).
+    let d = decide(&app, "work", &plan, true, now);
+    assert!(
+        matches!(&d, AutoDecision::Hold(r) if r.contains("cooling down")),
+        "{d:?}"
+    );
+
+    // Cooldown clear, sessions detected: the session gate precedes
+    // eligibility, even though a good candidate exists.
+    std::fs::create_dir_all(app.agy.presence_dir()).unwrap();
+    std::fs::write(app.agy.presence_dir().join("s.lock"), "").unwrap();
+    let d = decide(&app, "work", &plan, true, now + Duration::seconds(1000));
+    assert!(
+        matches!(&d, AutoDecision::Defer(r) if r.contains("sessions detected")),
+        "{d:?}"
+    );
+
+    // Everything clear: the eligible top row is the switch target.
+    std::fs::remove_file(app.agy.presence_dir().join("s.lock")).unwrap();
+    match decide(&app, "work", &plan, true, now + Duration::seconds(1000)) {
+        AutoDecision::Switch { alias, .. } => assert_eq!(alias, "alice"),
+        other => panic!("expected a switch, got {other:?}"),
+    }
 }

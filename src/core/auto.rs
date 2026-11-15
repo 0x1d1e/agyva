@@ -1,8 +1,10 @@
 //! Opt-in automatic activation. Disabled by default; enabling it requires an
 //! explicit policy re-acknowledgment because it relaxes agyva's standing
 //! "switching is always manual" promise in exactly one bounded way: when the
-//! gates below all pass, `route` may run the same journaled switch a human
-//! would have typed.
+//! gates below all pass, the monitor's evaluation cycle may run the same
+//! journaled switch a human would have typed. [`crate::core::monitor`]'s
+//! probe is the only caller — automation therefore runs exactly as often as
+//! the monitor is ticking, and never from a one-shot command.
 //!
 //! Gates, all mandatory, evaluated in order and re-validated under the
 //! login lock:
@@ -112,6 +114,22 @@ pub fn note_switch(dirs: &crate::paths::Dirs, at: DateTime<Utc>, automatic: bool
     st.save(dirs)
 }
 
+/// Record an automation outcome unless it repeats the previous entry
+/// verbatim: the monitor evaluates every tick, and a steady hold (disabled,
+/// cooling down) must not flush the bounded history of real decisions.
+fn record_once(history: &RouteHistory, entry: HistoryEntry) -> Result<()> {
+    let last = history.load().entries.last().cloned();
+    if last.as_ref().is_some_and(|prev| {
+        prev.group == entry.group
+            && prev.target == entry.target
+            && prev.outcome == entry.outcome
+            && prev.reason == entry.reason
+    }) {
+        return Ok(());
+    }
+    history.record(entry)
+}
+
 /// Evaluate the auto-switch decision for `group` against fresh evidence.
 /// `plan` must come from a run whose active account was just refreshed
 /// (`RefreshStatus::Refreshed`); the caller passes `refreshed` to prove it.
@@ -139,10 +157,10 @@ pub fn decide(
     let st = AutoState::load(&app.dirs);
     let min = chrono::Duration::from_std(MIN_SWITCH_INTERVAL).unwrap_or_default();
     if st.last_any_switch.is_some_and(|last| now - last < min) {
-        let last = st.last_any_switch.expect("checked above");
+        // No elapsed seconds here: the reason is persisted, and a changing
+        // number would defeat the consecutive-entry dedupe in the history.
         return AutoDecision::Hold(format!(
-            "cooling down: last switch {}s ago (minimum {}s)",
-            (now - last).num_seconds(),
+            "cooling down: minimum {}s between switches",
             MIN_SWITCH_INTERVAL.as_secs()
         ));
     }
@@ -187,23 +205,29 @@ impl crate::core::app::App {
     ) -> Result<Option<crate::core::route_apply::ApplyOutcome>> {
         match decide(self, group, plan, refreshed, now) {
             AutoDecision::Hold(reason) => {
-                history.record(HistoryEntry {
-                    at: now,
-                    group: Some(group.to_owned()),
-                    target: plan.recommendation.clone().unwrap_or_else(|| "-".into()),
-                    outcome: HistoryOutcome::Refused,
-                    reason: format!("auto-switch held: {reason}"),
-                })?;
+                record_once(
+                    history,
+                    HistoryEntry {
+                        at: now,
+                        group: Some(group.to_owned()),
+                        target: plan.recommendation.clone().unwrap_or_else(|| "-".into()),
+                        outcome: HistoryOutcome::Refused,
+                        reason: format!("auto-switch held: {reason}"),
+                    },
+                )?;
                 Ok(None)
             }
             AutoDecision::Defer(reason) => {
-                history.record(HistoryEntry {
-                    at: now,
-                    group: Some(group.to_owned()),
-                    target: plan.recommendation.clone().unwrap_or_else(|| "-".into()),
-                    outcome: HistoryOutcome::Refused,
-                    reason: format!("auto-switch deferred: {reason}"),
-                })?;
+                record_once(
+                    history,
+                    HistoryEntry {
+                        at: now,
+                        group: Some(group.to_owned()),
+                        target: plan.recommendation.clone().unwrap_or_else(|| "-".into()),
+                        outcome: HistoryOutcome::Refused,
+                        reason: format!("auto-switch deferred: {reason}"),
+                    },
+                )?;
                 Ok(None)
             }
             AutoDecision::Switch { id, .. } => {
@@ -215,25 +239,31 @@ impl crate::core::app::App {
                     let _lock = self.lock_login()?;
                     let config = RoutingFile::load(&self.dirs.config.join("routing.toml"))?;
                     if !enabled_for(self, group, &config)? {
-                        history.record(HistoryEntry {
-                            at: now,
-                            group: Some(group.to_owned()),
-                            target: id,
-                            outcome: HistoryOutcome::Refused,
-                            reason: "auto-switch held: disabled while preparing".into(),
-                        })?;
+                        record_once(
+                            history,
+                            HistoryEntry {
+                                at: now,
+                                group: Some(group.to_owned()),
+                                target: id,
+                                outcome: HistoryOutcome::Refused,
+                                reason: "auto-switch held: disabled while preparing".into(),
+                            },
+                        )?;
                         return Ok(None);
                     }
                     let st = AutoState::load(&self.dirs);
                     let min = chrono::Duration::from_std(MIN_SWITCH_INTERVAL).unwrap_or_default();
                     if st.last_any_switch.is_some_and(|last| now - last < min) {
-                        history.record(HistoryEntry {
-                            at: now,
-                            group: Some(group.to_owned()),
-                            target: id,
-                            outcome: HistoryOutcome::Refused,
-                            reason: "auto-switch held: cooldown re-check failed".into(),
-                        })?;
+                        record_once(
+                            history,
+                            HistoryEntry {
+                                at: now,
+                                group: Some(group.to_owned()),
+                                target: id,
+                                outcome: HistoryOutcome::Refused,
+                                reason: "auto-switch held: cooldown re-check failed".into(),
+                            },
+                        )?;
                         return Ok(None);
                     }
                     if let Some(p) = self.pending_journal()? {

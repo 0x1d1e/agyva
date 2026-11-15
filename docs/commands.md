@@ -87,7 +87,7 @@ work = 10 # higher values first with priority ranking
 "gemini-4-carbon" = "Gemini Pro" # maps a family to its quota group
 ```
 
-`route inspect|plan --for <model>` keeps only accounts whose observed model
+`route inspect|plan --for-model <model>` keeps only accounts whose observed model
 catalog offers the family. The catalog comes from a bounded `agy models` run
 for the active account only, cached for `models_cache_secs` (default one
 day); failures keep the prior observation. A missing or stale catalog never
@@ -122,15 +122,22 @@ available quota (`--json` still carries the raw `remaining_percent` next to
 
 Off by default, and doubly gated: a group in `routing.toml` must set
 `auto_switch = true`, **and** you must run
-`agyva config set auto_switch_ack true` once. With both set, a background
-evaluation (same 15s tick and 300s active refresh as `agyva monitor`) can run
-`route apply` for that group without you. It still refuses to act on stale
-evidence, never picks a suspended or otherwise ineligible account, defers
-while agy sessions are detected (or detection is uncertain) or a switch
-journal awaits recovery, and waits at least 900 seconds between switches —
-a manual `agyva use` re-arms that cooldown too. Holds and defers are
-recorded in `agyva route history` alongside applied switches. Set
-`auto_switch_ack` back to `false` (or `auto_switch` to `false`) to stop it.
+`agyva config set auto_switch_ack true` once. With both set, the evaluation
+loop of `agyva monitor --group NAME` (15s tick, 300s single-flight active
+refresh) runs `route apply` for that group when its gates pass — the monitor
+is the driver, so automation happens only while it runs, and the pane prints
+`auto-switch applied: <alias>` when it acts; `route apply` itself never
+auto-confirms, so automation can only happen through the monitor's cycle.
+
+It still refuses to act on stale evidence (the cycle must have won a live
+active reading, never a cached reset time), never picks a suspended or
+otherwise ineligible account, defers while agy sessions are detected (or
+detection is uncertain) or a switch journal awaits recovery, and waits at
+least 900 seconds between switches — a manual `agyva use` re-arms that
+cooldown too. Holds and defers are recorded in `agyva route history`
+alongside applied switches, with consecutive identical outcomes collapsed so
+a steady hold cannot flush the log. Set `auto_switch_ack` back to `false`
+(or `auto_switch` to `false`) to stop it.
 
 ## Recover an interrupted switch
 

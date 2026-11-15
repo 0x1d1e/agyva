@@ -26,25 +26,39 @@ pub const ENV_MAX_CYCLES: &str = "AGYVA_WATCH_MAX_CYCLES";
 /// Hidden: eval-interval override in milliseconds, test-mode only.
 pub const ENV_INTERVAL_MS: &str = "AGYVA_MONITOR_INTERVAL_MS";
 
-/// Probe wrapper: after each cycle, publish the plan into a slot the sink
-/// reads, so `run_watch`'s fixed probe-then-sink order renders the full
-/// route pane every cycle without touching the watch core.
+/// What the sink renders for one cycle: the plan and the alias the probe
+/// actually settled on, so the pane can label a held pick as sticky.
+struct CycleView {
+    plan: RoutePlan,
+    pick: Option<String>,
+    /// What opt-in automation did this cycle, when it had something to say.
+    auto: Option<String>,
+}
+
+/// Probe wrapper: after each cycle, publish the plan and pick into a slot
+/// the sink reads, so `run_watch`'s fixed probe-then-sink order renders the
+/// full route pane every cycle without touching the watch core.
 struct PlanSharing<'a> {
     inner: MonitorProbe<'a>,
-    slot: Arc<Mutex<Option<RoutePlan>>>,
+    slot: Arc<Mutex<Option<CycleView>>>,
 }
 
 impl crate::core::watch::Probe for PlanSharing<'_> {
     fn cycle(&mut self, now: DateTime<Utc>) -> crate::core::watch::CycleReport {
         let report = self.inner.cycle(now);
-        *self.slot.lock().expect("plan slot poisoned") = self.inner.last_plan().cloned();
+        let view = self.inner.last_plan().cloned().map(|plan| CycleView {
+            plan,
+            pick: self.inner.last_pick().map(|p| p.alias.clone()),
+            auto: self.inner.last_auto().map(str::to_owned),
+        });
+        *self.slot.lock().expect("plan slot poisoned") = view;
         report
     }
 }
 
 struct MonitorSink<'a, 'b> {
     io: &'a mut Io<'b>,
-    slot: Arc<Mutex<Option<RoutePlan>>>,
+    slot: Arc<Mutex<Option<CycleView>>>,
     stop: Arc<AtomicBool>,
     /// First write failure, if any: the loop is stopped and the caller
     /// turns this into an exit code instead of spinning quietly forever.
@@ -54,10 +68,14 @@ struct MonitorSink<'a, 'b> {
 impl MonitorSink<'_, '_> {
     fn write(&mut self, at: DateTime<Utc>, e: &WatchEvent) -> std::io::Result<()> {
         writeln!(self.io.out, "{}", render_event(at, e))?;
-        if let (WatchEvent::CycleOk { .. }, Some(plan)) =
+        if let (WatchEvent::CycleOk { .. }, Some(view)) =
             (e, self.slot.lock().expect("plan slot poisoned").as_ref())
         {
-            for line in render_plan(plan, at, None).lines() {
+            let text = render_plan(&view.plan, at, view.pick.as_deref());
+            if let Some(auto) = &view.auto {
+                writeln!(self.io.out, "{auto}")?;
+            }
+            for line in text.lines() {
                 writeln!(self.io.out, "{line}")?;
             }
         }
@@ -151,7 +169,7 @@ pub fn monitor(app: &App, io: &mut Io<'_>, args: &super::MonitorArgs) -> Result<
     }
     let mut cfg = WatchConfig::new(interval);
     cfg.max_cycles = max_cycles;
-    let slot = Arc::new(std::sync::Mutex::new(None::<RoutePlan>));
+    let slot = Arc::new(std::sync::Mutex::new(None::<CycleView>));
     let mut probe = PlanSharing {
         inner: MonitorProbe::new(
             app,

@@ -104,7 +104,9 @@ never terminates agy; it only reports detected sessions (from
   `routing.toml` group must set `auto_switch = true` **and** you must run
   `agyva config set auto_switch_ack true` (the acknowledgment is separate
   from `policy_acknowledged` and is re-settable to `false` to disable).
-  Even when enabled, `agyva route apply`'s automation only fires after a
+  The only driver is `agyva monitor --group NAME`'s evaluation cycle, so
+  automation exists only while that foreground loop runs. Even when
+  enabled, it only fires after a
   **fresh** live quota reading (never on cached data, never on cached reset
   times), never picks a `TermsSuspended` or otherwise ineligible account,
   defers whenever agy sessions are detected (or detection is uncertain) or

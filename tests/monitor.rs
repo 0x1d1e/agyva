@@ -104,6 +104,19 @@ fn ineligible_rows_show_no_share_and_rely_on_the_reason() {
         }
     }
     assert!(text.contains("refresh required"));
+
+    // A held pick is labelled sticky; no pick reads as "none eligible" and a
+    // pending first pick is "none yet". This is the branch the CLI pane
+    // relies on, so the alias must come from the probe, not be hard-coded.
+    let sticky = agyva::cli::monitor_cmd::render_plan(&plan, now, Some("alice"));
+    assert!(sticky.contains("pick: alice (sticky)"), "{sticky}");
+    assert!(!sticky.contains("(none yet)"), "{sticky}");
+    let no_pick = RoutePlan {
+        recommendation: None,
+        ..plan.clone()
+    };
+    let empty = agyva::cli::monitor_cmd::render_plan(&no_pick, now, None);
+    assert!(empty.contains("pick: none eligible"), "{empty}");
 }
 
 #[test]
@@ -168,6 +181,43 @@ fn monitor_cycles_are_cache_only_and_sticky() {
         Some(id_of(BOB)),
         "ineligible sticky pick yields to the next ranked account"
     );
+}
+
+/// The CLI sink renders the probe's pick, so cycle 2 of the live command
+/// says which account is held instead of "(none yet)".
+#[test]
+fn the_probe_publishes_the_pick_the_pane_labels_sticky() {
+    let rig = Rig::new();
+    rig.add_all(&[ALICE, BOB]);
+    let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
+    fake.ok(0.8, 0.8);
+    let app = rig.app_with_agy(&fake);
+    let now = Utc::now();
+    seed(&app, ALICE, now, 50.0, AccountHealth::Healthy);
+    seed(&app, BOB, now, 80.0, AccountHealth::Healthy);
+    let mut probe = MonitorProbe::new(&app, None, None, StdDuration::from_secs(300));
+
+    let r1 = probe.cycle(now);
+    assert!(r1.note.as_deref().unwrap_or_default().contains("alice"));
+    let pick1 = probe.last_pick().expect("first cycle picks").clone();
+    assert_eq!(pick1.alias, "alice");
+    assert!(pick1.changed);
+    let plan1 = probe.last_plan().unwrap().clone();
+    let pane1 = agyva::cli::monitor_cmd::render_plan(&plan1, now, Some(&pick1.alias));
+    assert!(pane1.contains("pick: alice (sticky)"), "{pane1}");
+
+    // Second cycle: same evidence, same pick, still labelled with the alias.
+    probe.cycle(now + Duration::seconds(1));
+    let pick2 = probe.last_pick().expect("cycle 2 keeps the pick");
+    assert_eq!(pick2.alias, "alice");
+    assert!(!pick2.changed, "a held pick is not a change");
+    let pane2 = agyva::cli::monitor_cmd::render_plan(
+        probe.last_plan().unwrap(),
+        now + Duration::seconds(1),
+        Some(&pick2.alias),
+    );
+    assert!(pane2.contains("pick: alice (sticky)"), "{pane2}");
+    assert!(!pane2.contains("(none yet)"), "{pane2}");
 }
 
 #[test]
