@@ -43,6 +43,10 @@ pub const KEYS: &[(&str, &str)] = &[
         "minimum seconds between quota refreshes (10-3600)",
     ),
     (
+        "models_cache_secs",
+        "how long a saved model catalog counts as fresh (60-604800)",
+    ),
+    (
         "watch_interval_secs",
         "seconds between `agyva watch` checks (60-86400)",
     ),
@@ -103,6 +107,8 @@ pub struct Config {
     pub policy_acknowledged: bool,
     pub quota_fresh_secs: u64,
     pub quota_min_refresh_secs: u64,
+    /// How long a saved `agy models` catalog counts as fresh.
+    pub models_cache_secs: u64,
     pub watch_interval_secs: u64,
     pub desktop_notifications: bool,
 }
@@ -120,6 +126,7 @@ impl Default for Config {
             policy_acknowledged: false,
             quota_fresh_secs: 300,
             quota_min_refresh_secs: 60,
+            models_cache_secs: 86_400,
             watch_interval_secs: 300,
             desktop_notifications: false,
         }
@@ -178,6 +185,11 @@ impl Config {
                 "quota_min_refresh_secs must be between 10 and 3600",
             ));
         }
+        if !(60..=604_800).contains(&self.models_cache_secs) {
+            return Err(Error::usage(
+                "models_cache_secs must be between 60 and 604800",
+            ));
+        }
         if !(60..=86_400).contains(&self.watch_interval_secs) {
             return Err(Error::usage(
                 "watch_interval_secs must be between 60 and 86400",
@@ -199,6 +211,7 @@ impl Config {
             "policy_acknowledged" => self.policy_acknowledged.to_string(),
             "quota_fresh_secs" => self.quota_fresh_secs.to_string(),
             "quota_min_refresh_secs" => self.quota_min_refresh_secs.to_string(),
+            "models_cache_secs" => self.models_cache_secs.to_string(),
             "watch_interval_secs" => self.watch_interval_secs.to_string(),
             "desktop_notifications" => self.desktop_notifications.to_string(),
             _ => return None,
@@ -236,6 +249,10 @@ impl Config {
             }
             "quota_min_refresh_secs" => {
                 next.quota_min_refresh_secs =
+                    value.parse().map_err(|_| bad("expected a number".into()))?;
+            }
+            "models_cache_secs" => {
+                next.models_cache_secs =
                     value.parse().map_err(|_| bad("expected a number".into()))?;
             }
             "watch_interval_secs" => {

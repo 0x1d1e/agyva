@@ -235,12 +235,16 @@ fn dispatch(app: &App, command: Command, io: &mut Io<'_>, st: Style) -> Result<i
                 }
                 return Ok(exit::OK);
             }
-            let group = match &a.command {
-                Some(super::RouteCommand::Inspect { group }) => Some(group.as_str()),
-                Some(super::RouteCommand::Plan { group }) => group.as_deref(),
-                _ => None,
+            let (group, for_model) = match &a.command {
+                Some(super::RouteCommand::Inspect { group, for_model }) => {
+                    (Some(group.as_str()), for_model.as_deref())
+                }
+                Some(super::RouteCommand::Plan { group, for_model }) => {
+                    (group.as_deref(), for_model.as_deref())
+                }
+                _ => (None, None),
             };
-            let report = app.route_group_at(group, chrono::Utc::now())?;
+            let report = app.route_group_for(group, for_model, chrono::Utc::now())?;
             if a.json {
                 print_json(io, &report)?;
             } else {

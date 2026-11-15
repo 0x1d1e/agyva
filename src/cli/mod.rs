@@ -130,9 +130,21 @@ pub enum RouteCommand {
     /// List ranked accounts and the reason for their position.
     List,
     /// Inspect cached ranking evidence.
-    Inspect { group: String },
+    Inspect {
+        group: String,
+        /// Only accounts whose catalog offers this model family
+        /// (exact family id or its effort-suffixed ids).
+        #[arg(long)]
+        for_model: Option<String>,
+    },
     /// Recommend one account without changing anything.
-    Plan { group: Option<String> },
+    Plan {
+        group: Option<String>,
+        /// Only accounts whose catalog offers this model family
+        /// (exact family id or its effort-suffixed ids).
+        #[arg(long)]
+        for_model: Option<String>,
+    },
 }
 
 #[derive(Debug, Args)]

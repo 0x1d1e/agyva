@@ -107,8 +107,15 @@ fn stop(child: &mut std::process::Child) {
 }
 
 pub fn run_usage(bin: &Path, limits: &RunLimits) -> std::io::Result<RunOutput> {
+    run_with_args(bin, &USAGE_ARGS, limits)
+}
+
+/// The same run for any fixed argv (`models`): identical spawn hygiene,
+/// bounded readers and timeout kill.
+pub fn run_with_args(bin: &Path, args: &[&str], limits: &RunLimits) -> std::io::Result<RunOutput> {
+    let args: Vec<&str> = args.to_vec();
     let mut cmd = Command::new(bin);
-    cmd.args(USAGE_ARGS)
+    cmd.args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

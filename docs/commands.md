@@ -72,7 +72,18 @@ accounts = ["work", "personal"] # selectors; stable account IDs are recommended
 ranking = "smart" # or "priority" to use the listed order and priorities
 [groups.work.priorities]
 work = 10 # higher values first with priority ranking
+[groups.work.models]
+"gemini-4-carbon" = "Gemini Pro" # maps a family to its quota group
 ```
+
+`route inspect|plan --for <model>` keeps only accounts whose observed model
+catalog offers the family. The catalog comes from a bounded `agy models` run
+for the active account only, cached for `models_cache_secs` (default one
+day); failures keep the prior observation. A missing or stale catalog never
+proves support, and the built-in reference list is descriptive only. When a
+quota group maps to the family (declared mapping first, then group names),
+the ranked share follows that group's windows — an exhausted unrelated
+bucket cannot hide a usable one.
 
 Smart ranks the fullest counting-window share, holds near-full five-hour rate
 caps back, and spends weekly budgets renewing sooner first. Ties retain listed

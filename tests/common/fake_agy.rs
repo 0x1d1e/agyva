@@ -47,6 +47,10 @@ impl FakeAgy {
             "usage.sleep",
             "usage.spawn",
             "usage.child",
+            "models.out",
+            "models.err",
+            "models.code",
+            "models.sleep",
         ] {
             let _ = std::fs::remove_file(self.dir.join(f));
         }
@@ -91,6 +95,28 @@ impl FakeAgy {
             .trim()
             .parse()
             .ok()
+    }
+
+    /// How many times `models` ran.
+    pub fn model_calls(&self) -> usize {
+        std::fs::read_to_string(self.dir.join("models.calls"))
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    }
+
+    /// Steer a successful `models` run with the given TSV body.
+    pub fn models(&self, tsv: &str) -> &Self {
+        self.reset();
+        self.put("models.out", tsv);
+        self
+    }
+
+    /// Steer a failing `models` run.
+    pub fn models_fail(&self, stderr: &str, code: i32) -> &Self {
+        self.reset();
+        self.put("models.err", stderr);
+        self.put("models.code", &code.to_string());
+        self
     }
 
     /// How many times `/usage` ran.

@@ -224,4 +224,80 @@ impl App {
         }
         Ok(plan)
     }
+
+    /// `route inspect|plan --for <model>`: the plain plan with a
+    /// catalog-aware eligibility pass. A model never makes an account MORE
+    /// eligible — it only excludes, with an explicit reason. The declared
+    /// mapping (routing.toml `models`) selects which quota group's windows
+    /// apply when the catalog offers the family; unknown mapping or unknown
+    /// catalog excludes without ever claiming support.
+    pub fn route_group_for(
+        &self,
+        group: Option<&str>,
+        for_model: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<RoutePlan> {
+        let Some(wanted) = for_model.map(str::trim).filter(|w| !w.is_empty()) else {
+            return self.route_group_at(group, now);
+        };
+        let config =
+            crate::core::route_config::RoutingFile::load(&self.dirs.config.join("routing.toml"))?;
+        let declared = match group {
+            Some(name) => config.group(Some(name))?.models.get(wanted).cloned(),
+            None => config
+                .groups
+                .values()
+                .find_map(|g| g.models.get(wanted).cloned()),
+        };
+        let mut plan = self.route_group_at(group, now)?;
+        let usages = self.account_usages(None, now)?;
+        let cache = self.models_cache();
+        for row in &mut plan.accounts {
+            if !row.eligible {
+                continue; // already excluded for quota/health reasons
+            }
+            let state = cache.read_state(&row.id, self.config.models_cache_secs, now);
+            let support = crate::core::catalog::offers_family(&state, wanted);
+            if !support.eligible() {
+                // The model only ever excludes, with an explicit reason.
+                row.eligible = false;
+                row.why = format!("{wanted}: {}", support.reason());
+                continue;
+            }
+            // When a quota group applies to the requested family, the
+            // headline share is the fullest window of that group, not of
+            // the whole account (an exhausted unrelated bucket must not
+            // hide a usable requested bucket).
+            let Some(usage) = usages.iter().find(|a| a.id == row.id) else {
+                continue;
+            };
+            let views = usage
+                .groups
+                .iter()
+                .map(|g| crate::core::catalog::GroupView {
+                    group: g.group.as_str(),
+                    model: g.model.as_deref(),
+                });
+            if let crate::core::catalog::FamilyGroups::Mapped((group_name, model)) =
+                crate::core::catalog::map_family_to_groups(wanted, declared.as_deref(), views)
+            {
+                let fullest = usage
+                    .groups
+                    .iter()
+                    .filter(|g| g.group == group_name && g.model.as_deref() == model.as_deref())
+                    .flat_map(|g| g.five_hour.iter().chain(g.weekly.iter()))
+                    .map(|w| w.remaining_percent)
+                    .reduce(f64::min);
+                if let Some(min) = fullest {
+                    row.remaining_percent = Some(min);
+                }
+            }
+        }
+        plan.recommendation = plan
+            .accounts
+            .iter()
+            .find(|r| r.eligible)
+            .map(|r| r.id.clone());
+        Ok(plan)
+    }
 }

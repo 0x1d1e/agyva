@@ -36,6 +36,14 @@ tagged; release artifacts are built by pushing a `v*` tag (see
 - Cache-only routing groups in a separate `routing.toml`, with Smart and Priority
   rankings, deterministic explanations, and `route list|inspect|plan --json`.
   Stale, incomplete, reset-expired and suspended accounts cannot be recommended.
+- A per-account model catalog: a bounded `agy models` run for the active
+  account only (config `models_cache_secs`, default one day), parsed into
+  effort-suffixed families and versioned into `cache/models.json`. `route
+  inspect|plan --for <model>` filters eligibility by observed catalog
+  support — a stale or missing catalog never proves support, and the static
+  reference list is descriptive only. User-declared quota-group mappings
+  (`[groups.X.models]`) apply the requested family's windows, specific pools
+  before broad ones; plans stay user-declared, never inferred.
 
 ### Fixed
 

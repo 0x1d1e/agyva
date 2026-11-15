@@ -138,7 +138,7 @@ impl App {
     }
 
     /// Which saved-or-unsaved identity agy is logged in as.
-    fn live_account_id(&self) -> std::result::Result<String, Unavailable> {
+    pub(crate) fn live_account_id(&self) -> std::result::Result<String, Unavailable> {
         let read = self.native().and_then(|n| n.read());
         let raw = match read {
             Ok(Some(r)) => r,

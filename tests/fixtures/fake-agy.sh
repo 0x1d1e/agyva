@@ -2,11 +2,10 @@
 # A synthetic stand-in for `agy`, used only by tests. Its behavior comes from
 # files placed next to this copy of the script (so tests never mutate the
 # process environment):
-#   usage.out    stdout for `-p /usage`
-#   usage.err    stderr for `-p /usage`
-#   usage.code   exit status (default 0)
-#   usage.sleep  seconds to hang (to exercise the timeout)
-#   usage.calls  appended to on every `/usage` run (call counter)
+#   models.out  stdout for `models`
+#   models.err  stderr for `models`
+#   models.code exit status for `models` (default 0)
+#   models.calls appended to on every `models` run (call counter)
 # It never reads or writes any credential.
 d=$(dirname "$0")
 case "$1" in
@@ -26,5 +25,11 @@ if [ "$1" = "-p" ] && [ "$2" = "/usage" ]; then
   if [ -f "$d/usage.code" ]; then exit "$(cat "$d/usage.code")"; fi
   exit 0
 fi
-echo "fake agy: unsupported arguments" >&2
-exit 64
+if [ "$1" = "models" ]; then
+  echo x >> "$d/models.calls"
+  if [ -f "$d/models.sleep" ]; then exec sleep "$(cat "$d/models.sleep")"; fi
+  if [ -f "$d/models.out" ]; then cat "$d/models.out"; fi
+  if [ -f "$d/models.err" ]; then cat "$d/models.err" >&2; fi
+  if [ -f "$d/models.code" ]; then exit "$(cat "$d/models.code")"; fi
+  exit 0
+fi

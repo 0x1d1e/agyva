@@ -23,6 +23,23 @@ pub struct RouteGroup {
     /// Larger explicit priority comes first with Priority ranking.
     pub priorities: BTreeMap<String, i32>,
     pub ranking: Ranking,
+    /// User-declared plan per account (`alias = "free" | "pro" | "ultra"`).
+    /// agy never reports a plan; this is the only source, and unstated
+    /// accounts stay `unknown` — never inferred.
+    pub plans: BTreeMap<String, DeclaredPlan>,
+    /// Model-family → quota-group name mapping the user declares
+    /// (`"gemini-4-carbon" = "Gemini Pro"`). Specific pools are matched
+    /// before broad ones; unmapped families are not eligible for `--for`.
+    pub models: BTreeMap<String, String>,
+}
+
+/// A plan label the user typed, with its provenance explicit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeclaredPlan {
+    Free,
+    Pro,
+    Ultra,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
