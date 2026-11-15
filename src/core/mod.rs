@@ -23,6 +23,7 @@ pub mod selector;
 pub mod status;
 pub mod suspended;
 pub mod switch;
+pub mod transfer;
 pub mod usage;
 pub mod view;
 pub mod watch;

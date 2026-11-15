@@ -51,9 +51,14 @@ pub fn write_snapshot(
     vault.write_file(path, &snapshot_context(id), &plain)
 }
 
-/// Read, decrypt and validate a snapshot: schema known, credential parses
-/// and really belongs to `id`.
-pub fn read_snapshot(vault: &Vault, path: &std::path::Path, id: &str) -> Result<Snapshot> {
+/// Decrypt `path` under `id` and validate it: schema known, credential
+/// parses and really belongs to `id`. Shared by `read_snapshot` and
+/// `core::transfer` so both enforce the same rules.
+pub(crate) fn validated_snapshot(
+    vault: &Vault,
+    path: &std::path::Path,
+    id: &str,
+) -> Result<Snapshot> {
     ids::require_account_id(id)?;
     let plain = vault
         .read_file(path, &snapshot_context(id))?
@@ -62,7 +67,14 @@ pub fn read_snapshot(vault: &Vault, path: &std::path::Path, id: &str) -> Result<
                 "remove the account with `agyva remove` and add it again from a fresh `agy` login",
             )
         })?;
-    let snap: Snapshot = serde_json::from_slice(&plain).map_err(|_| {
+    validate_snapshot_bytes(&plain, id)
+}
+
+/// Validate decrypted snapshot bytes for `id` (schema, credential shape,
+/// credential-derived id). Used by [`read_snapshot`] and by transfer, which
+/// decrypts whole archives before any destination state changes.
+pub(crate) fn validate_snapshot_bytes(plain: &[u8], id: &str) -> Result<Snapshot> {
+    let snap: Snapshot = serde_json::from_slice(plain).map_err(|_| {
         Error::format(format!(
             "the saved credential for account {id} is malformed"
         ))
@@ -81,4 +93,10 @@ pub fn read_snapshot(vault: &Vault, path: &std::path::Path, id: &str) -> Result<
         )));
     }
     Ok(snap)
+}
+
+/// Read, decrypt and validate a snapshot: schema known, credential parses
+/// and really belongs to `id`.
+pub fn read_snapshot(vault: &Vault, path: &std::path::Path, id: &str) -> Result<Snapshot> {
+    validated_snapshot(vault, path, id)
 }

@@ -109,11 +109,19 @@ in the OS keyring or is derived from a passphrase with Argon2id. Switches are
 journaled, read back and verified locally. Encryption protects saved copies
 at rest; it does not protect an unlocked, compromised user session.
 
-Quota comes from `agy -p "/usage" --output-format json`; Agyva makes no HTTP
-requests or telemetry calls. It never switches because of a quota error and
-never retries a suspended account automatically. The JSON envelope is locally
-observed and undocumented, so changed shapes are reported as unavailable.
-Plans are not reported. macOS and Windows are unsupported.
+Quota comes from `agy -p "/usage" --output-format json`. The only other
+network traffic is the optional self-update: a single HTTPS request to this
+project's GitHub Releases on startup (silent, disable with `check_updates =
+false`) and on `agyva update`. No telemetry, no other endpoints. Quota never
+switches because of an error and suspended accounts are never retried
+automatically. The JSON envelope is locally observed and undocumented, so
+changed shapes are reported as unavailable. Plans are not reported. macOS and
+Windows are unsupported.
+
+Accounts can move between machines: `agyva export` writes a passphrase-
+encrypted archive, `agyva import` adds what is missing and never touches what
+is already saved. `agyva update --check` reports a newer release;
+`agyva update` verifies the release checksums and installs it atomically.
 
 The [security model](docs/security.md) covers checkpoint retention, the
 residual switch race, old encrypted blob rollback, passphrase handling and

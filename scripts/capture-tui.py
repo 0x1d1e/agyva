@@ -45,6 +45,7 @@ def replay(root):
         path.chmod(0o600)
     return {
         "HOME": str(root / "home"), "NO_COLOR": "1", "AGYVA_BACKEND": "file",
+        "AGYVA_UPDATE_CHECK": "0",
         "AGYVA_CONFIG_DIR": str(root / "cfg"), "AGYVA_STATE_DIR": str(root / "state"),
         "AGYVA_CACHE_DIR": str(root / "cache"), "AGYVA_AGY_HOME": str(root / "agyhome"),
         "AGYVA_AGY_BIN": str(root / "fakeagy/agy"),

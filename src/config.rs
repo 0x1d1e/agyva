@@ -47,6 +47,10 @@ pub const KEYS: &[(&str, &str)] = &[
         "seconds between `agyva watch` checks (60-86400)",
     ),
     (
+        "check_updates",
+        "check GitHub Releases for newer agyva at startup: true | false",
+    ),
+    (
         "desktop_notifications",
         "let `agyva watch` send desktop notifications: true | false",
     ),
@@ -94,6 +98,7 @@ pub struct Config {
     pub color: ColorChoice,
     pub allow_untested_agy: bool,
     pub checkpoints_keep: u8,
+    pub check_updates: bool,
     pub lock_timeout_secs: u64,
     pub policy_acknowledged: bool,
     pub quota_fresh_secs: u64,
@@ -110,6 +115,7 @@ impl Default for Config {
             color: ColorChoice::Auto,
             allow_untested_agy: false,
             checkpoints_keep: 5,
+            check_updates: true,
             lock_timeout_secs: 10,
             policy_acknowledged: false,
             quota_fresh_secs: 300,
@@ -187,7 +193,7 @@ impl Config {
             "vault_key" => self.vault_key.as_str().into(),
             "color" => self.color.as_str().into(),
             "allow_untested_agy" => self.allow_untested_agy.to_string(),
-            "checkpoints_keep" => self.checkpoints_keep.to_string(),
+            "check_updates" => self.check_updates.to_string(),
             "lock_timeout_secs" => self.lock_timeout_secs.to_string(),
             "policy_acknowledged" => self.policy_acknowledged.to_string(),
             "quota_fresh_secs" => self.quota_fresh_secs.to_string(),
@@ -218,7 +224,7 @@ impl Config {
             "vault_key" => next.vault_key = value.parse().map_err(bad)?,
             "color" => next.color = value.parse().map_err(bad)?,
             "allow_untested_agy" => next.allow_untested_agy = parse_bool(value).map_err(bad)?,
-            "policy_acknowledged" => next.policy_acknowledged = parse_bool(value).map_err(bad)?,
+            "check_updates" => next.check_updates = parse_bool(value).map_err(bad)?,
             "desktop_notifications" => {
                 next.desktop_notifications = parse_bool(value).map_err(bad)?
             }

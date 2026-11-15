@@ -68,6 +68,18 @@ impl AppBackend {
     }
 }
 
+/// The same gate as `main`: config `check_updates` plus the
+/// `AGYVA_UPDATE_CHECK=0` kill-switch; config problems keep the default.
+fn update_check_enabled(env: &Env) -> bool {
+    if env.get("AGYVA_UPDATE_CHECK").is_some_and(|v| v == "0") {
+        return false;
+    }
+    crate::paths::Dirs::resolve(env)
+        .ok()
+        .and_then(|dirs| crate::config::Config::load(&dirs.config_file()).ok())
+        .is_none_or(|c| c.check_updates)
+}
+
 /// The vault would ask for a passphrase on the terminal, which the TUI owns.
 fn would_prompt(app: &App) -> bool {
     matches!(app.key_provider().load_meta(), Ok(Some(m)) if m.mode != "keyring")
@@ -77,7 +89,14 @@ fn would_prompt(app: &App) -> bool {
 impl Backend for AppBackend {
     fn load(&self, mode: RefreshMode) -> Reply<Dashboard> {
         let app = (self.factory)().map_err(|e| describe(&e))?;
-        app.dashboard(mode).map_err(|e| describe(&e))
+        let mut d = app.dashboard(mode).map_err(|e| describe(&e))?;
+        // The dashboard is where a startup update notice belongs: stderr is
+        // owned by the alternate screen. One passive check per process;
+        // failures are silent.
+        if d.update_notice.is_none() && update_check_enabled(&app.env) {
+            d.update_notice = crate::updater::startup_check(true).and_then(|c| c.notice());
+        }
+        Ok(d)
     }
 
     fn switch(&self, id: &str) -> Reply<SwitchSummary> {

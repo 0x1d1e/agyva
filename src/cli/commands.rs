@@ -16,8 +16,8 @@ use crate::core::error::{Error, Result, exit};
 use crate::core::recover::{RecoverMode, RecoverOutcome};
 use crate::core::usage::UsageOptions;
 use crate::paths::Env;
+use crate::updater::HttpTransport;
 
-/// Terminal facts and streams, injected so behavior is testable.
 pub struct Io<'a> {
     pub out: &'a mut dyn Write,
     pub err: &'a mut dyn Write,
@@ -279,6 +279,36 @@ fn dispatch(app: &App, command: Command, io: &mut Io<'_>, st: Style) -> Result<i
             writeln!(io.out, "{msg}").map_err(w)?;
         }
         Command::Config(c) => config(app, c, io)?,
+        Command::Export(a) => {
+            let r = app.export_archive(&a.file, a.account.as_deref())?;
+            writeln!(
+                io.out,
+                "Exported {} account(s) to {}",
+                r.accounts.len(),
+                r.file.display()
+            )
+            .map_err(w)?;
+        }
+        Command::Import { file } => {
+            let r = app.import_archive(&file)?;
+            writeln!(
+                io.out,
+                "Imported {} account(s), skipped {} already saved.",
+                r.added.len(),
+                r.skipped.len()
+            )
+            .map_err(w)?;
+            for warning in &r.warnings {
+                writeln!(io.err, "note: {warning}").map_err(w)?;
+            }
+        }
+        Command::Update { check, .. } => {
+            let r = crate::updater::install_update(check, Box::new(HttpTransport), None)?;
+            match r.notice() {
+                Some(text) => writeln!(io.out, "{text}").map_err(w)?,
+                None => writeln!(io.out, "agyva {} is up to date.", r.current).map_err(w)?,
+            }
+        }
         Command::Version => {
             writeln!(
                 io.out,

@@ -88,6 +88,43 @@ registry commit is a cleanup warning; the switch itself is complete.
 | Quota unavailable | Read the reason and source; run `doctor`. A cached reading does not verify the current login. |
 | Passphrase switch refused in the dashboard | Use `agyva use` in a shell so the vault can prompt. |
 
+## Move accounts between machines
+
+```sh
+agyva export /home/you/agyva-export.agy           # all saved accounts
+agyva export /home/you/one.agy --account work     # a single account
+agyva import /home/you/agyva-export.agy
+```
+
+`export` writes a passphrase-encrypted archive (always a fresh file; an
+existing destination is never overwritten). The archive passphrase is separate
+from your vault passphrase and is asked for interactively, or supply
+`AGYVA_ARCHIVE_PASSPHRASE` (minimum 8 characters). It uses the production
+Argon2id profile regardless of your local vault settings.
+
+`import` adds accounts that are missing and skips ones already saved — an
+import never modifies or removes anything in the destination. All entries are
+validated before anything changes, so a bad archive leaves your accounts
+untouched. Identities already saved keep their local aliases; conflicts (a new
+account claiming an alias you already use, or an id collision with a different
+identity) refuse the whole import with a hint. An interrupted import is
+completed or rolled back automatically on the next command.
+
+## Update Agyva
+
+```sh
+agyva update --check              # report only
+agyva update                      # download, verify and install
+```
+
+Updates come from this project's GitHub Releases: the release tarball and its
+`SHA256SUMS` are verified before the running binary is replaced atomically.
+Every invocation also checks for a newer stable release once at startup (2 s
+timeout, silent on failure) and prints a one-line notice on stderr; disable
+that with `check_updates = false` in the config or `AGYVA_UPDATE_CHECK=0` in
+the environment.
+
+
 ## Settings
 
 `agyva config show` lists values and their meanings. `agyva config path` prints
@@ -106,6 +143,7 @@ the file path; `agyva config set <key> <value>` validates before saving.
 | `quota_min_refresh_secs` | `60`; 10–3600. |
 | `watch_interval_secs` | `300`; 60–86400. |
 | `desktop_notifications` | `false`. |
+| `check_updates` | `true`; set `false` to skip the startup update check. |
 
 State and cache use XDG directories. `AGYVA_LOG=debug` sends logs to stderr;
 logging is disabled in the dashboard. Development overrides and isolated

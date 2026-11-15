@@ -21,6 +21,10 @@ pub struct Dashboard {
     /// Presentation policy for the open TUI; not part of the JSON schema.
     #[serde(skip)]
     pub quota_fresh_secs: u64,
+    /// A newer agyva release found by the startup check, shown once on the
+    /// dashboard. Not part of the JSON schema.
+    #[serde(skip)]
+    pub update_notice: Option<String>,
 }
 
 impl App {
@@ -39,6 +43,7 @@ impl App {
             status: self.status()?,
             doctor: self.doctor(),
             quota_fresh_secs: self.config.quota_fresh_secs,
+            update_notice: None,
             usage,
         })
     }

@@ -13,3 +13,4 @@ pub mod storage;
 #[doc(hidden)]
 pub mod testing;
 pub mod tui;
+pub mod updater;

@@ -101,7 +101,22 @@ impl Identity {
         }
     }
 }
+impl CredentialInfo {
+    /// Full typed identity comparison: subjects are equal, or normalized
+    /// emails are equal, or refresh fingerprints are equal — by the same
+    /// precedence `parse_credential` used. Expiry, tokens and other facts
+    /// that may legitimately change are deliberately not compared.
+    pub fn same_identity(&self, other: &Self) -> bool {
+        self.identity == other.identity
+    }
 
+    /// Whether this identity is only an email or a refresh fingerprint,
+    /// i.e. the credential carries no subject. Such logins participate in
+    /// the symmetric legacy email match (see `core::transfer`).
+    pub fn is_subjectless(&self) -> bool {
+        !matches!(self.identity, Identity::Subject(_))
+    }
+}
 impl CredentialInfo {
     pub fn account_id(&self) -> String {
         account_id_for_sub(self.identity.input())

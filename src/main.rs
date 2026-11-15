@@ -1,9 +1,10 @@
 use std::io::IsTerminal;
+use std::io::Write as _;
 use std::process::ExitCode;
 
 use clap::Parser;
 
-use agyva::cli::{Cli, Io, run};
+use agyva::cli::{Cli, Command, Io, run};
 use agyva::core::error::ErrorKind;
 use agyva::paths::Env;
 
@@ -25,12 +26,68 @@ fn is_broken_pipe(e: &agyva::core::error::Error) -> bool {
             .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
 }
 
+/// Whether the passive startup update check may run: the config says so and
+/// the `AGYVA_UPDATE_CHECK=0` kill-switch is unset. Config problems fall
+/// back to the default (`true`): help and version output must never fail
+/// because of this check.
+fn update_check_enabled(env: &Env) -> bool {
+    if env.get("AGYVA_UPDATE_CHECK").is_some_and(|v| v == "0") {
+        return false;
+    }
+    agyva::paths::Dirs::resolve(env)
+        .ok()
+        .and_then(|dirs| agyva::config::Config::load(&dirs.config_file()).ok())
+        .is_none_or(|c| c.check_updates)
+}
+
+/// Whether this invocation shows human-readable CLI output on stdout (so an
+/// update notice may go to stderr beside it). Not the interactive view
+/// (stderr would corrupt the screen), not `update` (it checks itself), not
+/// machine output (json/completions must stay exactly parseable).
+fn notice_allowed(cli: &Cli) -> bool {
+    let json = match &cli.command {
+        Some(Command::List(f) | Command::Current(f) | Command::Status(f) | Command::Doctor(f)) => {
+            f.json
+        }
+        Some(Command::Usage(a)) => a.json,
+        Some(Command::Health(a)) => a.json,
+        _ => false,
+    };
+    !json
+        && !matches!(
+            cli.command,
+            None | Some(Command::Completions { .. }) | Some(Command::Update { .. })
+        )
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    // try_parse (not parse): help/version and usage errors come back here,
+    // so every enabled startup — including those exits — can run the update
+    // check, while the check itself stays passive and can never turn a
+    // `--help` into a network failure.
+    let cli = match Cli::try_parse() {
+        Ok(cli) => Some(cli),
+        Err(e) => {
+            // Help/version print to stdout and exit 0; usage errors to
+            // stderr with code 2. Only the informational exits check.
+            let informational = !e.use_stderr();
+            let _ = e.print();
+            if informational
+                && update_check_enabled(&Env::from_process())
+                && let Some(notice) = agyva::updater::startup_check(true).and_then(|c| c.notice())
+            {
+                eprintln!("note: {notice}");
+            }
+            return ExitCode::from(u8::try_from(e.exit_code()).unwrap_or(2));
+        }
+    };
+    let cli = cli.expect("try_parse returned Ok above");
+    let env = Env::from_process();
     let stdout_tty = std::io::stdout().is_terminal();
     let stdin_tty = std::io::stdin().is_terminal();
     // The interactive view owns the screen: log lines on stderr would corrupt it.
-    if !(cli.command.is_none() && stdout_tty && stdin_tty) {
+    let tui = cli.command.is_none() && stdout_tty && stdin_tty;
+    if !tui {
         init_logging();
     }
     let mut stdout = std::io::stdout().lock();
@@ -41,12 +98,23 @@ fn main() -> ExitCode {
         out: &mut stdout,
         err: &mut stderr,
     };
-    let code = match run(cli, Env::from_process(), &mut io) {
+    // The interactive view gets its notice on the dashboard (delivered by
+    // the TUI worker, never stderr in the alternate screen). Every other
+    // enabled startup checks here; `agyva update` performs its own single
+    // metadata request instead.
+    if !tui
+        && !matches!(cli.command, Some(Command::Update { .. }))
+        && let Some(notice) =
+            agyva::updater::startup_check(update_check_enabled(&env)).and_then(|c| c.notice())
+        && notice_allowed(&cli)
+    {
+        let _ = writeln!(io.err, "note: {notice}");
+    }
+    let code = match run(cli, env, &mut io) {
         Ok(code) => code,
         // A reader that closed the pipe early (`agyva list | head`) is not an error.
         Err(e) if is_broken_pipe(&e) => 0,
         Err(e) => {
-            use std::io::Write;
             let _ = std::io::stdout().flush();
             if e.kind() == ErrorKind::SimulatedCrash {
                 eprintln!("{}", e.message());

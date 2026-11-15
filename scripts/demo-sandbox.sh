@@ -62,7 +62,7 @@ ag() {
   env -i PATH=/usr/bin:/bin HOME="$root/home" NO_COLOR=1 \
     AGYVA_CONFIG_DIR="$root/cfg" AGYVA_STATE_DIR="$root/state" AGYVA_CACHE_DIR="$root/cache" \
     AGYVA_AGY_HOME="$root/agyhome" AGYVA_AGY_BIN="$root/fakeagy/agy" \
-    AGYVA_BACKEND=file AGYVA_PASSPHRASE=synthetic-demo-passphrase \
+    AGYVA_BACKEND=file AGYVA_PASSPHRASE=synthetic-demo-passphrase AGYVA_UPDATE_CHECK=0 \
     "$bin" "$@" 2>>"$root/setup.log"
 }
 
@@ -88,5 +88,6 @@ export AGYVA_CACHE_DIR='$root/cache'
 export AGYVA_AGY_HOME='$root/agyhome'
 export AGYVA_AGY_BIN='$root/fakeagy/agy'
 export AGYVA_BACKEND=file
+export AGYVA_UPDATE_CHECK=0
 export AGYVA_PASSPHRASE=synthetic-demo-passphrase
 ENV

@@ -56,10 +56,25 @@ never terminates agy; it only reports detected sessions (from
 ## Usage, health and the TUI
 
 - Quota comes only from agy's own `/usage` command for the active login.
-  Agyva makes no network request of its own, uses no OAuth client of its own
-  and never passes a credential to agy; agy is run with no stdin and with all
-  `AGYVA_*` variables (including the vault passphrase) removed from its
-  environment. Its output is size-bounded and time-limited.
+  Agyva makes no network request of its own for quota, uses no OAuth client of
+  its own and never passes a credential to agy; agy is run with no stdin and
+  with all `AGYVA_*` variables (including the vault passphrase) removed from
+  its environment. Its output is size-bounded and time-limited.
+- The one deliberate network surface is self-update (`src/updater.rs`): HTTPS
+  GETs to the GitHub API releases endpoint and the release asset URLs, with
+  `https_only` enforced, a hard timeout and size ceilings. Archives are
+  verified against `SHA256SUMS` and (when present) GitHub's per-asset digest,
+  every tar member is screened (no traversal, no links, exactly one
+  executable), and the binary is staged and renamed atomically. The startup
+  check is passive: one metadata request, silent failure, `AGYVA_UPDATE_CHECK=0`
+  or `check_updates = false` disables it. It never runs inside JSON output,
+  completions, the TUI or the `update` command itself.
+- Export archives (`core::transfer`) are sealed with AES-256-GCM under the
+  dedicated `archive:1` context with a key derived from a **separate** archive
+  passphrase via the production Argon2id profile; the vault key is never
+  exported. The whole archive — including entries that will be skipped — is
+  validated before any destination state is read, and imports only ever add:
+  existing identities are skipped bit-for-bit untouched.
 - The quota cache (`<cache>/quota.json`, 0600) holds percentages, reset times,
   health state and a one-line rule description. It holds no tokens, no email
   and no raw agy output. The TUI and JSON output show the same data. Tests

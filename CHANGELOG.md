@@ -10,6 +10,30 @@ tagged; release artifacts are built by pushing a `v*` tag (see
 
 ## [Unreleased]
 
+### Added
+
+- `agyva export <FILE> [--account <SELECTOR>]` writes a portable archive of
+  saved accounts: passphrase-encrypted (a separate archive passphrase, the
+  production Argon2id profile), always a fresh absolute-path file, no vault
+  key or quota cache inside.
+- `agyva import <FILE>` adds accounts from an archive: every entry is
+  validated before anything changes, already-saved identities are skipped
+  untouched (including legacy email-only logins matched symmetrically), alias
+  conflicts only block new records and an id collision with a different
+  identity refuses the whole import. New snapshots go through encrypted
+  staging, a durable pending marker, no-clobber hard links and a
+  registry-last commit; an interrupted import is completed or rolled back
+  automatically on the next command.
+- `agyva update [--check]` self-updates from GitHub Releases: strictly newer
+  stable SemVer only, the release tarball verified against `SHA256SUMS` and
+  GitHub's per-asset digest, exact single-executable extraction (links,
+  traversal names and duplicates refused) and an atomic rename into place.
+- A passive startup update check on every enabled invocation (config
+  `check_updates`, default `true`; `AGYVA_UPDATE_CHECK=0` overrides): one
+  2-second request, silent on failure, a one-line stderr notice for human CLI
+  runs and a dashboard notice in the TUI — never for JSON output,
+  completions or the `update` command.
+
 ### Fixed
 
 - Terminal overlays pin confirmation/cancel controls on short screens and scroll

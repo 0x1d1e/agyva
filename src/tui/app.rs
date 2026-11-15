@@ -158,7 +158,15 @@ impl AppState {
     /// Replace the data; the selection follows the account id, not the row.
     pub fn apply_dashboard(&mut self, d: Dashboard) {
         let old_index = self.selected_index().unwrap_or(0);
+        let notice = d.update_notice.clone();
         self.data = Some(d);
+        // A fresh release notice shows once, without clobbering a message
+        // the user is already reading.
+        if let Some(n) = notice
+            && self.message.is_none()
+        {
+            self.message = Some(n);
+        }
         self.normalize_selection(old_index);
         self.dirty = true;
     }

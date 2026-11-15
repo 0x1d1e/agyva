@@ -78,6 +78,7 @@ impl Sandbox {
             .env("AGYVA_AGY_BIN", self.p("agy"))
             .env("AGYVA_BACKEND", "file")
             .env("AGYVA_TEST_MODE", "1")
+            .env("AGYVA_UPDATE_CHECK", "0")
             .env("AGYVA_PASSPHRASE", "synthetic-e2e-passphrase")
             .env("NO_COLOR", "1")
             .stdin(std::process::Stdio::null());

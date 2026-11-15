@@ -29,6 +29,9 @@ use crate::paths::Dirs;
 pub const KEY_SERVICE: &str = "agyva";
 pub const KEY_USER: &str = "vault-key";
 pub const ENV_PASSPHRASE: &str = "AGYVA_PASSPHRASE";
+/// Passphrase for import/export archives. Separate from the vault
+/// passphrase: an archive must never unlock the vault or vice versa.
+pub const ENV_ARCHIVE_PASSPHRASE: &str = "AGYVA_ARCHIVE_PASSPHRASE";
 const META_VERSION: u32 = 1;
 const VERIFIER_CONTEXT: &str = "vault-verifier";
 const VERIFIER_PLAINTEXT: &[u8] = b"agyva vault ok";
@@ -126,13 +129,29 @@ pub trait PassphraseSource: Send + Sync {
 /// `AGYVA_PASSPHRASE`, else an interactive no-echo prompt on the TTY.
 pub struct EnvOrTty {
     env_passphrase: Option<SecretString>,
+    /// Prompt label; also names the environment variable in errors.
+    env_name: &'static str,
+    label: &'static str,
 }
 
 impl EnvOrTty {
     /// `env_passphrase`: the value of `AGYVA_PASSPHRASE`, already taken out
     /// of the environment map.
     pub fn new(env_passphrase: Option<SecretString>) -> Self {
-        Self { env_passphrase }
+        Self {
+            env_passphrase,
+            env_name: ENV_PASSPHRASE,
+            label: "Vault passphrase: ",
+        }
+    }
+
+    /// Like [`EnvOrTty::new`] with the archive prompt and variable name.
+    pub fn for_archives(env_passphrase: Option<SecretString>) -> Self {
+        Self {
+            env_passphrase,
+            env_name: ENV_ARCHIVE_PASSPHRASE,
+            label: "Archive passphrase: ",
+        }
     }
 }
 
@@ -142,14 +161,13 @@ impl PassphraseSource for EnvOrTty {
             return Ok(p.clone());
         }
         if !std::io::stdin().is_terminal() {
-            return Err(Error::vault(
-                "a vault passphrase is required but no terminal is available",
-            )
-            .hint(format!(
-                "run interactively, or set {ENV_PASSPHRASE} in the environment"
-            )));
+            return Err(Error::vault(format!(
+                "a passphrase is required but no terminal is available (set {})",
+                self.env_name
+            ))
+            .hint(format!("run interactively, or set {}", self.env_name)));
         }
-        let first = rpassword::prompt_password("Vault passphrase: ")
+        let first = rpassword::prompt_password(self.label)
             .map_err(|e| Error::io("reading passphrase", e))?;
         let first = SecretString::from(first);
         if first.expose_secret().is_empty() {

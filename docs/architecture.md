@@ -135,8 +135,45 @@ removed from the process environment (that needs `unsafe` in edition 2024).
 Failpoint names: `after-checkpoint`, `after-prepared`, `after-native-write`,
 `after-companion`, `after-credential-written`, `verify`, `after-verified`,
 `after-registry`, `post-commit-cleanup`, `rollback-after-native`,
-`recover-after-native`. `crash` (default) exits 99 with no cleanup; `error`
+`recover-after-native`, `import-staged`, `import-marker`, `import-published`,
+`import-registry`. `crash` (default) exits 99 with no cleanup; `error`
 fails the step normally and exercises automatic rollback.
+
+## Transfer (export/import)
+
+`core::transfer` implements `agyva export` / `agyva import` over portable,
+passphrase-encrypted archives: a versioned envelope holding AES-256-GCM
+ciphertext (the dedicated `archive:1` context) whose key comes from a separate
+archive passphrase under the production Argon2id profile (19 MiB, t=2, p=1,
+16-byte salt). The payload is only `{record, snapshot}` entries — no vault
+key, no `active` pointer, no quota cache. Export always creates a new file
+(no clobber) and requires an absolute path.
+
+Import validates every entry (including ones that will be skipped) before
+reading destination state, then plans under the state lock: identities already
+saved are skipped unchanged (symmetric legacy match: subjectless-logins with
+equal emails count as the same person), alias conflicts apply only to new
+records, and an id already saved with a different identity refuses the whole
+import. New snapshots are published through encrypted staging files under
+`accounts/.import-staging`, a durable marker `config/.import-pending.json`
+written before any final snapshot, no-clobber hard links and a registry-last
+commit. `App::lock` runs `reconcile_import` on every mutating command, so a
+crash at any failpoint is completed or rolled back (by inode ownership) on the
+next run; unexpected staging entries are preserved and reported.
+
+## Self-update
+
+`updater.rs` checks GitHub Releases (one GET, 2 s, silent) on every enabled
+invocation — including help and version exits — and `agyva update` installs:
+stable SemVer must be strictly newer, the `agyva-<version>-<target>.tar.gz`
+asset plus `SHA256SUMS` are downloaded and verified (file sums and the GitHub
+per-asset digest when exposed), exactly `<stem>/agyva` is extracted (single
+regular executable; links, traversal names and duplicates refused) and the
+binary is staged next to the running one and renamed atomically. The
+`Transport` trait is the seam: production uses `ureq` with `https_only`,
+tests inject in-memory transports. The notice reaches humans on stderr and
+the TUI through `Dashboard::update_notice`, never stderr under the alternate
+screen.
 
 ## Quota provider boundary
 
@@ -239,7 +276,6 @@ completion off since no argument is a path. Install to
 
 ## Not yet built (deferred)
 
-- `export` / backup of the vault.
 - A command to restore a pinned checkpoint.
 - Plan detection; any quota source other than agy's own `/usage`.
 - macOS Keychain and Windows Credential Manager backends (CI jobs are

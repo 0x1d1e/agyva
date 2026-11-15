@@ -99,3 +99,32 @@ pub fn secrets_for(tag: &str) -> [String; 3] {
         format!("idtok-{tag}"),
     ]
 }
+
+/// Parse a synthetic credential into the pieces an archive record needs:
+/// derived id, alias, email and auth method. Fails the caller loudly for
+/// credentials `parse_credential` refuses, so tests never save junk.
+pub fn parse_for_test(raw: &[u8]) -> ParsedCredential {
+    let info = crate::agy::credentials::parse_credential(raw)
+        .unwrap_or_else(|e| panic!("test credential does not parse: {}", e.message()));
+    let alias = info
+        .email
+        .as_deref()
+        .and_then(|e| e.split('@').next())
+        .unwrap_or("account")
+        .to_owned();
+    ParsedCredential {
+        id: info.account_id(),
+        alias,
+        email: info.email.clone(),
+        auth_method: info.auth_method.clone(),
+    }
+}
+
+/// The identity facts of a synthetic credential, ready for a
+/// `core::registry::AccountRecord` or an archive entry.
+pub struct ParsedCredential {
+    pub id: String,
+    pub alias: String,
+    pub email: Option<String>,
+    pub auth_method: String,
+}

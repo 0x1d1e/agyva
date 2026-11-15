@@ -127,6 +127,47 @@ pub fn remove_durable(path: &Path) -> io::Result<bool> {
         Err(e) => Err(e),
     }
 }
+/// Create `path` with `data`, mode 0600, refusing to touch an existing
+/// name. The bytes are written to a private temp file in the same
+/// directory, fsynced, then hard-linked to `path` (which fails with
+/// `AlreadyExists` when the name is taken) and the directory is fsynced.
+/// Unlike `exists()`-then-`rename()` this cannot lose a file created in
+/// between; on any failure the temp file is cleaned up and `path` is
+/// never created or modified.
+pub fn atomic_create(path: &Path, data: &[u8]) -> io::Result<()> {
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?
+        .to_string_lossy();
+    let tmp = dir.join(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(PRIVATE_FILE_MODE);
+        }
+        let mut file = options.open(&tmp)?;
+        file.write_all(data)?;
+        file.sync_all()?;
+        drop(file);
+        fs::hard_link(&tmp, path)?;
+        sync_dir(dir)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
 
 /// Permission bits (`mode & 0o777`) of `path`, or `None` where unsupported.
 pub fn mode_of(path: &Path) -> Option<u32> {

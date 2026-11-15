@@ -72,6 +72,7 @@ fn is_executable(p: &Path) -> bool {
 pub fn query_version(agy: &Path) -> std::result::Result<AgyVersion, String> {
     let mut child = Command::new(agy)
         .env_remove(crate::storage::vault_key::ENV_PASSPHRASE)
+        .env_remove(crate::storage::vault_key::ENV_ARCHIVE_PASSPHRASE)
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

@@ -46,7 +46,8 @@ impl Sandbox {
             .env("AGYVA_AGY_HOME", self.p("agyhome"))
             .env("AGYVA_AGY_BIN", self.fake.bin())
             .env("AGYVA_BACKEND", "file")
-            .env("AGYVA_PASSPHRASE", "synthetic-e2e-passphrase");
+            .env("AGYVA_PASSPHRASE", "synthetic-e2e-passphrase")
+            .env("AGYVA_UPDATE_CHECK", "0");
     }
 
     fn add(&self, sub: &str, email: &str, tag: &str, alias: &str) {

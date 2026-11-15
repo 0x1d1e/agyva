@@ -14,14 +14,15 @@ Examples:
   agyva add --alias personal       Save the current agy login
   agyva usage --all --no-refresh   Inspect cached quota without running agy
   agyva use work                   Switch manually, then restart agy
-  agyva                           Open the terminal dashboard
+  agyva export /tmp/accounts.agy   Save every account to a portable archive
+  agyva                            Open the terminal dashboard
 
 Exit codes:
   0  success
   1  error (the message goes to stderr, followed by a `hint:` line)
   2  usage error (bad arguments, selector or setting)
-  3  recovery required: an interrupted switch is pending, or a keyring write
-     timed out and its outcome is unknown (run `agyva recover`)
+  3  recovery required: an interrupted switch or import is pending, or a
+     keyring write timed out and its outcome is unknown (run `agyva recover`)
 
 Selectors (for use, rename, remove): an alias, a list number, an exact email,
 an account id or unique id prefix, or `-` for the previous account.
@@ -30,7 +31,8 @@ Environment (development and tests): AGYVA_CONFIG_DIR, AGYVA_STATE_DIR,
 AGYVA_CACHE_DIR, AGYVA_AGY_HOME, AGYVA_AGY_BIN, AGYVA_PASSPHRASE, AGYVA_LOG,
 AGYVA_VAULT_KEY. AGYVA_BACKEND=memory|file (never touches the OS keyring)
 needs AGYVA_CONFIG_DIR, AGYVA_STATE_DIR and AGYVA_AGY_HOME as well.
-AGYVA_FAILPOINT works only with AGYVA_TEST_MODE=1.";
+AGYVA_ARCHIVE_PASSPHRASE protects export/import archives (separate from the
+vault passphrase). AGYVA_FAILPOINT works only with AGYVA_TEST_MODE=1.";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -40,7 +42,7 @@ AGYVA_FAILPOINT works only with AGYVA_TEST_MODE=1.";
     long_about = "Save agy logins in an encrypted vault and switch between them on request.\n\
                   Switching is always manual: agyva never rotates accounts by itself.",
     after_help = EXIT_CODES,
-    help_template = "{name} {version}\n{about-with-newline}\n{usage-heading} {usage}\n\nAccounts:\n  add          Save the current agy login\n  list         List saved accounts\n  use          Switch manually, then restart agy\n  current      Inspect agy's login\n  rename       Change an alias\n  remove       Forget a saved account\n\nQuota and health:\n  usage        Remaining quota by group and window\n  health       Account health and evidence\n  watch        Read-only foreground monitor\n\nDiagnostics and recovery:\n  status       State and pending recovery\n  doctor       Read-only checks\n  recover      Finish or undo an interrupted switch\n\nSetup:\n  config       View or change settings\n  completions  Fish, Bash or Zsh completion\n  version      agyva and agy versions\n  help         Help for a command\n\nOptions:\n{options}\n{after-help}",
+    help_template = "{name} {version}\n{about-with-newline}\n{usage-heading} {usage}\n\nAccounts:\n  add          Save the current agy login\n  list         List saved accounts\n  use          Switch manually, then restart agy\n  current      Inspect agy's login\n  rename       Change an alias\n  remove       Forget a saved account\n\nQuota and health:\n  usage        Remaining quota by group and window\n  health       Account health and evidence\n  watch        Read-only foreground monitor\n\nDiagnostics and recovery:\n  status       State and pending recovery\n  doctor       Read-only checks\n  recover      Finish or undo an interrupted switch\n\nTransfer and updates:\n  export       Save accounts to a portable encrypted archive\n  import       Add accounts from an archive (skips existing)\n  update       Check GitHub for a newer release; install on request\n\nSetup:\n  config       View or change settings\n  completions  Fish, Bash or Zsh completion\n  version      agyva and agy versions\n  help         Help for a command\n\nOptions:\n{options}\n{after-help}",
     propagate_version = true
 )]
 pub struct Cli {
@@ -86,6 +88,22 @@ pub enum Command {
         #[arg(value_enum)]
         shell: ShellName,
     },
+    /// Save accounts to a portable, password-encrypted archive.
+    Export(ExportArgs),
+    /// Add accounts from an archive (existing same identities are skipped).
+    Import {
+        /// Archive file to import.
+        file: std::path::PathBuf,
+    },
+    /// Check GitHub Releases for a newer agyva; install with --install.
+    Update {
+        /// Only check and report; do not download or install anything.
+        #[arg(long)]
+        check: bool,
+        /// Download and replace this binary with the newer release.
+        #[arg(long, conflicts_with = "check")]
+        install: bool,
+    },
     /// Print agyva and agy versions.
     Version,
 }
@@ -95,6 +113,15 @@ pub struct JsonFlag {
     /// Machine-readable output.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ExportArgs {
+    /// Archive file to write (never overwritten; must be an absolute path).
+    pub file: std::path::PathBuf,
+    /// Export only this account (alias, number, email or id).
+    #[arg(long)]
+    pub account: Option<String>,
 }
 
 #[derive(Debug, Args)]

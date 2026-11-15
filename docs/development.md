@@ -47,6 +47,8 @@ These exist for tests and sandboxes. Normal use needs none of them.
 | `AGYVA_WATCH_MAX_CYCLES` | Stop `agyva watch` after N cycles. |
 | `AGYVA_WATCH_INTERVAL_MS` | Override the watch interval in milliseconds; needs `AGYVA_TEST_MODE=1` (otherwise ignored). |
 | `AGYVA_REAL_KEYRING_TEST` | `1` enables the ignored real-keyring test. |
+| `AGYVA_ARCHIVE_PASSPHRASE` | Archive passphrase for `export`/`import` (minimum 8 characters); otherwise they prompt. |
+| `AGYVA_UPDATE_CHECK` | `0` disables the passive startup update check (overrides the config; used by every test and script subprocess). |
 
 ### Failpoints
 
@@ -70,6 +72,8 @@ agyva fail itself.
 | `tests/usage.rs`, `tests/e2e_usage.rs`, `tests/watch.rs` | Quota parsing, refresh rules, health classification, `usage`/`health`/`watch` through the real binary with the fake `agy`. |
 | `tests/tui.rs`, `tests/pty_smoke.rs` | TUI state machine and rendering with a test backend; a pty smoke run. |
 | `tests/e2e.rs` | The real binary in a sandbox: add, use, crash and recover, exit codes. |
+| `tests/transfer.rs` | Export/import roundtrip, skip rules, alias and id conflicts, archive refusals, crash/recovery at every import failpoint. |
+| `tests/updater.rs` | Self-update: SemVer gating, checksum and digest verification, unsafe-archive refusal, atomic replace of a temp target. |
 | `tests/real_keyring.rs` | Ignored, opt-in; throwaway service name only. |
 | unit tests under `src/` | Parsers, classification, error hints, config validation. |
 

@@ -21,7 +21,7 @@ use crate::storage::keyring::{MemoryKeyring, SecretStore, StoreErrorKind, System
 use crate::storage::lock::StateLock;
 use crate::storage::vault::Vault;
 use crate::storage::vault_key::{
-    ENV_PASSPHRASE, EnvOrTty, KdfParams, KeyProvider, PassphraseSource,
+    ENV_ARCHIVE_PASSPHRASE, ENV_PASSPHRASE, EnvOrTty, KdfParams, KeyProvider, PassphraseSource,
 };
 use secrecy::SecretString;
 
@@ -55,6 +55,10 @@ pub struct App {
     /// How long login-changing work waits for a refresh already running.
     pub(crate) refresh_grace: Duration,
     pub(crate) vault_mode: VaultKeyMode,
+    /// Passphrase source for import/export archives; deliberately separate
+    /// from the vault passphrase so an archive never unlocks the vault and
+    /// vice versa.
+    pub(crate) archive_passphrases: Arc<dyn PassphraseSource>,
     pub(crate) provider_override: Option<Arc<dyn QuotaProvider>>,
     native_override: Option<NativeAuth>,
     native: OnceCell<NativeAuth>,
@@ -68,7 +72,12 @@ impl App {
         // zeroizing holder, so it is not cloned around or passed to children.
         let env_passphrase = env.take(ENV_PASSPHRASE).map(SecretString::from);
         let had_env_passphrase = env_passphrase.is_some();
+        // Likewise the archive passphrase for import/export: taken out of
+        // the environment map immediately, separate from the vault one.
+        let archive_passphrase = env.take(ENV_ARCHIVE_PASSPHRASE).map(SecretString::from);
         let passphrases: Arc<dyn PassphraseSource> = Arc::new(EnvOrTty::new(env_passphrase));
+        let archive_passphrases: Arc<dyn PassphraseSource> =
+            Arc::new(EnvOrTty::for_archives(archive_passphrase));
         Self {
             lock_timeout: Duration::from_secs(config.lock_timeout_secs),
             refresh_wait: Duration::from_secs(2),
@@ -81,6 +90,7 @@ impl App {
             config,
             secrets: Arc::new(SystemKeyring::new()),
             passphrases,
+            archive_passphrases,
             failpoints: Failpoints::none(),
             had_env_passphrase,
             kdf: None,
@@ -143,6 +153,13 @@ impl App {
     #[must_use]
     pub fn with_failpoints(mut self, f: Failpoints) -> Self {
         self.failpoints = f;
+        self
+    }
+
+    /// Replace the archive passphrase source (tests).
+    #[must_use]
+    pub fn with_archive_passphrases(mut self, p: Arc<dyn PassphraseSource>) -> Self {
+        self.archive_passphrases = p;
         self
     }
 
@@ -278,8 +295,13 @@ impl App {
 
     // ------------------------------------------------------------- locking
 
+    /// Lock for everything that changes saved state. An interrupted import
+    /// is reconciled before the lock is returned, so no caller acts on a
+    /// half-imported state (see `core::transfer::reconcile_import`).
     pub(crate) fn lock(&self) -> Result<StateLock> {
-        StateLock::acquire(&self.dirs.lock_file(), self.lock_timeout)
+        let lock = StateLock::acquire(&self.dirs.lock_file(), self.lock_timeout)?;
+        self.reconcile_import()?;
+        Ok(lock)
     }
 
     /// Lock for everything that reads or replaces agy's login (switch,
