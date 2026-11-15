@@ -1,0 +1,49 @@
+name: release
+
+# Push a tag like v0.1.0 to build the Linux x86_64 tarball and checksums.
+# Artifacts are attached to a DRAFT release; review and publish by hand.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: scripts/release.sh
+      - name: Verify checksums
+        run: cd dist && sha256sum -c SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agyva-linux-x86_64
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+      - name: Draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+
+  # Not supported yet (see ci.yml). Disabled on purpose.
+  macos:
+    if: false
+    runs-on: macos-latest
+    steps:
+      - run: echo "macOS builds are not supported yet"
+
+  windows:
+    if: false
+    runs-on: windows-latest
+    steps:
+      - run: echo "Windows builds are not supported yet"

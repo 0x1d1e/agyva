@@ -1,0 +1,55 @@
+# cargo-deny policy. Run: cargo deny check
+# (the advisory check needs the RustSec database, fetched over the network).
+
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+
+[advisories]
+version = 2
+yanked = "deny"
+# Unmaintained-only notices (no vulnerability), all reached through zbus, which
+# the Secret Service keyring store and desktop notifications depend on. There is
+# no fixed release to upgrade to; revisit when zbus moves off these crates.
+#
+# Each ignore is time-boxed: reviewed on 2026-11-15, re-check at the next
+# dependency update, and in any case before 2027-05-15. Remove the entry as
+# soon as an advisory for the same crate stops being "unmaintained" only, or a
+# fixed zbus release exists.
+ignore = [
+    { id = "RUSTSEC-2026-0370", reason = "zbus_names unmaintained; transitive via zbus, no vulnerability; reviewed 2026-11-15, re-check by 2027-05-15" },
+    { id = "RUSTSEC-2026-0371", reason = "zvariant unmaintained; transitive via zbus, no vulnerability; reviewed 2026-11-15, re-check by 2027-05-15" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive unmaintained; transitive via zbus, no vulnerability; reviewed 2026-11-15, re-check by 2027-05-15" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

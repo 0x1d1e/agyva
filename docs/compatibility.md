@@ -1,0 +1,75 @@
+# Compatibility
+
+What agyva assumes about `agy`, and how much of it has actually been checked.
+Three labels are used throughout:
+
+- **ENFORCED**: a rule agyva itself applies (for example, refusing any version
+  outside 1.5.x). No claim is made about agy beyond what agyva checks.
+- **OBSERVED-LOCALLY**: a real `agy 1.5.9` was run once during development and
+  produced this output; the test fixture is derived from that run. No raw
+  transcript is committed, so treat it as one observation, not a guarantee.
+- **FROM-REFERENCE**: taken from public descriptions of `agy`'s behavior, or a
+  design constraint of agyva, and exercised only with synthetic data. Treat
+  as likely, not proven.
+- **UNVERIFIED**: implemented on a best guess; no real-`agy` evidence.
+
+## Matrix
+
+| Area | Label | Notes |
+| --- | --- | --- |
+| `agy --version` prints `agy X.Y.Z`; version gate | ENFORCED (gate); OBSERVED-LOCALLY (format, 1.5.9) | Agyva parses `agy X.Y.Z`, supports 1.5.x, and refuses anything else unless `--allow-untested` or `allow_untested_agy = true`; an undetectable version is also refused. That the output has this form was seen once on 1.5.9. |
+| `agy -p "/usage" --output-format json` | OBSERVED-LOCALLY (1.5.9) | Envelope `{status, response, usage}` and `command.data.groups[].buckets[]` with `window` (`5h` or `weekly`), `remaining_fraction` (0..1), `reset_time` (UTC). Seen once on 1.5.9; the fixture is derived from that run and no raw transcript is committed. Undocumented, so any other shape becomes `Unavailable(schema_changed)`. Groups may be `disabled`, shown as "not entitled", not "exhausted". |
+| Quota only for the logged-in account | FROM-REFERENCE (design constraint) | Agyva's design assumes `/usage` answers for the active login, so it never switches or injects credentials to read another account. This was not verified as an agy behavior on its own. |
+| Credential document shape (`token{access_token, token_type, refresh_token, expiry}`, `auth_method`, `id_token`) | FROM-REFERENCE | Handled as opaque bytes and written back verbatim; parsing extracts only the JWT `sub` and email (without signature verification). A login whose shape is not recognised is refused. |
+| Native store location: Secret Service `service=gemini`, `username=antigravity` | FROM-REFERENCE | |
+| Native store alternative: file `~/.gemini/antigravity-cli/antigravity-oauth-token` | FROM-REFERENCE | Select with `backend = file`. |
+| **Byte-compatibility of agyva's keyring write with real agy** (attributes, label `Password for 'antigravity' on 'gemini'`, `xdg:schema`, content type) | **UNVERIFIED** | Agyva sets `application/octet-stream`; go-keyring (which agy is believed to use) writes `text/plain`. Reads of agy's own item are expected to work; whether agy accepts an item agyva created or overwrote is not proven. See "Checking it yourself". |
+| Companion state: `installation_id`, `settings.json` `gcp` block | FROM-REFERENCE | Only the `gcp` block of `settings.json` is ever modified. |
+| Running-session detection (`presence/*.lock`, process name `agy`) | FROM-REFERENCE | Advisory only; agyva never signals a process. |
+| Health wording (Terms of Service message) | FROM-REFERENCE | Matched against the wording seen in the reference material; a changed message degrades to `unknown`. |
+| macOS Keychain, Windows Credential Manager | UNVERIFIED / not supported | Disabled in CI and release jobs. |
+
+## Platform support
+
+Linux with the freedesktop Secret Service (GNOME Keyring, KeePassXC, KWallet's
+bridge) is the target. The file backend works wherever `agy` keeps its token in
+the file. Without a Secret Service provider (headless server, container, SSH
+without a session bus), agyva's own vault uses a passphrase automatically
+(`vault_key = auto`) or by choice (`vault_key = passphrase`); `agy`'s login
+still has to live somewhere agyva can reach, which means `backend = file`.
+
+After any switch, restart `agy`: a running session keeps the login it started
+with.
+
+## Keyring timeouts
+
+A locked keyring may block on an unlock prompt. Agyva bounds the wait. A
+timeout on a **read** is an ordinary error. A timeout on a **write or delete**
+means the outcome is unknown (the item may or may not have changed), so agyva
+does not roll back: the journal stays in `RecoveryRequired`, the command exits
+3, and the hint is to resolve any keyring unlock prompt and run
+`agyva recover`.
+
+## Checking it yourself
+
+Do these only with a login you can afford to lose, and keep a copy of the
+token file or keyring item first.
+
+1. `agyva version` and `agyva doctor`: version gate, login shape, store.
+2. `agyva add`, then `agyva use <other>`, then start `agy` and confirm it is
+   logged in as `<other>` (the real test of byte-compatibility).
+3. The ignored opt-in test touches the real Secret Service daemon but only a
+   throwaway item named `agyva-test-<random>` (never `gemini`, `antigravity`
+   or `agyva`):
+
+   ```sh
+   AGYVA_REAL_KEYRING_TEST=1 cargo test --test real_keyring -- --ignored
+   ```
+
+   It was **NOT RUN** for this release. It verifies that the keyring layer
+   round-trips an item and reports a locked keyring as documented, not that
+   `agy` accepts agyva's item.
+
+If step 2 fails on your `agy`, switch with `backend = file` (if your `agy`
+supports the token file) and please report the `agy` version and the
+`agyva doctor` output.
