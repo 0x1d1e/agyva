@@ -11,6 +11,10 @@ pub struct Style {
     pub color: bool,
 }
 
+pub fn color_enabled(choice: crate::config::ColorChoice, no_color: bool, tty: bool) -> bool {
+    tty && !no_color && choice != crate::config::ColorChoice::Never
+}
+
 impl Style {
     pub fn bold(self, s: &str) -> String {
         if self.color {

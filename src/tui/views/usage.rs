@@ -23,7 +23,10 @@ fn window_line(name: &str, w: &WindowView, a: &AccountUsage, state: &AppState) -
             bar(w.remaining_percent, 10),
             percent_text(w.remaining_percent)
         ),
-        theme::quota(w.remaining_percent, a.refreshed_now),
+        theme::quota(
+            w.remaining_percent,
+            a.refreshed_now && state.freshness(a) == crate::core::quota::Freshness::Fresh,
+        ),
     )
 }
 
@@ -60,17 +63,21 @@ pub fn lines(state: &AppState) -> Vec<Line<'static>> {
     let marker = if a.active { " (active)" } else { "" };
     out.push(line(format!("{}{marker}", a.alias), theme::bold()));
     let seen = match a.observed_at {
-        Some(t) => format!("{}, {}", a.freshness.label(), format::ago(state.now, t)),
-        None => a.freshness.label().to_owned(),
+        Some(t) => format!(
+            "{}, {}",
+            state.freshness(a).label(),
+            format::ago(state.now, t)
+        ),
+        None => state.freshness(a).label().to_owned(),
     };
     let source = if a.refreshed_now {
-        "read from agy just now"
+        "read from agy /usage during this session"
     } else {
         "from agyva's cache"
     };
     out.push(line(format!("Data: {seen}; {source}"), theme::dim()));
     out.push(line(
-        format!("Health: {} - {}", a.health.label, a.health.evidence),
+        format!("Health: {} - {}", a.health.label, state.health_evidence(a)),
         theme::health(a.health.state),
     ));
     if let Some(u) = &a.unavailable {
@@ -82,6 +89,10 @@ pub fn lines(state: &AppState) -> Vec<Line<'static>> {
         out.push(line(format!("{label}: {}", u.text()), style));
     }
     out.push(Line::default());
+    out.push(line(
+        "REMAINING by group; missing windows are not reported.",
+        theme::dim(),
+    ));
     if a.groups.is_empty() {
         out.push(line("No quota reading available.", theme::dim()));
     }
@@ -93,14 +104,7 @@ pub fn lines(state: &AppState) -> Vec<Line<'static>> {
 }
 
 pub(super) fn render(state: &AppState, f: &mut Frame<'_>, area: Rect) {
-    let all = lines(state);
-    // PageUp/PageDown scroll; keep the last page reachable but not beyond.
-    let max = all.len().saturating_sub(usize::from(area.height));
-    let top = state.scroll.min(max);
-    f.render_widget(
-        Paragraph::new(all)
-            .wrap(Wrap { trim: false })
-            .scroll((rect_u16(top), 0)),
-        area,
-    );
+    let paragraph = Paragraph::new(lines(state)).wrap(Wrap { trim: false });
+    let top = state.scroll.min(super::paragraph_max(&paragraph, area));
+    f.render_widget(paragraph.scroll((rect_u16(top), 0)), area);
 }

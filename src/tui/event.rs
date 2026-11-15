@@ -145,12 +145,14 @@ fn on_key(s: &mut AppState, k: KeyEvent) -> Vec<Job> {
         KeyCode::F(n @ 1..=3) => set_view(s, View::ALL[usize::from(n) - 1]),
         KeyCode::Up | KeyCode::Char('k') => step(s, -1),
         KeyCode::Down | KeyCode::Char('j') => step(s, 1),
-        KeyCode::PageUp => s.scroll = s.scroll.saturating_sub(PAGE),
-        KeyCode::PageDown => s.scroll += PAGE,
+        KeyCode::PageUp => scroll(s, -(PAGE as isize)),
+        KeyCode::PageDown => scroll(s, PAGE as isize),
+        KeyCode::Home => s.scroll = 0,
+        KeyCode::End => s.scroll = super::views::max_scroll(s),
         KeyCode::Enter => return on_enter(s),
         KeyCode::Char('r') => return on_refresh(s),
-        KeyCode::Char('d') if s.selected().is_some() => s.overlay = Some(Overlay::Details),
-        KeyCode::Char('?') => s.overlay = Some(Overlay::Help),
+        KeyCode::Char('d') if s.selected().is_some() => s.open_overlay(Overlay::Details),
+        KeyCode::Char('?') => s.open_overlay(Overlay::Help),
         KeyCode::Char('/') => s.filter_editing = true,
         KeyCode::Char(c @ '1'..='9') => quick_select(s, c),
         _ => return vec![],
@@ -167,14 +169,20 @@ fn set_view(s: &mut AppState, v: View) {
 /// Arrows move the selection, except in Diagnostics where they scroll.
 fn step(s: &mut AppState, delta: isize) {
     if s.view == View::Diagnostics {
-        s.scroll = if delta < 0 {
-            s.scroll.saturating_sub(1)
-        } else {
-            s.scroll + 1
-        };
+        scroll(s, delta);
     } else {
         s.move_selection(delta);
     }
+}
+
+fn scroll(s: &mut AppState, delta: isize) {
+    let max = super::views::max_scroll(s);
+    let current = if s.overlay.is_some() {
+        &mut s.overlay_scroll
+    } else {
+        &mut s.scroll
+    };
+    *current = (*current).min(max).saturating_add_signed(delta).min(max);
 }
 
 fn on_enter(s: &mut AppState) -> Vec<Job> {
@@ -193,7 +201,7 @@ fn on_enter(s: &mut AppState) -> Vec<Job> {
         s.message = Some(format!("{} is already active.", a.alias));
         return vec![];
     }
-    s.overlay = Some(Overlay::Confirm {
+    s.open_overlay(Overlay::Confirm {
         id: a.id.clone(),
         alias: a.alias.clone(),
     });
@@ -243,8 +251,14 @@ fn on_overlay_key(s: &mut AppState, overlay: Overlay, k: KeyEvent) -> Vec<Job> {
         (Overlay::Confirm { .. }, KeyCode::Char('n' | 'N' | 'q') | KeyCode::Esc) => {
             s.overlay = None;
         }
-        (Overlay::Confirm { .. }, _) => {}
+        (Overlay::Confirm { .. }, KeyCode::Enter | KeyCode::Char('?' | 'd')) => {}
         (_, KeyCode::Esc | KeyCode::Char('q' | '?' | 'd') | KeyCode::Enter) => s.overlay = None,
+        (_, KeyCode::Up | KeyCode::Char('k')) => scroll(s, -1),
+        (_, KeyCode::Down | KeyCode::Char('j')) => scroll(s, 1),
+        (_, KeyCode::PageUp) => scroll(s, -(PAGE as isize)),
+        (_, KeyCode::PageDown) => scroll(s, PAGE as isize),
+        (_, KeyCode::Home) => s.overlay_scroll = 0,
+        (_, KeyCode::End) => s.overlay_scroll = super::views::max_scroll(s),
         _ => {}
     }
     vec![]
@@ -263,6 +277,7 @@ fn on_filter_key(s: &mut AppState, k: KeyEvent) -> Vec<Job> {
         }
         KeyCode::Up => s.move_selection(-1),
         KeyCode::Down => s.move_selection(1),
+        KeyCode::Char('?') => s.open_overlay(Overlay::Help),
         KeyCode::Char(c) if !c.is_control() && s.filter.chars().count() < 64 => s.filter.push(c),
         _ => {}
     }

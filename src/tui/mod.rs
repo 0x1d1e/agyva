@@ -181,6 +181,13 @@ fn spawn_watchdog(tty: Tty, heartbeat: Arc<AtomicU64>, start: Instant) {
 
 /// Open the interface against the real environment.
 pub fn run_tui(env: Env, allow_untested: bool) -> Result<i32> {
+    let settings = crate::core::app::App::from_env(env.clone(), allow_untested)?;
+    let color = crate::cli::output::color_enabled(
+        settings.config.color,
+        env.get("NO_COLOR").is_some_and(|value| !value.is_empty()),
+        true,
+    );
+    drop(settings);
     let backend: Arc<dyn Backend> = Arc::new(AppBackend::from_env(env, allow_untested));
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
@@ -199,7 +206,15 @@ pub fn run_tui(env: Env, allow_untested: bool) -> Result<i32> {
     let result = (|| {
         let mut terminal: Terminal<CrosstermBackend<Stdout>> =
             Terminal::new(CrosstermBackend::new(io::stdout()))?;
-        let r = drive(&mut terminal, backend, &stop, Some(&tty), &heartbeat, start);
+        let r = drive(
+            &mut terminal,
+            backend,
+            &stop,
+            Some(&tty),
+            &heartbeat,
+            start,
+            color,
+        );
         // Dropping a ratatui terminal tries to show the cursor and, when
         // that fails (the terminal is gone), prints to stderr, which panics
         // if stderr is the same dead terminal. The guard restores the screen.
@@ -242,6 +257,7 @@ where
         tty.as_ref(),
         &heartbeat,
         Instant::now(),
+        true,
     )
 }
 
@@ -253,6 +269,7 @@ fn drive<B: RatBackend>(
     tty: Option<&Tty>,
     heartbeat: &AtomicU64,
     start: Instant,
+    color: bool,
 ) -> io::Result<()>
 where
     B::Error: std::error::Error + Send + Sync + 'static,
@@ -260,6 +277,7 @@ where
     let backend_err = io::Error::other;
     let size = terminal.size().map_err(backend_err)?;
     let mut state = AppState::new((size.width, size.height), Utc::now());
+    state.color = color;
     let worker = spawn_worker(backend);
     send(&worker.jobs, startup(&mut state));
     let mut last_tick = Instant::now();

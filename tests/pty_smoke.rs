@@ -114,6 +114,10 @@ impl Drop for Session {
 
 impl Session {
     fn start(sb: &Sandbox) -> Self {
+        Self::with_env(sb, &[])
+    }
+
+    fn with_env(sb: &Sandbox, env: &[(&str, &str)]) -> Self {
         let pid_file = sb.p("agyva.pid");
         let inner = format!(
             "stty cols 100 rows 30; echo $$ > '{}'; exec {}",
@@ -126,6 +130,7 @@ impl Session {
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         sb.env(&mut c);
+        c.envs(env.iter().copied());
         let mut child = c.spawn().expect("spawn script");
         let stdin = Some(child.stdin.take().expect("stdin"));
         let mut stdout = child.stdout.take().expect("stdout");
@@ -261,7 +266,7 @@ fn switching_from_the_pty_replaces_the_login_like_use_does() {
     s.wait_for("72%");
     s.send(b"1"); // select alice (number 1)
     s.send(b"\r");
-    s.wait_for("Switch agy to alice");
+    s.wait_for("Switch to alice");
     s.send(b"n");
     std::thread::sleep(Duration::from_millis(300));
     assert!(
@@ -314,4 +319,49 @@ fn the_interface_exits_when_its_terminal_goes_away() {
         !alive(pid),
         "agyva (pid {pid}) is still running after its terminal went away"
     );
+}
+
+#[test]
+fn terminal_color_policy_keeps_selection_in_auto_never_and_no_color() {
+    if !script_available() {
+        eprintln!("SKIPPED: util-linux `script` is not installed");
+        return;
+    }
+    for (choice, no_color, colored) in [
+        ("auto", None, true),
+        ("never", None, false),
+        ("always", Some("1"), false),
+        ("auto", Some(""), true),
+    ] {
+        let sb = Sandbox::new();
+        sb.add("sub-color", "color@example.invalid", "color", "color");
+        let mut config = Command::new(env!("CARGO_BIN_EXE_agyva"));
+        config.args(["config", "set", "color", choice]);
+        sb.env(&mut config);
+        assert!(config.output().expect("config").status.success());
+        let extra: Vec<_> = no_color
+            .map(|value| ("NO_COLOR", value))
+            .into_iter()
+            .collect();
+        let mut session = Session::with_env(&sb, &extra);
+        session.wait_for("72%");
+        session.send(b"q");
+        let (code, out) = session.finish();
+        assert_eq!(code, Some(0));
+        check_terminal_restored(&out);
+        let sgr: Vec<u16> = out
+            .split("\x1b[")
+            .skip(1)
+            .filter_map(|seq| {
+                let end = seq.find(|ch: char| ch.is_ascii_alphabetic())?;
+                (seq.as_bytes()[end] == b'm').then_some(&seq[..end])
+            })
+            .flat_map(|params| params.split(';').filter_map(|param| param.parse().ok()))
+            .collect();
+        let has_colors = sgr
+            .iter()
+            .any(|n| (30..=38).contains(n) || (40..=48).contains(n) || (90..=107).contains(n));
+        assert_eq!(has_colors, colored, "color={choice}, NO_COLOR={no_color:?}");
+        assert!(sgr.contains(&7), "reverse selection survives monochrome");
+    }
 }

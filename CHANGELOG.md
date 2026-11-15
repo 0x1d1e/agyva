@@ -12,6 +12,15 @@ tagged; release artifacts are built by pushing a `v*` tag (see
 
 ### Fixed
 
+- Terminal overlays pin confirmation/cancel controls on short screens and scroll
+  wrapped Help/Details content. Usage and Diagnostics scroll to their rendered
+  final row, including after repeated page navigation.
+- Accounts show cache freshness and age instead of an unreported plan. Quota is
+  labelled remaining and its minimum-per-enabled-group summary is explained;
+  freshness ages while the dashboard stays open.
+- Narrow footers retain help and quit actions during filters and errors;
+  Diagnostics no longer advertises a switch action. Configured monochrome and
+  nonempty `NO_COLOR` preserve selection and text status without colors.
 - `agyva add` now accepts the consumer credential shape written by `agy 1.5.9`,
   which has no `id_token`. Identity is taken from a decodable `id_token`
   subject, then its email, then a validated plain `id_token_email`, then a
@@ -23,9 +32,18 @@ tagged; release artifacts are built by pushing a `v*` tag (see
 - The documented `agy 1.5.9` credential shape and identity precedence were
   corrected in the compatibility notes.
 
+### Changed
+
+- Task-first CLI help, explicit missing quota windows and cache sources, and a
+  shorter README with linked command, dashboard, Antigravity and JSON guides.
+- Documentation captures now replay a sanitized existing registry and quota
+  cache through the production CLI/TUI renderer. Group values, missing windows,
+  health and timestamps are preserved; synthetic captures remain explicit.
+
+
 ## [0.1.0] - 2026-11-15
 
-First version. Not yet tagged when this entry was written.
+First published release, with a Linux x86-64 archive and `SHA256SUMS`.
 
 ### Added
 

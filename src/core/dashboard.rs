@@ -18,6 +18,9 @@ pub struct Dashboard {
     pub usage: UsageReport,
     pub status: StatusView,
     pub doctor: DoctorReport,
+    /// Presentation policy for the open TUI; not part of the JSON schema.
+    #[serde(skip)]
+    pub quota_fresh_secs: u64,
 }
 
 impl App {
@@ -35,6 +38,7 @@ impl App {
             generated_at: usage.generated_at,
             status: self.status()?,
             doctor: self.doctor(),
+            quota_fresh_secs: self.config.quota_fresh_secs,
             usage,
         })
     }

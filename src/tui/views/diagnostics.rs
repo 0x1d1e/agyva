@@ -73,13 +73,7 @@ pub fn lines(state: &AppState) -> Vec<Line<'static>> {
 }
 
 pub(super) fn render(state: &AppState, f: &mut Frame<'_>, area: Rect) {
-    let all = lines(state);
-    let max = all.len().saturating_sub(usize::from(area.height));
-    let top = state.scroll.min(max);
-    f.render_widget(
-        Paragraph::new(all)
-            .wrap(Wrap { trim: false })
-            .scroll((rect_u16(top), 0)),
-        area,
-    );
+    let paragraph = Paragraph::new(lines(state)).wrap(Wrap { trim: false });
+    let top = state.scroll.min(super::paragraph_max(&paragraph, area));
+    f.render_widget(paragraph.scroll((rect_u16(top), 0)), area);
 }

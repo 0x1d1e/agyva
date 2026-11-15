@@ -144,14 +144,14 @@ impl Backend for Fake {
 #[test]
 fn column_plan_drops_columns_progressively() {
     let wide = column_plan(120);
-    assert!(wide.five && wide.status && wide.weekly && wide.plan);
+    assert!(wide.five && wide.status && wide.weekly && wide.cache);
     let w40 = column_plan(40);
-    assert!(w40.five && w40.status && !w40.weekly && !w40.plan);
+    assert!(w40.five && w40.status && !w40.weekly && !w40.cache);
     assert!(w40.alias >= 6);
     let w30 = column_plan(30);
     assert!(w30.five && !w30.status);
     let w20 = column_plan(20);
-    assert!(!w20.five && !w20.status && !w20.weekly && !w20.plan);
+    assert!(!w20.five && !w20.status && !w20.weekly && !w20.cache);
     assert!(w20.alias >= 6);
     assert_eq!(column_plan(1).alias, 1);
     assert_eq!(column_plan(0).alias, 1);
@@ -690,7 +690,7 @@ fn enter_confirm_yes_switches_through_the_same_core_path_as_use() {
     // Cancel first: nothing happens.
     assert!(press(&mut s, key(KeyCode::Enter)).is_empty());
     assert!(matches!(s.overlay, Some(Overlay::Confirm { .. })));
-    assert!(text(&s, 100, 24).contains("Switch agy to bob"));
+    assert!(text(&s, 100, 24).contains("Switch to bob"));
     assert!(press(&mut s, ch('n')).is_empty());
     assert!(s.overlay.is_none());
     assert_eq!(rig.live_id().as_deref(), Some(live_before.as_str()));
@@ -878,4 +878,148 @@ fn losing_the_worker_clears_the_busy_flags_so_quit_still_works() {
         !s.switching && s.quit,
         "a lost worker must not block quitting"
     );
+}
+
+#[test]
+fn short_confirmation_pins_controls_and_escape_never_switches() {
+    let (_rig, _fake, d) = base();
+    for size in [(40, 6), (20, 5), (12, 4)] {
+        let mut s = state(Some(d.clone()), size);
+        press(&mut s, ch('2'));
+        press(&mut s, key(KeyCode::Enter));
+        let out = text(&s, size.0, size.1);
+        assert!(out.contains('y') && out.contains("Esc"), "{size:?}: {out}");
+        assert!(press(&mut s, key(KeyCode::Esc)).is_empty());
+        assert!(s.overlay.is_none() && !s.switching && !s.quit);
+    }
+}
+
+#[test]
+fn wrapped_views_and_overlays_reach_the_last_line_and_scroll_back() {
+    let (_rig, _fake, mut d) = base();
+    let last = "END-OF-CONTENT";
+    d.doctor.checks.last_mut().expect("check").hint =
+        Some(format!("{} {last}", "wrapped diagnostic ".repeat(30)));
+    for a in &mut d.usage.accounts {
+        if let Some(group) = a.groups.last_mut() {
+            group.group = format!("{} {last}", "wrapped group ".repeat(30));
+        }
+        a.health.warning = Some(format!("{} {last}", "wrapped details ".repeat(30)));
+    }
+    let mut s = state(Some(d), (28, 8));
+    for view in [View::Usage, View::Diagnostics] {
+        s.view = view;
+        s.scroll = 0;
+        for _ in 0..100 {
+            press(&mut s, key(KeyCode::PageDown));
+        }
+        assert!(
+            text(&s, 28, 8).contains(last),
+            "{:?}: {}",
+            view,
+            text(&s, 28, 8)
+        );
+        let end = s.scroll;
+        press(&mut s, key(KeyCode::PageUp));
+        assert!(
+            s.scroll < end,
+            "scroll back immediately from the clamped end"
+        );
+    }
+    for overlay in [Overlay::Help, Overlay::Details] {
+        s.open_overlay(overlay.clone());
+        press(&mut s, key(KeyCode::End));
+        let out = text(&s, 28, 8);
+        let expected = if overlay == Overlay::Help {
+            "switch."
+        } else {
+            last
+        };
+        assert!(out.contains(expected) && out.contains("Esc close"), "{out}");
+        let end = s.overlay_scroll;
+        press(&mut s, key(KeyCode::Up));
+        assert_eq!(s.overlay_scroll, end.saturating_sub(1));
+        press(&mut s, key(KeyCode::Esc));
+    }
+}
+
+#[test]
+fn narrow_footer_keeps_help_and_quit_during_errors_and_filters() {
+    let (_rig, _fake, d) = base();
+    let mut s = state(Some(d), (20, 10));
+    for view in View::ALL {
+        s.view = view;
+        s.error = Some("a long actionable refresh error".into());
+        s.filter = "carol".into();
+        let out = text(&s, 20, 10);
+        let footer = out.lines().last().expect("footer");
+        assert!(
+            footer.contains("? help") && footer.contains("q quit"),
+            "{out}"
+        );
+        if view == View::Diagnostics {
+            assert!(!footer.contains("Enter"));
+        }
+        press(&mut s, ch('?'));
+        assert_eq!(s.overlay, Some(Overlay::Help));
+        press(&mut s, key(KeyCode::Esc));
+    }
+    s.filter_editing = true;
+    assert!(text(&s, 20, 10).contains("^C quit"));
+    press(&mut s, ch('?'));
+    assert_eq!(s.overlay, Some(Overlay::Help));
+    assert_eq!(s.filter, "carol");
+}
+
+#[test]
+fn monochrome_keeps_selection_and_text_status_and_freshness_ages() {
+    use agyva::cli::output::color_enabled;
+    use agyva::config::ColorChoice;
+    use agyva::core::quota::Freshness;
+    use ratatui::style::{Color, Modifier};
+    for choice in [ColorChoice::Auto, ColorChoice::Always, ColorChoice::Never] {
+        assert!(!color_enabled(choice, true, true));
+        assert!(!color_enabled(choice, false, false));
+    }
+    assert!(!color_enabled(ColorChoice::Never, false, true));
+    assert!(color_enabled(ColorChoice::Auto, false, true));
+    let (_rig, _fake, mut d) = base();
+    d.quota_fresh_secs = 10;
+    let mut s = state(Some(d), (100, 24));
+    s.color = false;
+    let observed = s
+        .selected()
+        .expect("selected")
+        .observed_at
+        .expect("observed");
+    s.now = observed;
+    assert_eq!(
+        s.freshness(s.selected().expect("selected")),
+        Freshness::Fresh
+    );
+    update(
+        &mut s,
+        Event::Tick(observed + chrono::Duration::seconds(11)),
+    );
+    assert_eq!(
+        s.freshness(s.selected().expect("selected")),
+        Freshness::Stale
+    );
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
+    terminal.draw(|f| views::render(&s, f)).expect("draw");
+    let cells = terminal.backend().buffer().content();
+    assert!(
+        cells
+            .iter()
+            .all(|cell| cell.fg == Color::Reset && cell.bg == Color::Reset)
+    );
+    assert!(
+        cells
+            .iter()
+            .any(|cell| cell.modifier.contains(Modifier::REVERSED))
+    );
+    assert!(text(&s, 100, 24).contains("stale"));
+    s.view = View::Usage;
+    let out = text(&s, 100, 24);
+    assert!(out.contains("stale") && !out.contains("just now"), "{out}");
 }

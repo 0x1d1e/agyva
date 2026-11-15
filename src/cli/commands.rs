@@ -9,7 +9,7 @@ use serde::Serialize;
 use super::output::{self, Style};
 use super::usage_out;
 use super::{Cli, Command, ConfigCommand, ShellName};
-use crate::config::{ColorChoice, KEYS};
+use crate::config::KEYS;
 use crate::core::add::AddOptions;
 use crate::core::app::App;
 use crate::core::error::{Error, Result, exit};
@@ -35,12 +35,13 @@ fn print_json<T: Serialize>(io: &mut Io<'_>, value: &T) -> Result<()> {
 }
 
 fn style(app: &App, io: &Io<'_>, env: &Env) -> Style {
-    let color = match app.config.color {
-        ColorChoice::Always => true,
-        ColorChoice::Never => false,
-        ColorChoice::Auto => io.stdout_tty && env.get("NO_COLOR").is_none(),
-    };
-    Style { color }
+    Style {
+        color: output::color_enabled(
+            app.config.color,
+            env.get("NO_COLOR").is_some_and(|value| !value.is_empty()),
+            io.stdout_tty,
+        ),
+    }
 }
 
 fn confirm(io: &mut Io<'_>, question: &str) -> Result<bool> {

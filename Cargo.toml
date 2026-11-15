@@ -37,7 +37,7 @@ getrandom = "0.3"
 hex = "0.4"
 keyring-core = "1"
 notify-rust = "4.17.0"
-ratatui = "0.30.2"
+ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 rpassword = "7"
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }

@@ -3,11 +3,15 @@
 ## Policy
 
 Agyva is a **manual** account switcher. It switches only when you run
-`agyva use`. It does not rotate, balance or auto-switch accounts, does not
+`agyva use` or confirm a dashboard switch. It does not rotate, balance or auto-switch accounts, does not
 retry on quota errors, and is not a way to work around usage limits. You are
 responsible for complying with Google's terms for every account you save. The
 first `add` or `use` prints this notice once (recorded as
 `policy_acknowledged` in `config.toml`).
+
+Google’s [Antigravity FAQ](https://antigravity.google/docs/faq/) says using
+third-party tools or rotating accounts is not supported on consumer plans.
+Accounts can be suspended; Agyva cannot prevent that or work around it.
 
 Agyva does not use its own OAuth client, private Google endpoints, or a
 spoofed user agent. It only moves agy's own stored login between local slots.
@@ -127,8 +131,8 @@ never terminates agy; it only reports detected sessions (from
 
 ## Unverified compatibility
 
-The matrix of what is verified (against agy 1.5.9), taken from reference, or
-unverified is in `docs/compatibility.md`. In short:
+The [compatibility matrix](compatibility.md) separates enforced rules, locally
+observed agy 1.5.9 shapes, reference assumptions and unverified behavior.
 
 Agyva writes the keyring item `gemini`/`antigravity` with label
 `Password for 'antigravity' on 'gemini'` and `xdg:schema =
@@ -141,9 +145,10 @@ type (`application/octet-stream` here versus go-keyring's `text/plain`), is
 
 ## Compatibility policy
 
-Agyva is verified against agy 1.5.9 (supported range 1.5.x). Other versions are refused unless you
-pass `--allow-untested` or set `allow_untested_agy = true`. A login whose
-shape is not recognized is refused rather than guessed at.
+Agyva accepts agy 1.5.x by default. Consumer credential and quota shapes were
+observed on 1.5.9; native keyring writes remain unverified. Other versions are
+refused unless you pass `--allow-untested` or set `allow_untested_agy = true`.
+A login whose shape is not recognized is refused rather than guessed at.
 
 ## Reporting
 

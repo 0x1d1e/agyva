@@ -10,6 +10,12 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 pub use commands::{Io, run};
 
 const EXIT_CODES: &str = "\
+Examples:
+  agyva add --alias personal       Save the current agy login
+  agyva usage --all --no-refresh   Inspect cached quota without running agy
+  agyva use work                   Switch manually, then restart agy
+  agyva                           Open the terminal dashboard
+
 Exit codes:
   0  success
   1  error (the message goes to stderr, followed by a `hint:` line)
@@ -34,6 +40,7 @@ AGYVA_FAILPOINT works only with AGYVA_TEST_MODE=1.";
     long_about = "Save agy logins in an encrypted vault and switch between them on request.\n\
                   Switching is always manual: agyva never rotates accounts by itself.",
     after_help = EXIT_CODES,
+    help_template = "{name} {version}\n{about-with-newline}\n{usage-heading} {usage}\n\nAccounts:\n  add          Save the current agy login\n  list         List saved accounts\n  use          Switch manually, then restart agy\n  current      Inspect agy's login\n  rename       Change an alias\n  remove       Forget a saved account\n\nQuota and health:\n  usage        Remaining quota by group and window\n  health       Account health and evidence\n  watch        Read-only foreground monitor\n\nDiagnostics and recovery:\n  status       State and pending recovery\n  doctor       Read-only checks\n  recover      Finish or undo an interrupted switch\n\nSetup:\n  config       View or change settings\n  completions  Fish, Bash or Zsh completion\n  version      agyva and agy versions\n  help         Help for a command\n\nOptions:\n{options}\n{after-help}",
     propagate_version = true
 )]
 pub struct Cli {

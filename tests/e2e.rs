@@ -303,6 +303,17 @@ fn help_completions_config_and_version() {
     let help = sb.run(&[]);
     assert_eq!(help.code, 0);
     assert!(help.out.contains("Usage: agyva") && help.out.contains("Exit codes"));
+    for task in [
+        "Accounts:",
+        "Quota and health:",
+        "Diagnostics and recovery:",
+        "Setup:",
+        "Examples:",
+        "agyva use ",
+    ] {
+        assert!(help.out.contains(task), "missing {task}: {}", help.out);
+    }
+    assert!(!help.out.contains('\u{1b}'));
     for shell in ["fish", "bash", "zsh"] {
         let r = sb.run(&["completions", shell]);
         assert_eq!(r.code, 0);
@@ -534,4 +545,22 @@ fn a_missing_or_ambiguous_selector_exits_two() {
     assert_eq!(both.code, 2, "{}", both.all());
     assert!(both.err.contains("matches several"), "{}", both.err);
     assert!(both.err.contains("hint:"), "{}", both.err);
+}
+
+#[test]
+fn redirected_human_and_json_output_stay_plain_with_color_always() {
+    let sb = Sandbox::new();
+    sb.login("sub-stream", "stream@example.invalid", "stream");
+    assert_eq!(sb.run(&["add", "--alias", "stream"]).code, 0);
+    assert_eq!(sb.run(&["config", "set", "color", "always"]).code, 0);
+    for args in [&["list"][..], &["list", "--json"][..]] {
+        let result = sb.cmd(args, &[("NO_COLOR", UNSET)]);
+        assert_eq!(result.code, 0, "{}", result.all());
+        assert!(!result.out.contains('\u{1b}') && !result.err.contains('\u{1b}'));
+        if args.contains(&"--json") {
+            let value: serde_json::Value = serde_json::from_str(&result.out).expect("JSON");
+            assert_eq!(value["schema_version"], 1);
+            assert_eq!(value["accounts"][0]["alias"], "stream");
+        }
+    }
 }

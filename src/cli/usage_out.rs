@@ -13,7 +13,7 @@ const BAR_CELLS: usize = 10;
 
 fn window(label: &str, w: Option<&WindowView>, now: DateTime<Utc>) -> String {
     match w {
-        None => format!("{label} {:<width$}", "-", width = BAR_CELLS + 14),
+        None => format!("{label} not reported"),
         Some(w) => {
             let reset = w.reset_at.map_or_else(
                 || "reset time unknown".to_owned(),
@@ -29,7 +29,7 @@ fn window(label: &str, w: Option<&WindowView>, now: DateTime<Utc>) -> String {
 }
 
 fn group_line(g: &QuotaView, now: DateTime<Utc>) -> String {
-    let name = fit(&g.label(), 22);
+    let name = g.label();
     if g.disabled {
         return format!(
             "  {name} disabled for this account (not entitled; not the same as exhausted)"
@@ -71,6 +71,7 @@ pub fn render_usage(r: &UsageReport, st: Style) -> String {
         out.push('\n');
         return out;
     }
+    out.push_str("REMAINING quota by group (5H / WEEKLY); missing windows are not reported.\n");
     for a in &r.accounts {
         let head = format!(
             "{} {} <{}>  [{}]",

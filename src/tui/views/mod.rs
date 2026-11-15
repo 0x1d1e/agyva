@@ -8,9 +8,10 @@ mod overlay;
 mod usage;
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout};
-use ratatui::style::Style;
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::{Paragraph, Wrap};
 
 use super::app::{AppState, View};
 use crate::core::format;
@@ -26,16 +27,9 @@ pub fn render(state: &AppState, f: &mut Frame<'_>) {
     if area.width < MIN_W || area.height < MIN_H {
         return;
     }
-    let banner_h = chrome::banner_height(state, area);
-    let [head, banner, body, foot] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(banner_h),
-        Constraint::Min(0),
-        Constraint::Length(1),
-    ])
-    .areas(area);
+    let [head, banner, body, foot] = areas(state, area);
     chrome::header(state, f, head);
-    if banner_h > 0 {
+    if banner.height > 0 {
         chrome::banner(state, f, banner);
     }
     match state.view {
@@ -45,6 +39,46 @@ pub fn render(state: &AppState, f: &mut Frame<'_>) {
     }
     chrome::footer(state, f, foot);
     overlay::render(state, f, area);
+    if !state.color {
+        for cell in &mut f.buffer_mut().content {
+            cell.fg = Color::Reset;
+            cell.bg = Color::Reset;
+        }
+    }
+}
+
+fn areas(state: &AppState, area: Rect) -> [Rect; 4] {
+    let status = state.error.is_some()
+        || state.message.is_some()
+        || !state.filter.is_empty()
+        || state.filter_editing;
+    Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(chrome::banner_height(state, area)),
+        Constraint::Min(0),
+        Constraint::Length(if status && area.height >= 8 { 2 } else { 1 }),
+    ])
+    .areas(area)
+}
+
+pub(super) fn paragraph_max(paragraph: &Paragraph<'_>, area: Rect) -> usize {
+    paragraph
+        .line_count(area.width)
+        .saturating_sub(usize::from(area.height))
+}
+
+pub(crate) fn max_scroll(state: &AppState) -> usize {
+    let area = Rect::new(0, 0, state.size.0, state.size.1);
+    if state.overlay.is_some() {
+        return overlay::max_scroll(state, area);
+    }
+    let body = areas(state, area)[2];
+    let lines = match state.view {
+        View::Usage => usage::lines(state),
+        View::Diagnostics => diagnostics::lines(state),
+        View::Accounts => return 0,
+    };
+    paragraph_max(&Paragraph::new(lines).wrap(Wrap { trim: false }), body)
 }
 
 /// Append `text` to `spans`, never exceeding `room` columns in total.

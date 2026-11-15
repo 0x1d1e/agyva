@@ -90,7 +90,7 @@ It never reads or writes any credential.
 | Script | Purpose |
 | --- | --- |
 | `scripts/demo-sandbox.sh <dir>` | Build a synthetic sandbox (fake accounts, fake agy, scratch HOME) and print `export` lines. Use it to try agyva without touching anything real. |
-| `scripts/capture-tui.sh [file]` | Capture the TUI from a sandbox into `docs/tui-capture.txt` and `docs/tui.svg` (needs `tmux` and `python3`; private socket). |
+| `scripts/capture-tui.sh [--snapshot\|--synthetic] [file]` | Rebuild the debug CLI and capture helper; replay sanitized cached evidence by default, or explicitly generate synthetic data. Writes text plus Accounts/Usage SVGs; needs Python 3. |
 | `scripts/check-links.py` | Check every relative Markdown link and heading anchor without network access. |
 | `scripts/release.sh` | `cargo build --release --locked`, package into `dist/`, write and check `SHA256SUMS`. |
 
@@ -98,6 +98,27 @@ It never reads or writes any credential.
 eval "$(scripts/demo-sandbox.sh /tmp/agyva-demo)"   # bash/zsh
 agyva list
 ```
+
+The default capture reads [sanitized evidence](capture-data/accounts.json) into
+an isolated registry/cache without credentials or a vault. The fresh debug CLI
+checks the replay’s per-group values, health and timestamps. The capture helper
+loads a cache-only dashboard and drives the production event handlers and
+renderer on Ratatui’s `TestBackend`, preserving cell positions, bold and reverse
+selection in SVG. It never starts a refresh or switch job; the driver checks
+the cache stayed byte-for-byte unchanged. These are rendered captures, not PTY
+screen recordings. PTY behavior is covered separately by `tests/pty_smoke.rs`.
+The capture date is retained; relative ages reflect generation time.
+
+`scripts/capture-tui.sh --synthetic /tmp/agyva-synthetic.txt` exercises the
+original fake-login demo without overwriting the real-cache documentation.
+The demo’s credentials and quota are synthetic and labelled as such.
+
+Terminal decisions follow [CLI Guidelines](https://clig.dev/) for help and
+streams, [NO_COLOR](https://no-color.org/) for nonempty environment values,
+and [Ratatui’s FAQ](https://ratatui.rs/faq/) for terminal lifecycle and rendering.
+`Paragraph::line_count` uses the enabled `unstable-rendered-line-info` feature
+to measure Ratatui’s actual wrapping instead of maintaining a second wrapping
+algorithm. Keep the focused wrapped-content regressions when upgrading it.
 
 ## Dependencies and policy checks
 

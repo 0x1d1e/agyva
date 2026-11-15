@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 
 use crate::core::dashboard::Dashboard;
 use crate::core::health::AccountHealth;
+use crate::core::quota::{Freshness, FreshnessPolicy};
 use crate::core::usage::AccountUsage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +55,8 @@ pub struct AppState {
     pub error: Option<String>,
     pub message: Option<String>,
     pub scroll: usize,
+    pub overlay_scroll: usize,
+    pub color: bool,
     pub size: (u16, u16),
     pub now: DateTime<Utc>,
     pub dirty: bool,
@@ -77,6 +80,8 @@ impl AppState {
             scroll: 0,
             size,
             now,
+            overlay_scroll: 0,
+            color: true,
             dirty: true,
             quit: false,
         }
@@ -175,5 +180,25 @@ impl AppState {
         self.selected_id = Some(id.to_owned());
         self.scroll = 0;
         self.dirty = true;
+    }
+    pub fn freshness(&self, account: &AccountUsage) -> Freshness {
+        let seconds = self.data.as_ref().map_or(300, |d| d.quota_fresh_secs);
+        FreshnessPolicy::new(seconds).classify(account.observed_at, self.now)
+    }
+
+    pub fn health_evidence<'a>(&self, account: &'a AccountUsage) -> &'a str {
+        if account.health.state != AccountHealth::Healthy {
+            return &account.health.evidence;
+        }
+        if self.freshness(account) == Freshness::Fresh {
+            "agy returned quota data during this session"
+        } else {
+            "agy returned quota data at the recorded observation time"
+        }
+    }
+
+    pub fn open_overlay(&mut self, overlay: Overlay) {
+        self.overlay = Some(overlay);
+        self.overlay_scroll = 0;
     }
 }

@@ -1,0 +1,48 @@
+{
+  "capture_schema_version": 1,
+  "provenance": {
+    "source": "installed agyva reading existing local registry and quota cache",
+    "commands": ["agyva list --json", "agyva usage --all --no-refresh --json"],
+    "captured_at": "2026-11-15T09:07:11.781027286Z",
+    "refresh_performed": false,
+    "live_identity_verified": false,
+    "identities": "sample aliases, example.invalid emails and independently assigned sample IDs; not original identities",
+    "measurements": "quota percentages, model/group names, windows, timestamps, health and freshness preserved from cache-only command output; no synthetic measurements",
+    "free_text": "identifying fields sanitized in memory; unrecognized JSON fields excluded"
+  },
+  "list": {
+    "schema_version": 1,
+    "active": "0000000001",
+    "accounts": [
+      {"number": 1, "id": "0000000001", "alias": "personal", "email": "personal@example.invalid", "auth_method": "consumer", "active": true, "previous": false, "added_at": "2026-11-15T08:22:23.356296323Z", "last_used_at": "2026-11-15T08:30:58.296728629Z"},
+      {"number": 2, "id": "0000000002", "alias": "work", "email": "work@example.invalid", "auth_method": "consumer", "active": false, "previous": true, "added_at": "2026-11-15T08:30:24.461134986Z", "last_used_at": null}
+    ]
+  },
+  "usage": {
+    "schema_version": 1,
+    "generated_at": "2026-11-15T09:07:11.781027286Z",
+    "notice": null,
+    "accounts": [
+      {
+        "number": 1, "id": "0000000001", "alias": "personal", "email": "personal@example.invalid", "active": true, "plan": null, "freshness": "stale",
+        "observed_at": "2026-11-15T08:24:31.607269154Z", "last_successful_update": "2026-11-15T08:24:31.607269154Z", "last_attempt": "2026-11-15T08:24:31.607269154Z", "refreshed_now": false,
+        "groups": [
+          {"group": "Gemini Models", "model": null, "disabled": false, "exhausted": false, "five_hour": null, "weekly": {"remaining_percent": 98.9199995994568, "reset_at": "2026-11-22T07:27:42Z", "observed_at": "2026-11-15T08:24:31.607269154Z", "source": "cache"}},
+          {"group": "Claude and GPT models", "model": null, "disabled": false, "exhausted": true, "five_hour": null, "weekly": {"remaining_percent": 0.0, "reset_at": "2026-11-18T07:54:02Z", "observed_at": "2026-11-15T08:24:31.607269154Z", "source": "cache"}}
+        ],
+        "unavailable": null,
+        "health": {"state": "quota_limited", "label": "quota limited", "evidence": "an enabled quota group reports 0% remaining", "observed_at": "2026-11-15T08:24:31.607269154Z", "source": "cache", "verified_now": false, "warning": null}
+      },
+      {
+        "number": 2, "id": "0000000002", "alias": "work", "email": "work@example.invalid", "active": false, "plan": null, "freshness": "stale",
+        "observed_at": "2026-11-15T08:30:29.607507887Z", "last_successful_update": "2026-11-15T08:30:29.607507887Z", "last_attempt": "2026-11-15T08:30:29.607507887Z", "refreshed_now": false,
+        "groups": [
+          {"group": "Gemini Models", "model": null, "disabled": false, "exhausted": false, "five_hour": null, "weekly": {"remaining_percent": 100.0, "reset_at": "2026-11-22T08:30:32Z", "observed_at": "2026-11-15T08:30:29.607507887Z", "source": "cache"}},
+          {"group": "Claude and GPT models", "model": null, "disabled": false, "exhausted": true, "five_hour": null, "weekly": {"remaining_percent": 0.0, "reset_at": "2026-11-18T07:56:02Z", "observed_at": "2026-11-15T08:30:29.607507887Z", "source": "cache"}}
+        ],
+        "unavailable": {"reason": "not_refreshable", "detail": "not refreshed - only the active account can be read; switch with `agyva use` to refresh"},
+        "health": {"state": "quota_limited", "label": "quota limited", "evidence": "an enabled quota group reports 0% remaining", "observed_at": "2026-11-15T08:30:29.607507887Z", "source": "cache", "verified_now": false, "warning": null}
+      }
+    ]
+  }
+}

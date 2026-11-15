@@ -15,7 +15,7 @@ pub fn bold() -> Style {
 }
 
 pub fn dim() -> Style {
-    Style::default().fg(Color::DarkGray)
+    Style::default().add_modifier(Modifier::DIM)
 }
 
 pub fn selected() -> Style {
@@ -52,8 +52,8 @@ pub fn banner() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-/// Remaining quota: green when plentiful, red when nearly gone. Data that is
-/// only remembered (not read just now) is drawn dim instead.
+/// Color quota only while a reading from this session is still fresh.
+/// Cached and older readings retain their explicit age in the view.
 pub fn quota(percent: f64, live: bool) -> Style {
     if !live {
         return dim();

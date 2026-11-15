@@ -214,9 +214,13 @@ the switch is refused with a pointer to `agyva use` in a shell.
 
 **Rendering.** Redraw only when the dirty flag is set (events, worker
 messages, resize, a 30 s tick for relative times). Column layout is a pure
-function of width (`column_plan`: drops plan, weekly, status, 5H in that
+function of width (`column_plan`: drops cache age, weekly, status, 5H in that
 order); text is truncated by unicode display width. Selection follows the
-account id, so data updates and filtering never move it to another account.
+account id. Freshness is reclassified on the 30 s tick with the configured
+policy; historical observations never become a permanent "just now" label.
+Scrollable views measure actual wrapped rows with Ratatui’s `Paragraph::line_count`.
+Modal controls occupy a reserved final row. Monochrome rendering removes colors
+while preserving bold/reverse selection and text statuses.
 
 **Terminal safety.** A `TerminalGuard` (RAII) enters raw mode and the
 alternate screen and restores them on every exit path; a panic hook restores

@@ -11,8 +11,6 @@ use crate::core::format;
 use crate::tui::app::{AppState, View};
 use crate::tui::theme;
 
-const HINTS: &str = "Tab views  \u{2191}\u{2193} select  Enter switch  r refresh  d details  / filter  ? help  q quit";
-
 fn banner_text(state: &AppState) -> Option<String> {
     let s = state.suspended();
     if s.is_empty() {
@@ -53,6 +51,16 @@ pub(super) fn header(state: &AppState, f: &mut Frame<'_>, area: Rect) {
     let mut spans = Vec::new();
     let mut room = usize::from(area.width);
     room = push_fit(&mut spans, " agyva ", theme::bold(), room);
+    if area.width < 54 {
+        push_fit(
+            &mut spans,
+            &format!("/ {}", state.view.title()),
+            theme::tab_active(),
+            room,
+        );
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
     for v in View::ALL {
         let label = format!(" {} ", v.title());
         let style = if v == state.view {
@@ -80,23 +88,47 @@ pub(super) fn header(state: &AppState, f: &mut Frame<'_>, area: Rect) {
 
 pub(super) fn footer(state: &AppState, f: &mut Frame<'_>, area: Rect) {
     let w = usize::from(area.width);
-    let mut spans = Vec::new();
+    let mut status = Vec::new();
     if state.filter_editing {
-        let text = format!("/{}_  (Enter keeps, Esc clears)", state.filter);
-        push_fit(&mut spans, &text, theme::bold(), w);
-    } else if let Some(e) = &state.error {
-        push_fit(&mut spans, e, theme::bad(), w);
-    } else if let Some(m) = &state.message {
-        push_fit(&mut spans, m, theme::warn(), w);
-    } else if !state.filter.is_empty() {
-        let text = format!(
-            "filter: {} ({} shown, Esc clears)",
-            state.filter,
-            state.visible().len()
+        push_fit(
+            &mut status,
+            &format!("/{}_  Enter keeps, Esc clears", state.filter),
+            theme::bold(),
+            w,
         );
-        push_fit(&mut spans, &text, theme::bold(), w);
-    } else {
-        push_fit(&mut spans, HINTS, theme::dim(), w);
+    } else if let Some(e) = &state.error {
+        push_fit(&mut status, e, theme::bad(), w);
+    } else if let Some(m) = &state.message {
+        push_fit(&mut status, m, theme::warn(), w);
+    } else if !state.filter.is_empty() {
+        push_fit(
+            &mut status,
+            &format!(
+                "filter: {} ({} shown, Esc clears)",
+                state.filter,
+                state.visible().len()
+            ),
+            theme::bold(),
+            w,
+        );
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    let mut hints = Vec::new();
+    let essential = if state.filter_editing {
+        "? help  ^C quit"
+    } else {
+        "? help  q quit"
+    };
+    let room = push_fit(&mut hints, essential, theme::bold(), w);
+    let actions = match state.view {
+        View::Accounts => "  ↑↓ select  Enter switch  r refresh  d details  / filter  Tab views",
+        View::Usage => "  ↑↓ select  PgUp/PgDn scroll  r refresh  d details  Tab views",
+        View::Diagnostics => "  ↑↓ scroll  PgUp/PgDn page  r refresh  Tab views",
+    };
+    push_fit(&mut hints, actions, theme::dim(), room);
+    let mut lines = Vec::new();
+    if area.height > 1 {
+        lines.push(Line::from(status));
+    }
+    lines.push(Line::from(hints));
+    f.render_widget(Paragraph::new(lines), area);
 }
