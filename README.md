@@ -277,7 +277,8 @@ Full detail: [`docs/security.md`](docs/security.md).
 | --- | --- |
 | `agy` version gate: 1.5.x supported; others refused unless `--allow-untested` | Enforced by agyva. The `agy X.Y.Z` output format was observed locally on `agy 1.5.9` (one observation; see `docs/compatibility.md`). |
 | `agy -p "/usage" --output-format json` schema (groups, buckets, `remaining_fraction`, `reset_time`) | **Observed on agy 1.5.9**; undocumented, parsed defensively, anything else is "schema changed". |
-| Credential document shape, companion files (`installation_id`, `settings.json` `gcp` block), token-file path | **FROM-REFERENCE**: taken from public descriptions, exercised only with synthetic data. |
+| Credential document shape (consumer login) | **OBSERVED-LOCALLY on `agy 1.5.9`**: `token` (`access_token`, `token_type`, `refresh_token`, `expiry`, `expires_in`), `auth_method`, `id_token_email`; `id_token` is optional and omitted on consumer logins. One live sample; GCP/enterprise shapes are unverified. |
+| Companion files (`installation_id`, `settings.json` `gcp` block), token-file path | **FROM-REFERENCE**: taken from public descriptions, exercised only with synthetic data. |
 | Writing the Secret Service item (`gemini` / `antigravity`) byte-compatibly with what real `agy` (go-keyring) expects: attributes, label, content type | **UNVERIFIED** against a real `agy`. Agyva writes `application/octet-stream`; go-keyring uses `text/plain`. |
 | The opt-in real-keyring test (`tests/real_keyring.rs`) | **NOT RUN** in this release. |
 | macOS Keychain and Windows Credential Manager | Not supported; code and CI jobs are disabled. |

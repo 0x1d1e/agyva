@@ -1,11 +1,14 @@
 //! agy's live credential: shape validation, identity extraction and the
 //! backends that hold it.
 //!
-//! The credential document (FROM-REFERENCE, verified only against synthetic
-//! data) is JSON:
-//! `{"token":{"access_token","token_type","refresh_token","expiry"},
-//!   "auth_method","id_token", ...}`. It is always handled as opaque bytes and
-//! written back verbatim; parsing only extracts non-secret facts.
+//! The credential document (OBSERVED-LOCALLY on agy 1.5.9, consumer, Linux
+//! keyring) is JSON with exactly three top-level keys:
+//! `{"token":{"access_token","token_type","refresh_token","expiry",
+//!   "expires_in"},"auth_method":"consumer","id_token_email":"<email>"}`.
+//! `id_token` is optional and omitted on consumer logins; agy's binary accepts
+//! either an `id_token` or an `id_token_email`. GCP/enterprise shapes are
+//! UNVERIFIED. The document is always handled as opaque bytes and written back
+//! verbatim; parsing only extracts non-secret facts.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -66,9 +69,12 @@ impl<'de> Deserialize<'de> for RawCredential {
 /// Non-secret facts extracted from a credential document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialInfo {
-    /// Stable OIDC subject. Identity of record.
-    pub sub: String,
+    /// Stable OIDC subject, when the credential carries one.
+    pub sub: Option<String>,
     pub email: Option<String>,
+    /// Normalized identity used for `account_id` and dedupe. Private so the
+    /// namespaced inputs cannot be mistaken for a subject or email.
+    identity: Identity,
     pub auth_method: String,
     pub expiry: Option<DateTime<Utc>>,
     pub has_refresh_token: bool,
@@ -76,9 +82,34 @@ pub struct CredentialInfo {
     pub region: Option<String>,
 }
 
+/// What the credential is identified by, in precedence order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Identity {
+    /// A usable `id_token` `sub` (hashed as-is, so ids do not change).
+    Subject(String),
+    /// `email:<lowercase>` from a JWT email claim or `id_token_email`.
+    Email(String),
+    /// `refresh:<sha256 hex>` when nothing else identifies the login.
+    Refresh(String),
+}
+
+impl Identity {
+    fn input(&self) -> &str {
+        match self {
+            Self::Subject(s) => s,
+            Self::Email(e) | Self::Refresh(e) => e,
+        }
+    }
+}
+
 impl CredentialInfo {
     pub fn account_id(&self) -> String {
-        account_id_for_sub(&self.sub)
+        account_id_for_sub(self.identity.input())
+    }
+
+    /// Normalized email for dedupe, when the credential has one.
+    pub fn normalized_email(&self) -> Option<String> {
+        self.email.as_deref().map(str::to_lowercase)
     }
 
     pub fn is_gcp(&self) -> bool {
@@ -129,22 +160,46 @@ pub fn parse_credential(raw: &[u8]) -> Result<CredentialInfo> {
             "`token` has neither access_token nor refresh_token",
         ));
     }
-    let id_token =
-        non_empty_str(&doc, "id_token").ok_or_else(|| incompatible("missing `id_token`"))?;
-    let claims = decode_jwt_claims(id_token)?;
-    let sub = non_empty_str(&claims, "sub")
+    // `id_token` is optional, and a malformed one is not fatal: agy itself
+    // treats it as optional and consumer logins usually omit it. Only a
+    // decodable token contributes claims, and `id_token_email` is never handed
+    // to the JWT decoder (it is a plain email, dots included).
+    let claims = non_empty_str(&doc, "id_token").and_then(|t| decode_jwt_claims(t).ok());
+    let sub = claims
+        .as_ref()
+        .and_then(|c| non_empty_str(c, "sub"))
         .filter(|s| s.len() <= 256)
-        .ok_or_else(|| incompatible("id_token has no usable `sub` claim"))?
-        .to_owned();
-    let email = non_empty_str(&claims, "email")
-        .or_else(|| non_empty_str(&doc, "id_token_email"))
         .map(str::to_owned);
+    let jwt_email = claims
+        .as_ref()
+        .and_then(|c| non_empty_str(c, "email"))
+        .and_then(valid_email);
+    let plain_email = non_empty_str(&doc, "id_token_email").and_then(valid_email);
+    let email = jwt_email.or(plain_email);
+    let identity = if let Some(sub) = &sub {
+        Identity::Subject(sub.clone())
+    } else if let Some(email) = &email {
+        Identity::Email(format!("email:{}", email.to_lowercase()))
+    } else if let Some(refresh) = refresh {
+        Identity::Refresh(format!(
+            "refresh:{}",
+            hex::encode(Sha256::digest(refresh.as_bytes()))
+        ))
+    } else {
+        return Err(incompatible(
+            "it has no id_token subject or email, no valid id_token_email, and no refresh_token to identify it",
+        ));
+    };
+    // Expiry is informational. The observed agy format (RFC3339 with nine
+    // fractional digits and a numeric offset) parses; anything else is simply
+    // unknown and must not make the credential unusable.
     let expiry = non_empty_str(token, "expiry")
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|d| d.with_timezone(&Utc));
     Ok(CredentialInfo {
         sub,
         email,
+        identity,
         auth_method: non_empty_str(&doc, "auth_method")
             .unwrap_or("unknown")
             .to_owned(),
@@ -153,6 +208,20 @@ pub fn parse_credential(raw: &[u8]) -> Result<CredentialInfo> {
         project_id: non_empty_str(&doc, "project_id").map(str::to_owned),
         region: non_empty_str(&doc, "region").map(str::to_owned),
     })
+}
+
+/// A plain email: trimmed, one `@`, non-empty local and domain, no control
+/// characters. Returns it unchanged (identity and dedupe lowercase it).
+fn valid_email(s: &str) -> Option<String> {
+    let s = s.trim();
+    if s.chars().any(char::is_control) {
+        return None;
+    }
+    let mut parts = s.split('@');
+    let (Some(local), Some(domain), None) = (parts.next(), parts.next(), parts.next()) else {
+        return None;
+    };
+    (!local.is_empty() && !domain.is_empty()).then(|| s.to_owned())
 }
 
 /// Decode the payload of a JWT *without verifying the signature*. The token
@@ -429,10 +498,91 @@ mod tests {
     fn parses_synthetic_credential() {
         let raw = crate::testing::credential("sub-1", "a@example.com", "t1");
         let info = parse_credential(&raw).unwrap();
-        assert_eq!(info.sub, "sub-1");
+        assert_eq!(info.sub.as_deref(), Some("sub-1"));
         assert_eq!(info.email.as_deref(), Some("a@example.com"));
         assert_eq!(info.account_id().len(), 10);
         assert!(info.has_refresh_token);
+    }
+
+    #[test]
+    fn consumer_blob_without_id_token_identifies_by_email() {
+        let raw = crate::testing::consumer_credential("First.Last@Example.Invalid", "c1");
+        let info = parse_credential(&raw).unwrap();
+        assert_eq!(info.sub, None);
+        assert_eq!(info.email.as_deref(), Some("First.Last@Example.Invalid"));
+        assert_eq!(info.auth_method, "consumer");
+        assert!(info.has_refresh_token);
+        assert_eq!(
+            info.account_id(),
+            account_id_for_sub("email:first.last@example.invalid")
+        );
+        // The observed expiry format (9 fractional digits, numeric offset)
+        // parses; it is metadata, never a reason to refuse.
+        assert!(info.expiry.is_some());
+    }
+
+    #[test]
+    fn an_unparseable_expiry_is_unknown_not_fatal() {
+        let mut doc: serde_json::Value = serde_json::from_slice(
+            &crate::testing::consumer_credential("e@example.invalid", "x1"),
+        )
+        .expect("json");
+        doc["token"]["expiry"] = "whenever".into();
+        let info = parse_credential(doc.to_string().as_bytes()).unwrap();
+        assert_eq!(info.expiry, None);
+        assert_eq!(info.email.as_deref(), Some("e@example.invalid"));
+    }
+
+    #[test]
+    fn a_dotted_id_token_email_is_not_decoded_as_a_jwt() {
+        let raw = crate::testing::consumer_credential("first.last@example.invalid", "c2");
+        assert_eq!(parse_credential(&raw).unwrap().account_id().len(), 10);
+    }
+
+    #[test]
+    fn malformed_id_token_falls_back_to_email() {
+        let raw = crate::testing::malformed_id_token_credential("a.b@example.invalid", "m1");
+        let info = parse_credential(&raw).unwrap();
+        assert_eq!(info.email.as_deref(), Some("a.b@example.invalid"));
+        assert_eq!(
+            info.account_id(),
+            account_id_for_sub("email:a.b@example.invalid")
+        );
+    }
+
+    #[test]
+    fn without_sub_or_email_the_refresh_token_is_the_identity() {
+        let raw = crate::testing::unidentified_credential("r1");
+        let a = parse_credential(&raw).unwrap();
+        let b = parse_credential(&raw).unwrap();
+        assert_eq!(a.sub, None);
+        assert_eq!(a.email, None);
+        assert_eq!(a.account_id(), b.account_id(), "stable fingerprint");
+        assert_eq!(a.account_id().len(), 10);
+    }
+
+    #[test]
+    fn a_credential_with_nothing_to_identify_it_is_refused() {
+        let raw = br#"{"token":{"access_token":"access-x"},"auth_method":"consumer"}"#;
+        let err = parse_credential(raw).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Incompatible);
+        assert!(err.hint_text().is_some_and(|h| h.contains("doctor")));
+        assert!(!err.message().contains("access-x"));
+    }
+
+    #[test]
+    fn gcp_shaped_blob_still_parses() {
+        let raw = crate::testing::credential_with(
+            "sub-gcp",
+            "g@example.invalid",
+            "g1",
+            "gcp",
+            &[("project_id", "proj-1"), ("region", "us-central1")],
+        );
+        let info = parse_credential(&raw).unwrap();
+        assert!(info.is_gcp());
+        assert_eq!(info.project_id.as_deref(), Some("proj-1"));
+        assert_eq!(info.region.as_deref(), Some("us-central1"));
     }
 
     #[test]

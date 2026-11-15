@@ -219,8 +219,67 @@ fn ambiguous_id_prefix_lists_candidates() {
 }
 
 #[test]
-fn zz_print_ids_for_debug() {
-    for w in [ALICE, BOB, CAROL] {
-        eprintln!("ID {} = {}", w.2, id_of(w));
-    }
+fn an_email_only_login_adds_and_dedupes_case_insensitively() {
+    let rig = Rig::new();
+    let app = rig.app();
+    rig.login_raw(agyva::testing::consumer_credential(
+        "First.Last@Example.Invalid",
+        "e1",
+    ));
+    let out = app.add(&AddOptions::default()).unwrap();
+    assert_eq!(
+        out.account.email.as_deref(),
+        Some("First.Last@Example.Invalid")
+    );
+
+    // The same email with different case is the same account.
+    rig.login_raw(agyva::testing::consumer_credential(
+        "first.last@example.invalid",
+        "e2",
+    ));
+    let err = app.add(&AddOptions::default()).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Conflict);
+    assert!(err.hint_text().is_some_and(|h| h.contains("--refresh")));
+
+    let refreshed = app
+        .add(&AddOptions {
+            alias: None,
+            refresh: true,
+        })
+        .unwrap();
+    assert!(refreshed.refreshed);
+    assert_eq!(app.list().unwrap().accounts.len(), 1);
+    assert!(rig.native_text().contains("access-e2"));
+}
+
+#[test]
+fn an_email_only_login_dedupes_against_an_account_saved_with_a_subject() {
+    let rig = Rig::new();
+    let app = rig.app();
+    rig.login(ALICE);
+    app.add(&AddOptions::default()).unwrap();
+    // Same email, different case, no subject: still the saved account.
+    rig.login_raw(agyva::testing::consumer_credential(
+        "ALICE@example.invalid",
+        "a2",
+    ));
+    let err = app.add(&AddOptions::default()).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Conflict);
+    assert_eq!(app.list().unwrap().accounts.len(), 1);
+}
+
+#[test]
+fn a_refresh_token_fingerprint_is_a_stable_duplicate_key() {
+    let rig = Rig::new();
+    let app = rig.app();
+    rig.login_raw(agyva::testing::unidentified_credential("f1"));
+    let first = app.add(&AddOptions::default()).unwrap();
+    assert_eq!(first.account.email, None);
+    let again = app.add(&AddOptions::default()).unwrap_err();
+    assert_eq!(again.kind(), ErrorKind::Conflict);
+
+    // A fresh app instance derives the same id from the same credential.
+    let listed = rig.app().list().unwrap();
+    assert_eq!(listed.accounts.len(), 1);
+    assert_eq!(listed.accounts[0].id, first.account.id);
 }

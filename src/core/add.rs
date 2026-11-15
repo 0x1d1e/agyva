@@ -54,10 +54,26 @@ impl App {
                 .hint("run `agy`, log in, then run `agyva add` again")
         })?;
         let info = parse_credential(live.as_bytes())?;
-        let id = info.account_id();
         let companion = companion::capture(&self.agy)?;
 
         let mut reg = self.load_registry()?;
+        // Dedupe by normalized identity. A credential without a subject (the
+        // observed consumer shape) is matched by email, case-insensitively,
+        // even against an account saved earlier with a subject-derived id.
+        let id = if info.sub.is_none() {
+            let email = info.normalized_email();
+            email
+                .as_ref()
+                .and_then(|want| {
+                    reg.accounts
+                        .iter()
+                        .find(|a| a.email.as_deref().map(str::to_lowercase).as_ref() == Some(want))
+                        .map(|a| a.id.clone())
+                })
+                .unwrap_or_else(|| info.account_id())
+        } else {
+            info.account_id()
+        };
         let existing = reg.find(&id).cloned();
         if existing.is_some() && !opts.refresh {
             let alias = existing.map(|r| r.alias).unwrap_or_default();

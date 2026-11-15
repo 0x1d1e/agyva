@@ -223,9 +223,12 @@ impl Rig {
 
     /// Simulate `agy` logging in as this identity.
     pub fn login(&self, who: (&str, &str, &str)) {
-        self.native
-            .write(&credential(who.0, who.1, who.2))
-            .expect("login");
+        self.login_raw(credential(who.0, who.1, who.2));
+    }
+
+    /// Store an arbitrary synthetic credential as the live login.
+    pub fn login_raw(&self, raw: Vec<u8>) {
+        self.native.write(&raw).expect("login");
     }
 
     pub fn live_id(&self) -> Option<String> {

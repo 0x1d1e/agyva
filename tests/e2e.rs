@@ -51,6 +51,11 @@ impl Sandbox {
         std::fs::write(self.token_file(), credential(sub, email, tag)).expect("login");
     }
 
+    /// Store an arbitrary synthetic live credential.
+    fn login_raw(&self, raw: Vec<u8>) {
+        std::fs::write(self.token_file(), raw).expect("login");
+    }
+
     fn live_email(&self) -> String {
         let text = std::fs::read_to_string(self.token_file()).unwrap_or_default();
         ["alice", "bob"]
@@ -193,6 +198,34 @@ fn full_account_lifecycle_through_the_binary() {
         std::fs::read_dir(sb.p("home")).expect("home").count(),
         0,
         "HOME untouched"
+    );
+}
+
+#[test]
+fn a_consumer_login_without_an_id_token_can_be_added() {
+    let sb = Sandbox::new();
+    sb.login_raw(agyva::testing::consumer_credential(
+        "First.Last@Example.Invalid",
+        "realish",
+    ));
+    let add = sb.run(&["add", "--alias", "main"]);
+    assert_eq!(add.code, 0, "{}", add.all());
+    assert!(
+        add.out.contains("First.Last@Example.Invalid"),
+        "{}",
+        add.out
+    );
+    let list = sb.run(&["list", "--json"]);
+    assert_eq!(list.code, 0, "{}", list.all());
+    let v: serde_json::Value = serde_json::from_str(&list.out).expect("json");
+    assert_eq!(v["accounts"][0]["alias"], "main");
+    assert_eq!(v["accounts"][0]["email"], "First.Last@Example.Invalid");
+    assert_eq!(v["accounts"][0]["id"].as_str().unwrap().len(), 10);
+    let cur = sb.run(&["current", "--json"]);
+    assert_eq!(cur.code, 0, "{}", cur.all());
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&cur.out).unwrap()["account"]["alias"],
+        "main"
     );
 }
 
