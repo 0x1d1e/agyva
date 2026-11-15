@@ -510,6 +510,7 @@ fn a_closed_output_pipe_is_not_a_crash() {
         .args(["completions", "fish"])
         .env_clear()
         .env("HOME", sb.p("home"))
+        .env("AGYVA_UPDATE_CHECK", "0")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

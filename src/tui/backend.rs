@@ -56,11 +56,19 @@ type Factory = dyn Fn() -> Result<App> + Send + Sync;
 /// non-thread-safe state is shared and file locks arbitrate with the CLI.
 pub struct AppBackend {
     factory: Arc<Factory>,
+    /// One passive check per process (success or failure): the dashboard is
+    /// reloaded on every refresh and must not re-hit the network. OnceLock,
+    /// not LazyLock: the value comes from runtime env/config plus a network
+    /// call, not a declaration-time initializer.
+    update_check: std::sync::OnceLock<Option<String>>,
 }
 
 impl AppBackend {
     pub fn new(factory: Arc<Factory>) -> Self {
-        Self { factory }
+        Self {
+            factory,
+            update_check: std::sync::OnceLock::new(),
+        }
     }
 
     pub fn from_env(env: Env, allow_untested: bool) -> Self {
@@ -93,8 +101,12 @@ impl Backend for AppBackend {
         // The dashboard is where a startup update notice belongs: stderr is
         // owned by the alternate screen. One passive check per process;
         // failures are silent.
-        if d.update_notice.is_none() && update_check_enabled(&app.env) {
-            d.update_notice = crate::updater::startup_check(true).and_then(|c| c.notice());
+        if update_check_enabled(&app.env) {
+            let notice = self
+                .update_check
+                .get_or_init(|| crate::updater::startup_check(true).and_then(|c| c.notice()))
+                .clone();
+            d.update_notice = notice;
         }
         Ok(d)
     }

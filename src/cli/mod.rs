@@ -70,6 +70,8 @@ pub enum Command {
     Remove(RemoveArgs),
     /// Show quota usage (refreshes the active account; others come from the cache).
     Usage(UsageArgs),
+    /// Rank saved accounts from cached quota without running agy.
+    Route(RouteArgs),
     /// Monitor usage and health in the foreground (read-only; never switches).
     Watch,
     /// Show per-account health (refreshes the active account).
@@ -113,6 +115,24 @@ pub struct JsonFlag {
     /// Machine-readable output.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RouteArgs {
+    #[command(subcommand)]
+    pub command: Option<RouteCommand>,
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RouteCommand {
+    /// List ranked accounts and the reason for their position.
+    List,
+    /// Inspect cached ranking evidence.
+    Inspect { group: String },
+    /// Recommend one account without changing anything.
+    Plan { group: Option<String> },
 }
 
 #[derive(Debug, Args)]

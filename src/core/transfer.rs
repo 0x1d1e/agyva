@@ -372,20 +372,30 @@ impl App {
             .map_err(|_| Error::format("the archive is malformed"))?;
         let passphrase = self.archive_passphrase(false)?;
         let key = derive_key(&passphrase, &envelope.kdf)?;
-        let plain = vault_open(&key, ARCHIVE_CONTEXT, &sealed)
-            .map_err(|_| Error::vault("wrong archive passphrase or tampered archive"))?;
+        let plain = vault_open(&key, ARCHIVE_CONTEXT, &sealed).map_err(|_| {
+            Error::vault("wrong archive passphrase or tampered archive").hint(
+                "check the archive passphrase (AGYVA_ARCHIVE_PASSPHRASE or the prompt) \
+                 and that the file was not modified; a correct passphrase still fails \
+                 on a damaged archive",
+            )
+        })?;
         if plain.len() > MAX_PAYLOAD_BYTES {
             return Err(Error::format("the archive payload is too large"));
         }
-        let payload: Payload = serde_json::from_slice(&plain)
-            .map_err(|_| Error::vault("wrong archive passphrase or tampered archive"))?;
+        let mut payload: Payload = serde_json::from_slice(&plain).map_err(|_| {
+            Error::vault("wrong archive passphrase or tampered archive").hint(
+                "check the archive passphrase (AGYVA_ARCHIVE_PASSPHRASE or the prompt) \
+                 and that the file was not modified; a correct passphrase still fails \
+                 on a damaged archive",
+            )
+        })?;
         if payload.version != VERSION {
             return Err(Error::format("unsupported archive payload version"));
         }
         if payload.entries.len() > MAX_ENTRIES {
             return Err(Error::format("the archive holds too many accounts"));
         }
-        validate_entries(&payload.entries)?;
+        validate_entries(&mut payload.entries)?;
         Ok(payload.entries)
     }
 
@@ -429,6 +439,23 @@ impl App {
             seen_aliases.push(rec.alias.as_str());
 
             let info = parse_credential(entry.snapshot.credential.as_bytes())?;
+            // A stored-id match is decided on the full identity first. The
+            // symmetric legacy email fallback must not paper over a 40-bit
+            // collision with a different full identity.
+            if let Some(i) = dest.iter().position(|(d, _)| d.id == rec.id) {
+                let (_, dinfo) = &dest[i];
+                if !info.same_identity(dinfo) {
+                    return Err(Error::conflict(format!(
+                        "account id {} is already saved with a different identity",
+                        rec.id
+                    ))
+                    .hint("remove one of the two accounts first, then import again"));
+                }
+                plan.skipped_ids.push(rec.id.clone());
+                continue;
+            }
+            // Different stored id: a full identity match skips (already
+            // saved under another id); so does the subjectless email match.
             let mut matched_dest: Option<usize> = None;
             for (i, (_, dinfo)) in dest.iter().enumerate() {
                 if same_account(&info, dinfo) {
@@ -442,29 +469,8 @@ impl App {
                 }
             }
             match matched_dest {
-                Some(i) => {
-                    let (drec, _) = &dest[i];
-                    if drec.id != rec.id {
-                        // The typed identity matches but the file id differs:
-                        // same person under another id. Skip (the destination
-                        // already holds this identity); nothing is written.
-                        plan.skipped_ids.push(rec.id.clone());
-                        continue;
-                    }
-                    plan.skipped_ids.push(rec.id.clone());
-                }
-                None => {
-                    // New identity. Its id must not collide with another
-                    // saved file id...
-                    if dest.iter().any(|(d, _)| d.id == rec.id) {
-                        return Err(Error::conflict(format!(
-                            "account id {} is already saved with a different identity",
-                            rec.id
-                        ))
-                        .hint("remove one of the two accounts first, then import again"));
-                    }
-                    plan.new_entries.push(entry);
-                }
+                Some(_) => plan.skipped_ids.push(rec.id.clone()),
+                None => plan.new_entries.push(entry),
             }
         }
 
@@ -685,9 +691,9 @@ fn same_account(a: &CredentialInfo, b: &CredentialInfo) -> bool {
 
 /// Validate every entry structurally and authentically — including ones that
 /// will be skipped — before any destination state is read or changed.
-fn validate_entries(entries: &[Entry]) -> Result<()> {
+fn validate_entries(entries: &mut [Entry]) -> Result<()> {
     use crate::core::selector::validate_alias;
-    for entry in entries {
+    for entry in entries.iter_mut() {
         let rec = &entry.record;
         ids::require_account_id(&rec.id)?;
         validate_alias(&rec.alias)?;
@@ -723,11 +729,18 @@ fn validate_entries(entries: &[Entry]) -> Result<()> {
                 rec.id
             )));
         }
-        // Companion: normalize installation ids in memory; gcp stays any
-        // bounded JSON value.
-        let _ = companion::normalize_installation_id(
-            snap.companion.installation_id.as_deref().unwrap_or(""),
-        );
+        // Companion: a present installation id must be a UUID and is
+        // persisted normalized; gcp stays any bounded JSON value.
+        if let Some(raw) = entry.snapshot.companion.installation_id.clone() {
+            let normalized = companion::normalize_installation_id(&raw).ok_or_else(|| {
+                Error::format(format!(
+                    "account {} holds a malformed companion installation id",
+                    entry.record.id
+                ))
+                .hint("export the archive again from the source machine")
+            })?;
+            entry.snapshot.companion.installation_id = Some(normalized);
+        }
         if let Some(v) = &snap.companion.gcp {
             let encoded = serde_json::to_vec(v)
                 .map_err(|_| Error::format("companion data cannot be encoded"))?;

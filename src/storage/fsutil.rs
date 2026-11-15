@@ -163,10 +163,19 @@ pub fn atomic_create(path: &Path, data: &[u8]) -> io::Result<()> {
         fs::hard_link(&tmp, path)?;
         sync_dir(dir)
     })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
+    // The temp name is always ours to remove: on failure so no debris is
+    // left behind, on success because `path` now shares its inode.
+    let removed = fs::remove_file(&tmp);
+    match result {
+        Ok(()) => {
+            removed?;
+            sync_dir(dir)
+        }
+        Err(e) => {
+            let _ = removed;
+            Err(e)
+        }
     }
-    result
 }
 
 /// Permission bits (`mode & 0o777`) of `path`, or `None` where unsupported.
@@ -205,4 +214,45 @@ pub fn list_with_extension(dir: &Path, ext: &str) -> io::Result<Vec<PathBuf>> {
     }
     out.sort();
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "agyva-fsutil-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).expect("dir");
+        d
+    }
+
+    /// Success must not leave the temp hard-link name behind, and a taken
+    /// destination name must be refused with the existing file untouched.
+    #[test]
+    fn atomic_create_leaves_no_temp_file() {
+        let d = dir("create");
+        let path = d.join("account.snap");
+        atomic_create(&path, b"one").expect("create");
+        assert_eq!(fs::read(&path).unwrap(), b"one");
+        let names: Vec<String> = fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["account.snap".to_owned()], "{names:?}");
+
+        let err = atomic_create(&path, b"two").expect_err("refuses an existing name");
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&path).unwrap(), b"one");
+        let names: Vec<String> = fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["account.snap".to_owned()], "{names:?}");
+        fs::remove_dir_all(&d).unwrap();
+    }
 }

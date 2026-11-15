@@ -22,6 +22,7 @@ pub const ENV_TEST_MODE: &str = "AGYVA_TEST_MODE";
 
 pub const NAMES: &[&str] = &[
     "after-checkpoint",
+    "after-credential-written",
     "after-prepared",
     "after-native-write",
     "after-companion",

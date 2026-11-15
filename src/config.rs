@@ -194,6 +194,7 @@ impl Config {
             "color" => self.color.as_str().into(),
             "allow_untested_agy" => self.allow_untested_agy.to_string(),
             "check_updates" => self.check_updates.to_string(),
+            "checkpoints_keep" => self.checkpoints_keep.to_string(),
             "lock_timeout_secs" => self.lock_timeout_secs.to_string(),
             "policy_acknowledged" => self.policy_acknowledged.to_string(),
             "quota_fresh_secs" => self.quota_fresh_secs.to_string(),
@@ -225,6 +226,7 @@ impl Config {
             "color" => next.color = value.parse().map_err(bad)?,
             "allow_untested_agy" => next.allow_untested_agy = parse_bool(value).map_err(bad)?,
             "check_updates" => next.check_updates = parse_bool(value).map_err(bad)?,
+            "policy_acknowledged" => next.policy_acknowledged = parse_bool(value).map_err(bad)?,
             "desktop_notifications" => {
                 next.desktop_notifications = parse_bool(value).map_err(bad)?
             }
@@ -295,5 +297,19 @@ mod tests {
         assert_eq!(Config::load(&path).unwrap(), c);
         std::fs::write(&path, "bogus = 1\n").unwrap();
         assert!(Config::load(&path).is_err());
+    }
+
+    #[test]
+    fn every_documented_key_reads_and_writes() {
+        let mut c = Config::default();
+        for (key, _) in KEYS {
+            assert!(c.get(key).is_some(), "`{key}` has no get() arm");
+        }
+        c.set("checkpoints_keep", "7").unwrap();
+        assert_eq!(c.get("checkpoints_keep").as_deref(), Some("7"));
+        c.set("policy_acknowledged", "true").unwrap();
+        assert_eq!(c.get("policy_acknowledged").as_deref(), Some("true"));
+        assert_eq!(c.checkpoints_keep, 7);
+        assert!(c.policy_acknowledged);
     }
 }

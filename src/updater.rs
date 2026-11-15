@@ -11,9 +11,11 @@
 //! SemVer newer than this build, download the Linux x86_64 GNU `tar.gz`
 //! asset plus `SHA256SUMS`, verify the archive against the file's digest
 //! and the GitHub API asset digest when present, then extract exactly
-//! `<archive-stem>/agyva` — a single regular executable member; symlinks,
-//! hard links, traversal names and duplicates are refused — stage it next
-//! to the running binary, fsync and atomically rename it into place.
+//! `<archive-stem>/agyva` — one regular executable member, with plain
+//! directory entries tolerated; symlinks, hard links, traversal names and
+//! duplicates are refused — stage it next to the running binary, fsync and
+//! atomically rename it into place. Every request and redirect is restricted
+//! to GitHub's release hosts, and the whole decompressed stream is bounded.
 //! `agyva update --check` performs the same checks and only reports.
 
 use std::fs::{self, OpenOptions};
@@ -35,6 +37,8 @@ pub const UPDATE_REPO_API: &str = "https://api.github.com/repos/0x1d1e/agyva/rel
 const ASSET_TARGET: &str = "x86_64-unknown-linux-gnu";
 const EXECUTABLE_NAME: &str = "agyva";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Aggregate decompressed ceiling for the whole release archive.
+const MAX_ARCHIVE_UNCOMPRESSED: u64 = 128 * 1024 * 1024;
 /// Passive startup checks must never hold a command back for long; the
 /// explicit `update` gets more room.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(2);
@@ -119,10 +123,16 @@ pub struct HttpTransport;
 
 impl Transport for HttpTransport {
     fn get(&self, url: &str, timeout: Duration) -> Result<Vec<u8>> {
+        if !release_origin(url) {
+            return Err(Error::refused(format!(
+                "the release endpoint {url} is not on the GitHub release hosts"
+            )));
+        }
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(timeout))
             .https_only(true)
             .max_redirects(5)
+            .save_redirect_history(true)
             .build();
         let agent: ureq::Agent = config.into();
         let response = agent
@@ -130,16 +140,74 @@ impl Transport for HttpTransport {
             .header("User-Agent", concat!("agyva/", env!("CARGO_PKG_VERSION")))
             .header("Accept", "application/vnd.github+json")
             .call()
-            .map_err(|e| Error::backend(format!("update request failed: {e}")))?;
+            .map_err(update_request_error)?;
+        if let Some(history) = <dyn ureq::ResponseExt>::get_redirect_history(&response) {
+            for hop in history.iter().skip(1) {
+                let Some(host) = hop.host() else {
+                    return Err(Error::refused(
+                        "the release download was redirected to an unsafe host",
+                    ));
+                };
+                if !host_allowed(host) {
+                    return Err(Error::refused(format!(
+                        "the release download was redirected to the unsafe host {host}"
+                    )));
+                }
+            }
+        }
         let mut body = Vec::new();
         response
             .into_body()
             .into_reader()
-            .take(MAX_DOWNLOAD_BYTES)
+            .take(MAX_DOWNLOAD_BYTES + 1)
             .read_to_end(&mut body)
             .map_err(|e| Error::backend(format!("update request failed: {e}")))?;
+        if body.len() as u64 > MAX_DOWNLOAD_BYTES {
+            return Err(Error::refused("the release download is too large"));
+        }
         Ok(body)
     }
+}
+
+/// Hosts a GitHub release asset may live on, exactly.
+fn host_allowed(host: &str) -> bool {
+    matches!(
+        host,
+        "api.github.com" | "github.com" | "objects.githubusercontent.com"
+    )
+}
+
+/// Whether `url` is an HTTPS URL on one of the release hosts. A port (443)
+/// is tolerated; userinfo, other schemes and lookalike hosts are not.
+fn release_origin(url: &str) -> bool {
+    let Ok(uri) = url.parse::<ureq::http::Uri>() else {
+        return false;
+    };
+    uri.scheme_str() == Some("https")
+        && !uri.authority().is_some_and(|a| a.as_str().contains('@'))
+        && uri.host().is_some_and(host_allowed)
+}
+
+fn update_request_error(e: ureq::Error) -> Error {
+    let message = format!("update request failed: {e}");
+    let hint = match &e {
+        ureq::Error::StatusCode(403) => {
+            "GitHub rejected the request (HTTP 403), usually rate limiting; retry later, \
+             or download the release manually"
+        }
+        ureq::Error::StatusCode(_) => {
+            "GitHub did not serve the release; check your network and GitHub's status, \
+             then retry with `agyva update --check`"
+        }
+        ureq::Error::Timeout(_) => {
+            "the request timed out; check your network and retry with `agyva update --check`"
+        }
+        _ => {
+            "check your network access to GitHub Releases, then retry with \
+             `agyva update --check`"
+        }
+    };
+    Error::backend(message).hint(hint)
 }
 
 // ------------------------------------------------------------- check + run
@@ -272,11 +340,20 @@ fn plan_from_release(release: &Release, latest: &Version) -> Result<UpdatePlan> 
     };
     let archive = pick(&archive_name)?;
     let sums = pick("SHA256SUMS")?;
-    let api_digest = archive.digest.as_deref().and_then(|d| {
-        d.strip_prefix("sha256:")
-            .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
-            .map(str::to_owned)
-    });
+    let api_digest = match archive.digest.as_deref() {
+        None => None,
+        Some("") => None,
+        Some(d) => Some(
+            d.strip_prefix("sha256:")
+                .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+                .ok_or_else(|| {
+                    Error::refused(
+                        "the release carries a malformed per-asset digest; nothing was installed",
+                    )
+                })?
+                .to_owned(),
+        ),
+    };
     Ok(UpdatePlan {
         archive_url: archive.url.clone(),
         sums_url: sums.url.clone(),
@@ -322,14 +399,36 @@ fn member_is_dangerous(path: &Path) -> bool {
     })
 }
 
-/// Extract exactly `<stem>/agyva` from the gzipped tar. The whole archive
-/// is bounded and inspected: every member must be a safely-named regular
-/// file, the binary must appear exactly once and be executable.
+/// Extract exactly `<stem>/agyva` from the gzipped tar. The whole archive is
+/// decompressed under an aggregate bound and every member inspected: plain
+/// directory entries are accepted, everything else must be a safely-named
+/// regular file; the binary appears exactly once and is executable.
+struct BoundedReader<R: std::io::Read> {
+    inner: R,
+    total: u64,
+}
+
+impl<R: std::io::Read> std::io::Read for BoundedReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.total += n as u64;
+        if self.total > MAX_ARCHIVE_UNCOMPRESSED {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "release archive decompresses beyond its bound",
+            ));
+        }
+        Ok(n)
+    }
+}
 fn extract_binary(archive: &[u8], version: &str) -> Result<Zeroizing<Vec<u8>>> {
     let stem = format!("agyva-{version}-{ASSET_TARGET}");
     let wanted = Path::new(&stem).join(EXECUTABLE_NAME);
     let gz = flate2::read::GzDecoder::new(archive);
-    let mut tar = tar::Archive::new(gz);
+    let mut tar = tar::Archive::new(BoundedReader {
+        inner: gz,
+        total: 0,
+    });
     let mut found: Option<Zeroizing<Vec<u8>>> = None;
     let entries = tar
         .entries()
@@ -347,8 +446,11 @@ fn extract_binary(archive: &[u8], version: &str) -> Result<Zeroizing<Vec<u8>>> {
                 path.display()
             )));
         }
+        // Plain directories are neutral: they hold no bytes to install.
+        if entry.header().entry_type().is_dir() || path.to_string_lossy().ends_with('/') {
+            continue;
+        }
         if !entry.header().entry_type().is_file() {
-            // Symlinks and hard links have no place in a binary release.
             return Err(Error::refused(format!(
                 "the release archive holds a non-regular entry: {}",
                 path.display()
@@ -380,6 +482,25 @@ fn extract_binary(archive: &[u8], version: &str) -> Result<Zeroizing<Vec<u8>>> {
             "the release archive does not hold {stem}/{EXECUTABLE_NAME}"
         ))
     })
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+    #[test]
+    fn release_origins_are_exact() {
+        assert!(release_origin(
+            "https://api.github.com/repos/0x1d1e/agyva/releases/latest"
+        ));
+        assert!(release_origin(
+            "https://objects.githubusercontent.com/x?y=1"
+        ));
+        assert!(!release_origin("https://evil.example/objects"));
+        assert!(!release_origin("http://github.com/x"));
+        assert!(!host_allowed("not-github.com"));
+        assert!(!host_allowed("github.com.evil.example"));
+        assert!(host_allowed("github.com"));
+    }
 }
 
 /// Stage `bytes` next to `exe` (fresh 0755 temp file, fsync) and atomically
@@ -641,5 +762,82 @@ mod tests {
             hex_digest(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+    use tar::Builder;
+
+    /// `scripts/release.sh` tars a staged tree, so the archive holds the
+    /// root directory entry, a nested `docs/` entry and regular files.
+    #[test]
+    fn release_script_shaped_archive_extracts() {
+        let stem = "agyva-0.2.0-x86_64-unknown-linux-gnu";
+        let mut buf = Vec::new();
+        {
+            let mut b = Builder::new(&mut buf);
+            for dir in [format!("{stem}/"), format!("{stem}/docs/")] {
+                let mut h = tar::Header::new_gnu();
+                h.set_entry_type(tar::EntryType::Directory);
+                h.set_size(0);
+                h.set_mode(0o755);
+                b.append_data(&mut h, dir, &[][..]).unwrap();
+            }
+            for (name, mode, body) in [
+                ("README.md", 0o644, &b"readme"[..]),
+                ("docs/security.md", 0o644, &b"doc"[..]),
+                ("agyva", 0o755, &b"binary"[..]),
+            ] {
+                let mut h = tar::Header::new_gnu();
+                h.set_entry_type(tar::EntryType::Regular);
+                h.set_size(body.len() as u64);
+                h.set_mode(mode);
+                b.append_data(&mut h, format!("{stem}/{name}"), body)
+                    .unwrap();
+            }
+            b.finish().unwrap();
+        }
+        let got = extract_binary(&gz(&buf), "0.2.0").expect("directory entries tolerated");
+        assert_eq!(&**got, b"binary");
+    }
+
+    #[test]
+    fn a_malformed_api_digest_refuses_instead_of_being_ignored() {
+        let name = "agyva-9.9.9-x86_64-unknown-linux-gnu.tar.gz";
+        let release = |digest: Option<serde_json::Value>| -> Release {
+            let mut archive = serde_json::json!([
+                {"name": name, "browser_download_url": "https://objects.githubusercontent.com/a"},
+                {"name": "SHA256SUMS", "browser_download_url": "https://objects.githubusercontent.com/b"},
+            ]);
+            if let Some(d) = digest {
+                archive[0]["digest"] = d;
+            }
+            serde_json::from_slice(&release_json("v9.9.9", archive)).unwrap()
+        };
+        let version: Version = "9.9.9".parse().unwrap();
+        for digest in ["md5:", "sha256:abc", "sha512:0000"] {
+            let r = release(Some(serde_json::json!(digest)));
+            assert!(
+                plan_from_release(&r, &version).is_err(),
+                "digest {digest} must not be silently ignored"
+            );
+        }
+        // Absent stays absent (GitHub does not always expose it yet).
+        assert!(
+            plan_from_release(&release(None), &version)
+                .unwrap()
+                .api_digest
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn the_whole_decompressed_stream_is_bounded() {
+        // A gzip bomb: highly compressible zeros far beyond the ceiling.
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let chunk = vec![0u8; 1 << 20];
+        for _ in 0..129 {
+            e.write_all(&chunk).unwrap();
+        }
+        let archive = e.finish().unwrap();
+        assert!(archive.len() < 32 * 1024 * 1024, "the bomb stays small");
+        assert!(extract_binary(&archive, "0.2.0").is_err());
     }
 }

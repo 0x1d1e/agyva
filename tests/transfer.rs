@@ -101,6 +101,47 @@ fn craft_archive(file: &Path, kdf: &KdfParams, passphrase: &str, entries: &[(&st
     fs::write(file, envelope.to_string()).expect("archive file");
 }
 
+/// Like [`craft_archive`], with an optional companion installation id.
+fn craft_archive_with_companion(file: &Path, entries: &[(&str, &[u8], Option<&str>)]) {
+    let kdf = KdfParams::production().expect("kdf");
+    let key = derive_key(&SecretString::from(ARCHIVE), &kdf).expect("derive");
+    let mut items = Vec::new();
+    for (id, bytes, installation_id) in entries.iter() {
+        let info = agyva::testing::parse_for_test(bytes);
+        let rec = AccountRecord {
+            id: (*id).to_owned(),
+            alias: info.alias.clone(),
+            email: info.email.clone(),
+            auth_method: info.auth_method.clone(),
+            added_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            last_used_at: None,
+        };
+        let snap = Snapshot {
+            schema_version: SNAPSHOT_SCHEMA,
+            credential: agyva::agy::credentials::RawCredential::new(bytes.to_vec()),
+            companion: agyva::agy::companion::Companion {
+                installation_id: installation_id.map(str::to_owned),
+                gcp: None,
+            },
+            captured_at: chrono::Utc::now(),
+        };
+        items.push(serde_json::json!({ "record": rec, "snapshot": snap }));
+    }
+    let payload = Zeroizing::new(
+        serde_json::to_vec(&serde_json::json!({ "version": 1, "entries": items }))
+            .expect("payload"),
+    );
+    let sealed = vault_seal(&key, "archive:1", &payload).expect("seal");
+    let envelope = serde_json::json!({
+        "format": "agyva-archive",
+        "version": 1,
+        "kdf": kdf,
+        "data": B64.encode(&sealed),
+    });
+    fs::write(file, envelope.to_string()).expect("archive file");
+}
+
 fn temp(name: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!(
         "agyva-x-{name}-{}-{}.agy",
@@ -706,4 +747,93 @@ fn unexpected_staging_entries_are_preserved_and_reported() {
     assert_eq!(imp.added.len(), 2);
     assert!(stranger.is_file(), "the stranger is preserved");
     let _ = fs::remove_file(&file);
+}
+
+/// A legacy subjectless login whose email hashes to the same 10-hex account
+/// id as an unrelated subject would make `same_account` match by email before
+/// the id check. The id collision must win: the archive is refused, not
+/// silently skipped as "already saved".
+#[test]
+fn an_id_collision_with_a_different_identity_is_rejected_before_email_matching() {
+    // 5c13edeca7 == account_id_for_sub("email:legacy185911@example.invalid")
+    //            == account_id_for_sub("collsub1624344"). Both are 40-bit
+    //            ids: the email login is subjectless, the other has a subject.
+    let legacy_email = "legacy185911@example.invalid";
+    let dest = Rig::new();
+    dest.login_raw(consumer_credential(legacy_email, "legacy"));
+    let added = archive_app(&dest, Failpoints::none())
+        .add(&Default::default())
+        .expect("add");
+    assert_eq!(added.account.id, "5c13edeca7");
+
+    // Different identity, different email, colliding 40-bit id.
+    let other = credential("collsub1624344", "other@example.invalid", "coll");
+    let other_id = agyva::testing::parse_for_test(&other).id;
+    assert_eq!(other_id, "5c13edeca7");
+    let file = temp("id-collision-email");
+    craft_archive(
+        &file,
+        &KdfParams::production().expect("kdf"),
+        ARCHIVE,
+        &[(other_id.as_str(), &other)],
+    );
+    let err = archive_app(&dest, Failpoints::none())
+        .import_archive(&file)
+        .expect_err("id collision");
+    assert_eq!(err.kind(), agyva::core::error::ErrorKind::Conflict);
+    assert!(
+        err.message().contains("different identity"),
+        "{}",
+        err.message()
+    );
+    let reg = archive_app(&dest, Failpoints::none())
+        .load_registry()
+        .expect("registry");
+    assert_eq!(reg.accounts.len(), 1, "nothing was added");
+    let _ = fs::remove_file(&file);
+}
+
+#[test]
+fn a_present_installation_id_is_normalized_and_persisted() {
+    let dest = Rig::new();
+    let raw = credential("sub-normalize", "norm@example.invalid", "norm");
+    let id = agyva::testing::parse_for_test(&raw).id;
+    let file = temp("install-id");
+    // Uppercase, space-padded UUID: persisted lowercased and trimmed.
+    craft_archive_with_companion(
+        &file,
+        &[(
+            id.as_str(),
+            &raw,
+            Some(" 3F2504E0-4F89-11D3-9A0C-0305E82C3301 "),
+        )],
+    );
+    let imp = archive_app(&dest, Failpoints::none())
+        .import_archive(&file)
+        .expect("import");
+    assert_eq!(imp.added, vec![id.clone()]);
+    let app = archive_app(&dest, Failpoints::none());
+    let vault = app.vault().expect("vault");
+    let snap = agyva::core::account::read_snapshot(vault, &dest.dirs().snapshot_file(&id), &id)
+        .expect("snapshot");
+    assert_eq!(
+        snap.companion.installation_id.as_deref(),
+        Some("3f2504e0-4f89-11d3-9a0c-0305e82c3301")
+    );
+    let _ = fs::remove_file(&file);
+
+    // A malformed present value is refused before anything is written.
+    let dest2 = Rig::new();
+    let file2 = temp("install-id-bad");
+    craft_archive_with_companion(&file2, &[(id.as_str(), &raw, Some("not-a-uuid"))]);
+    let err = archive_app(&dest2, Failpoints::none())
+        .import_archive(&file2)
+        .expect_err("malformed installation id");
+    assert!(
+        err.message().contains("installation id"),
+        "{}",
+        err.message()
+    );
+    assert!(!dest2.dirs().accounts_dir().exists());
+    let _ = fs::remove_file(&file2);
 }

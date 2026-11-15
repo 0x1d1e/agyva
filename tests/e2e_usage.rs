@@ -58,6 +58,7 @@ impl Sandbox {
             .env("AGYVA_BACKEND", "file")
             .env("AGYVA_PASSPHRASE", "synthetic-e2e-passphrase")
             .env("NO_COLOR", "1")
+            .env("AGYVA_UPDATE_CHECK", "0")
             .stdin(Stdio::null());
         c
     }

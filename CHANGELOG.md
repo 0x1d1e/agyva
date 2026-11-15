@@ -33,12 +33,36 @@ tagged; release artifacts are built by pushing a `v*` tag (see
   2-second request, silent on failure, a one-line stderr notice for human CLI
   runs and a dashboard notice in the TUI — never for JSON output,
   completions or the `update` command.
+- Cache-only routing groups in a separate `routing.toml`, with Smart and Priority
+  rankings, deterministic explanations, and `route list|inspect|plan --json`.
+  Stale, incomplete, reset-expired and suspended accounts cannot be recommended.
 
 ### Fixed
 
 - Terminal overlays pin confirmation/cancel controls on short screens and scroll
   wrapped Help/Details content. Usage and Diagnostics scroll to their rendered
   final row, including after repeated page navigation.
+- Self-update hardening: the archive layout produced by `scripts/release.sh`
+  (plain directory entries) now installs, the whole decompressed stream is
+  bounded rather than each member, a malformed GitHub per-asset digest is
+  refused instead of silently disabling that check, and both the initial
+  request and every redirect hop must stay on GitHub's release hosts.
+- Import decides a stored-id collision on the full identity before the legacy
+  email match, so a 40-bit id collision with a different identity is refused
+  instead of being skipped as "already saved". A present but malformed
+  companion installation id refuses the archive, and a valid one is persisted
+  normalized.
+- `agyva config get checkpoints_keep` and `agyva config set policy_acknowledged`
+  work (the arms were missing) and a test now asserts every documented key has
+  both a getter and a setter.
+- `atomic_create` removes its temporary hard-link name after a successful
+  create instead of leaking it, and syncs the directory after the unlink.
+- The TUI performs at most one passive update check per process, however often
+  the dashboard reloads.
+- The `after-credential-written` failpoint is registered again, so the switch
+  crash test arms a real failpoint.
+- Update and archive errors carry hints about the network or the archive
+  passphrase instead of the generic credential-store `agyva doctor` advice.
 - Accounts show cache freshness and age instead of an unreported plan. Quota is
   labelled remaining and its minimum-per-enabled-group summary is explained;
   freshness ages while the dashboard stays open.

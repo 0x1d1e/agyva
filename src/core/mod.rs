@@ -19,6 +19,7 @@ pub mod quota_cache;
 pub mod recover;
 pub mod refresh;
 pub mod registry;
+pub mod route_config;
 pub mod selector;
 pub mod status;
 pub mod suspended;

@@ -59,6 +59,26 @@ account can refresh. [Windows, groups and freshness](antigravity.md#read-quota-a
 transient failures, and never switches or warms quota windows. Optional desktop
 notifications contain an alias and state, not credentials.
 
+## Plan a route
+
+`agyva route list` lists named groups from `routing.toml` beside `config.toml`.
+`agyva route inspect GROUP` and `agyva route plan GROUP --json` rank cached
+readings without running agy or changing any account. With no group, `route plan`
+considers all saved accounts. Activation is manual.
+
+```toml
+[groups.work]
+accounts = ["work", "personal"] # selectors; stable account IDs are recommended
+ranking = "smart" # or "priority" to use the listed order and priorities
+[groups.work.priorities]
+work = 10 # higher values first with priority ranking
+```
+
+Smart ranks the fullest counting-window share, holds near-full five-hour rate
+caps back, and spends weekly budgets renewing sooner first. Ties retain listed
+order. Unknown, stale, incomplete, reset-expired, unavailable and suspended
+accounts are excluded with reasons. A reset passing never fabricates new quota.
+
 ## Recover an interrupted switch
 
 Start with the read-only commands:

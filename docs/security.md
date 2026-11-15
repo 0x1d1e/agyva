@@ -62,13 +62,21 @@ never terminates agy; it only reports detected sessions (from
   its environment. Its output is size-bounded and time-limited.
 - The one deliberate network surface is self-update (`src/updater.rs`): HTTPS
   GETs to the GitHub API releases endpoint and the release asset URLs, with
-  `https_only` enforced, a hard timeout and size ceilings. Archives are
-  verified against `SHA256SUMS` and (when present) GitHub's per-asset digest,
-  every tar member is screened (no traversal, no links, exactly one
-  executable), and the binary is staged and renamed atomically. The startup
-  check is passive: one metadata request, silent failure, `AGYVA_UPDATE_CHECK=0`
-  or `check_updates = false` disables it. It never runs inside JSON output,
-  completions, the TUI or the `update` command itself.
+  `https_only` enforced, a hard timeout and size ceilings. Every request and
+  every redirect hop is restricted to `api.github.com`, `github.com` and
+  `objects.githubusercontent.com`; the decompressed stream as a whole is
+  bounded, not just each member. Archives are verified against `SHA256SUMS`
+  and, when GitHub exposes one, the per-asset digest (a malformed digest is
+  refused, never treated as absent); every tar member is screened (no
+  traversal, no links, plain directories tolerated, exactly one executable),
+  and the binary is staged and renamed atomically. The startup check is
+  passive: one metadata request, silent failure. It runs at the start of every
+  invocation whose config allows it — including JSON output, completions and
+  the TUI, which makes it once per process and shows the result on the
+  dashboard. What those modes suppress is only the notice on stderr, never the
+  request. `check_updates = false` or `AGYVA_UPDATE_CHECK=0` disables the
+  request itself, and the check never runs for the `update` command, which
+  makes its own single metadata request.
 - Export archives (`core::transfer`) are sealed with AES-256-GCM under the
   dedicated `archive:1` context with a key derived from a **separate** archive
   passphrase via the production Argon2id profile; the vault key is never

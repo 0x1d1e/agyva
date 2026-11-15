@@ -211,6 +211,59 @@ fn dispatch(app: &App, command: Command, io: &mut Io<'_>, st: Style) -> Result<i
                 write!(io.out, "{}", usage_out::render_usage(&report, st)).map_err(w)?
             }
         }
+        Command::Route(a) => {
+            if matches!(a.command, Some(super::RouteCommand::List)) {
+                let cfg = crate::core::route_config::RoutingFile::load(
+                    &app.dirs.config.join("routing.toml"),
+                )?;
+                if a.json {
+                    print_json(io, &cfg)?;
+                } else {
+                    for (name, group) in &cfg.groups {
+                        writeln!(
+                            io.out,
+                            "{name}: {:?} (manual activation), {} listed account(s)",
+                            group.ranking,
+                            group.accounts.len()
+                        )
+                        .map_err(w)?;
+                    }
+                    if cfg.groups.is_empty() {
+                        writeln!(io.out, "No named groups; define groups in routing.toml.")
+                            .map_err(w)?;
+                    }
+                }
+                return Ok(exit::OK);
+            }
+            let group = match &a.command {
+                Some(super::RouteCommand::Inspect { group }) => Some(group.as_str()),
+                Some(super::RouteCommand::Plan { group }) => group.as_deref(),
+                _ => None,
+            };
+            let report = app.route_group_at(group, chrono::Utc::now())?;
+            if a.json {
+                print_json(io, &report)?;
+            } else {
+                for row in &report.accounts {
+                    writeln!(
+                        io.out,
+                        "{}{}: {} [{}]",
+                        if report.recommendation.as_ref() == Some(&row.id) {
+                            "* "
+                        } else {
+                            "  "
+                        },
+                        row.alias,
+                        row.why,
+                        row.command
+                    )
+                    .map_err(w)?;
+                }
+                if report.recommendation.is_none() {
+                    writeln!(io.out, "No eligible account in the cache.").map_err(w)?;
+                }
+            }
+        }
         Command::Watch => return super::watch_cmd::watch(app, io),
         Command::Health(a) => {
             let report = app.health_report(&UsageOptions {

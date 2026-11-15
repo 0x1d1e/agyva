@@ -110,13 +110,16 @@ journaled, read back and verified locally. Encryption protects saved copies
 at rest; it does not protect an unlocked, compromised user session.
 
 Quota comes from `agy -p "/usage" --output-format json`. The only other
-network traffic is the optional self-update: a single HTTPS request to this
-project's GitHub Releases on startup (silent, disable with `check_updates =
-false`) and on `agyva update`. No telemetry, no other endpoints. Quota never
-switches because of an error and suspended accounts are never retried
-automatically. The JSON envelope is locally observed and undocumented, so
-changed shapes are reported as unavailable. Plans are not reported. macOS and
-Windows are unsupported.
+network traffic is the optional self-update: one HTTPS request to this
+project's GitHub Releases on every enabled startup, including JSON, completions
+and TUI invocations (silent; disable with `check_updates = false` or
+`AGYVA_UPDATE_CHECK=0`), plus the download performed by an explicit
+`agyva update`. Only the *delivery* of the notice is suppressed for JSON,
+completions and the TUI, which shows it on its dashboard; the request itself
+still happens. No telemetry, no other endpoints. Quota never switches because
+of an error and suspended accounts are never retried automatically. The JSON
+envelope is locally observed and undocumented, so changed shapes are reported
+as unavailable. Plans are not reported. macOS and Windows are unsupported.
 
 Accounts can move between machines: `agyva export` writes a passphrase-
 encrypted archive, `agyva import` adds what is missing and never touches what
