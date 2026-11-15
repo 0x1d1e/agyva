@@ -10,6 +10,10 @@ tagged; release artifacts are built by pushing a `v*` tag (see
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-16
+
+Routing, route automation, transfer and self-update, building on `0.1.0`.
+
 ### Added
 
 - `agyva export <FILE> [--account <SELECTOR>]` writes a portable archive of
@@ -121,6 +125,11 @@ tagged; release artifacts are built by pushing a `v*` tag (see
   was saved from a subject, so the same person is not stored twice.
 - The documented `agy 1.5.9` credential shape and identity precedence were
   corrected in the compatibility notes.
+- `agyva monitor` and `agyva watch` end cleanly (exit 0) when their stdout
+  reader closes (`| head -3`) instead of looping with nowhere to write; any
+  other write failure exits non-zero with an error. Ineligible rows in the
+  `route plan` and `monitor` tables show no quota percentage, so a stale
+  reading cannot be mistaken for available quota.
 
 ### Changed
 

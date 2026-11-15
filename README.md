@@ -30,14 +30,17 @@ quota across enabled groups**, not an account-wide allowance.
 
 ## Install
 
-Download the Linux x86-64 archive and `SHA256SUMS` from
-[v0.1.1](https://github.com/0x1d1e/agyva/releases/tag/v0.1.1), published November
-16, 2026. In the download directory:
+These sources build `v0.1.1`. Release artifacts are cut by pushing a `v*` tag
+(see [`release.yml`](.github/workflows/release.yml)); when the tag is published,
+download the Linux x86-64 archive and `SHA256SUMS` from its release page — the
+currently published release is
+[v0.1.0](https://github.com/0x1d1e/agyva/releases/tag/v0.1.0). In the download
+directory:
 
 ```sh
 sha256sum -c SHA256SUMS
-tar -xzf agyva-0.1.1-x86_64-unknown-linux-gnu.tar.gz
-install -Dm755 agyva-0.1.1-x86_64-unknown-linux-gnu/agyva ~/.local/bin/agyva
+tar -xzf agyva-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+install -Dm755 agyva-0.1.0-x86_64-unknown-linux-gnu/agyva ~/.local/bin/agyva
 ```
 
 Or install the current source with Rust 1.88 or newer:

@@ -60,6 +60,53 @@ fn seed(
 }
 
 #[test]
+fn ineligible_rows_show_no_share_and_rely_on_the_reason() {
+    use agyva::core::quota::Freshness;
+    use agyva::core::route::{RoutePlan, RouteRow};
+
+    let now = Utc::now();
+    let row = |alias: &str, id: &str, eligible: bool, freshness: Freshness, share: f64| RouteRow {
+        id: id.into(),
+        alias: alias.into(),
+        active: false,
+        freshness,
+        eligible,
+        remaining_percent: Some(share),
+        rate_remaining_percent: Some(share),
+        renewals: [None, None],
+        why: if eligible {
+            format!("fresh cache; {share:.0}% remains in fullest window")
+        } else {
+            "quota stale, incomplete, expired, or reset passed; refresh required".into()
+        },
+        command: format!("agyva use {alias}"),
+    };
+    let plan = RoutePlan {
+        schema_version: 1,
+        generated_at: now,
+        recommendation: Some("a1".into()),
+        accounts: vec![
+            row("alice", "a1", true, Freshness::Fresh, 64.0),
+            row("bob", "b1", false, Freshness::Stale, 35.0),
+            row("carol", "c1", false, Freshness::Expired, 7.0),
+        ],
+    };
+    let text = agyva::cli::monitor_cmd::render_plan(&plan, now, None);
+    assert!(text.contains("64%"), "eligible share stays: {text}");
+    // An ineligible row must not advertise its cached share as usable.
+    for line in text.lines() {
+        if line.contains("bob") || line.contains("carol") {
+            assert!(
+                !line.contains("35%") && !line.contains("7%"),
+                "ineligible share leaked: {line}"
+            );
+            assert!(line.contains("  -  "), "expected a dash share: {line}");
+        }
+    }
+    assert!(text.contains("refresh required"));
+}
+
+#[test]
 fn interval_grammar_floor_and_units() {
     assert_eq!(parse_interval("15s").unwrap(), StdDuration::from_secs(15));
     assert_eq!(parse_interval("1m").unwrap(), StdDuration::from_secs(60));

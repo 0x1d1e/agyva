@@ -110,7 +110,13 @@ credentials.
 Smart ranks the fullest counting-window share, holds near-full five-hour rate
 caps back, and spends weekly budgets renewing sooner first. Ties retain listed
 order. Unknown, stale, incomplete, reset-expired, unavailable and suspended
-accounts are excluded with reasons. A reset passing never fabricates new quota.
+accounts are excluded with reasons, and `route plan` exits 0 whether or not
+one is eligible — check `recommendation` in `--json` or the
+"No eligible account in the cache." line. A reset passing never fabricates
+new quota. Only an eligible row shows a quota percentage: an excluded row
+shows `-` in place of its share, so a stale reading can never read as
+available quota (`--json` still carries the raw `remaining_percent` next to
+`eligible: false` and the reason).
 
 ### Opt-in auto-switch
 

@@ -45,20 +45,39 @@ impl crate::core::watch::Probe for PlanSharing<'_> {
 struct MonitorSink<'a, 'b> {
     io: &'a mut Io<'b>,
     slot: Arc<Mutex<Option<RoutePlan>>>,
+    stop: Arc<AtomicBool>,
+    /// First write failure, if any: the loop is stopped and the caller
+    /// turns this into an exit code instead of spinning quietly forever.
+    error: Option<std::io::Error>,
 }
 
-impl Sink for MonitorSink<'_, '_> {
-    fn emit(&mut self, at: DateTime<Utc>, e: &WatchEvent) {
-        // A closed pipe must not make the monitor panic; it simply goes quiet.
-        let _ = writeln!(self.io.out, "{}", render_event(at, e));
+impl MonitorSink<'_, '_> {
+    fn write(&mut self, at: DateTime<Utc>, e: &WatchEvent) -> std::io::Result<()> {
+        writeln!(self.io.out, "{}", render_event(at, e))?;
         if let (WatchEvent::CycleOk { .. }, Some(plan)) =
             (e, self.slot.lock().expect("plan slot poisoned").as_ref())
         {
             for line in render_plan(plan, at, None).lines() {
-                let _ = writeln!(self.io.out, "{line}");
+                writeln!(self.io.out, "{line}")?;
             }
         }
+        // Best effort: a flush error is reported by the next write.
         let _ = self.io.out.flush();
+        Ok(())
+    }
+}
+
+impl Sink for MonitorSink<'_, '_> {
+    fn emit(&mut self, at: DateTime<Utc>, e: &WatchEvent) {
+        if self.error.is_some() {
+            return; // the reader is gone; stop poking the pipe
+        }
+        if let Err(err) = self.write(at, e) {
+            // A closed pipe (`agyva monitor | head -3`) must end the loop
+            // cleanly, not leave it spinning with nowhere to write.
+            self.error = Some(err);
+            self.stop.store(true, Ordering::SeqCst);
+        }
     }
 }
 
@@ -77,10 +96,13 @@ pub fn render_plan(plan: &RoutePlan, now: DateTime<Utc>, sticky_alias: Option<&s
         } else {
             ' '
         };
-        let share = row
-            .remaining_percent
-            .map(format::percent_text)
-            .unwrap_or_else(|| "-".into());
+        // Only an eligible row's share is usable quota: a stale reading's
+        // percentage must not read as available, so ineligible rows show
+        // a dash and rely on `why` for the reason.
+        let share = match (row.eligible, row.remaining_percent) {
+            (true, Some(p)) => format::percent_text(p),
+            _ => "-".into(),
+        };
         out.push_str(&format!(
             "{mark} {:<12} {:>4}  {:<9} {}\n",
             row.alias,
@@ -139,7 +161,12 @@ pub fn monitor(app: &App, io: &mut Io<'_>, args: &super::MonitorArgs) -> Result<
         ),
         slot: slot.clone(),
     };
-    let mut sink = MonitorSink { io, slot };
+    let mut sink = MonitorSink {
+        io,
+        slot,
+        stop: stop.clone(),
+        error: None,
+    };
     let mut jitter = SystemJitter::new();
     run_watch(
         &cfg,
@@ -149,5 +176,11 @@ pub fn monitor(app: &App, io: &mut Io<'_>, args: &super::MonitorArgs) -> Result<
         &mut sink,
         &stop,
     );
-    Ok(exit::OK)
+    match sink.error {
+        // A closed reader (`| head -3`) is not an error; the loop simply
+        // ends instead of spinning with nowhere to write.
+        None => Ok(exit::OK),
+        Some(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(exit::OK),
+        Some(e) => Err(crate::core::error::Error::io("writing monitor output", e)),
+    }
 }

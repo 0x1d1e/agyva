@@ -49,7 +49,10 @@ recommendation is an account id or `null`. Each account row carries `id`,
 `eligible`, `remaining_percent`, `rate_remaining_percent`, `renewals` (the
 two reset timestamps, each possibly `null`), `why` (a human reason, the
 machine-readable eligibility signal) and `command`. Rows are ranked
-best-first with ineligible accounts last. `agyva route history --json`
+best-first with ineligible accounts last. `remaining_percent` is the raw
+cached value even when `eligible` is false; the human tables print `-`
+instead, so only an eligible row's share reads as available quota. `agyva
+route history --json`
 returns `{"schema_version", "entries"}` with `at`, `target`, `outcome`
 (`applied`, `refused`, `failed`), an optional `group` and a bounded `reason`
 per entry (automatic decisions included).

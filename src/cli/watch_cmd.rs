@@ -27,13 +27,33 @@ pub const ENV_INTERVAL_MS: &str = "AGYVA_WATCH_INTERVAL_MS";
 struct Printer<'a, 'b> {
     io: &'a mut Io<'b>,
     notifier: Box<dyn Notifier>,
+    stop: Arc<AtomicBool>,
+    /// First write failure, if any: the loop is stopped and the caller
+    /// turns this into an exit code instead of spinning quietly forever.
+    error: Option<std::io::Error>,
+}
+
+impl Printer<'_, '_> {
+    fn write(&mut self, at: DateTime<Utc>, e: &WatchEvent) -> std::io::Result<()> {
+        writeln!(self.io.out, "{}", render_event(at, e))?;
+        // Best effort: a flush error surfaces on the next write.
+        let _ = self.io.out.flush();
+        Ok(())
+    }
 }
 
 impl Sink for Printer<'_, '_> {
     fn emit(&mut self, at: DateTime<Utc>, e: &WatchEvent) {
-        // A closed pipe must not make the monitor panic; it simply goes quiet.
-        let _ = writeln!(self.io.out, "{}", render_event(at, e));
-        let _ = self.io.out.flush();
+        if self.error.is_some() {
+            return; // the reader is gone; stop poking the pipe
+        }
+        if let Err(err) = self.write(at, e) {
+            // A closed pipe (`agyva watch | head -3`) must end the loop
+            // cleanly, not leave it spinning with nowhere to write.
+            self.error = Some(err);
+            self.stop.store(true, Ordering::SeqCst);
+            return;
+        }
         match e {
             WatchEvent::HealthChanged { alias, to, .. } if to.is_alarming() => {
                 self.notifier.notify(
@@ -105,7 +125,12 @@ pub fn watch(app: &App, io: &mut Io<'_>) -> Result<i32> {
     } else {
         Box::new(Silent)
     };
-    let mut sink = Printer { io, notifier };
+    let mut sink = Printer {
+        io,
+        notifier,
+        stop: stop.clone(),
+        error: None,
+    };
     let mut probe = AppProbe(app);
     run_watch(
         &cfg,
@@ -115,5 +140,10 @@ pub fn watch(app: &App, io: &mut Io<'_>) -> Result<i32> {
         &mut sink,
         &stop,
     );
-    Ok(exit::OK)
+    match sink.error {
+        // A closed reader (`| head -3`) ends the loop without an error.
+        None => Ok(exit::OK),
+        Some(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(exit::OK),
+        Some(e) => Err(Error::io("writing watch output", e)),
+    }
 }

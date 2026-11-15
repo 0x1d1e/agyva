@@ -388,6 +388,42 @@ fn watch_stops_on_sigint() {
     assert_eq!(code, Some(0), "clean exit on Ctrl+C");
 }
 
+/// A reader that closes its end of the pipe (`| head -3`) must end the
+/// foreground loop instead of leaving it spinning with nowhere to write.
+#[test]
+fn monitor_and_watch_exit_cleanly_when_their_reader_closes() {
+    use std::io::Read as _;
+    for cmd in ["monitor", "watch"] {
+        let sb = Sandbox::new();
+        sb.with_account();
+        sb.fake.ok(0.6, 0.6);
+        let mut child = sb
+            .command(&[cmd])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn {cmd}: {e}"));
+        // Read a little, then drop our end: the process must not hang.
+        let mut stdout = child.stdout.take().expect("piped stdout");
+        let mut buf = [0u8; 256];
+        let got = stdout.read(&mut buf).expect("read start banner");
+        assert!(got > 0, "{cmd} wrote nothing");
+        drop(stdout);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait().expect("poll") {
+                assert_eq!(status.code(), Some(0), "{cmd} exited uncleanly");
+                break;
+            }
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                panic!("{cmd} kept running after its stdout reader closed");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
 #[test]
 fn doctor_and_status_cover_agy_and_the_quota_provider() {
     let sb = Sandbox::new();
@@ -489,4 +525,44 @@ fn route_plan_and_inspect_json_expose_the_documented_shape() {
     let human = sb.run(&["route", "plan", "work"]);
     assert_eq!(human.code, 0);
     assert!(human.out.contains("* alice"), "{}", human.out);
+
+    // Age the cache past quota_fresh_secs: the row is still listed with
+    // its reason, but its share must not read as available quota.
+    let cache = sb.p("cache/quota.json");
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&cache).expect("cache")).expect("json");
+    let old_ts = "2020-01-01T00:00:00.000000Z";
+    for acct in doc["accounts"]
+        .as_object_mut()
+        .expect("accounts")
+        .values_mut()
+    {
+        if let Some(q) = acct.get_mut("quota") {
+            q["observed_at"] = old_ts.into();
+            for g in q["groups"].as_array_mut().into_iter().flatten() {
+                for w in ["five_hour", "weekly"] {
+                    if !g[w].is_null() {
+                        g[w]["observed_at"] = old_ts.into();
+                    }
+                }
+            }
+        }
+    }
+    std::fs::write(&cache, serde_json::to_string(&doc).expect("json")).expect("write cache");
+    let stale = sb.run(&["route", "plan", "work"]);
+    assert_eq!(stale.code, 0, "no eligible account is not an error");
+    assert!(
+        !stale.out.contains("72%") && !stale.out.contains("40%"),
+        "a stale row must not advertise a share: {}",
+        stale.out
+    );
+    assert!(
+        stale.out.contains("No eligible account in the cache."),
+        "{}",
+        stale.out
+    );
+    let sj = json(&sb.run(&["route", "plan", "work", "--json"]));
+    assert!(sj["recommendation"].is_null());
+    assert_eq!(sj["accounts"][0]["eligible"], false);
+    assert!(sj["accounts"][0]["remaining_percent"].as_f64().is_some());
 }

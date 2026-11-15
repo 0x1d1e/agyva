@@ -1,7 +1,7 @@
 //! Command-line definition (clap) and dispatch.
 
 mod commands;
-mod monitor_cmd;
+pub mod monitor_cmd;
 pub mod output;
 pub mod usage_out;
 mod watch_cmd;
