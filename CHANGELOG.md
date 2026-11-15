@@ -60,6 +60,24 @@ tagged; release artifacts are built by pushing a `v*` tag (see
   and evidence drift before any mutation. `agyva route history` shows a
   bounded, redacted log of routing decisions (applied/refused/failed with
   reasons; never credentials).
+- Opt-in auto-switch (`core::auto`): a `routing.toml` group with
+  `auto_switch = true` — and only after `agyva config set auto_switch_ack
+  true` — is driven by the same evaluation as `agyva monitor` (15s tick,
+  single-flight 300s active refresh). It switches only on fresh live
+  evidence, never picks a suspended or otherwise ineligible account, defers
+  while agy sessions are detected (or detection is uncertain) or a switch
+  journal awaits recovery, waits at least 900 seconds between any two
+  switches (a manual `agyva use` re-arms the cooldown), revalidates under
+  the login lock and switches through the journaled path. Holds and defers
+  are recorded in `agyva route history`; cooldown bookkeeping lives in
+  `<state dir>/auto-switch.json` (0600, schema 1). Off by default.
+- `config auto_switch_ack`: explicit, separately-settable acknowledgment for
+  the opt-in automation above.
+
+### Known limitations
+
+- The interactive TUI route tab planned for this cycle is deferred: route
+  ranking ships in the watch-style `agyva monitor` terminal output instead.
 
 ### Fixed
 

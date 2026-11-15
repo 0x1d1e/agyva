@@ -41,6 +41,15 @@ and `weekly` windows. A present window has `remaining_percent`, `reset_at`,
 `observed_at` and `source` (`cache` or `agy_usage_command`). A missing window is
 `null`, not zero, and not full. Reset timestamps may also be `null`.
 
+`agyva route plan GROUP --json` returns `{"group", "generated_at", "fresh",
+"accounts"}`; each account row carries `alias`, `id`, `eligibility`
+(`eligible` or a reason string), `rank`, the two windows (same shape as
+above) and `score` when eligible. Rows are ranked best-first; `fresh` is
+false when no live reading backs the plan. `agyva route history --json`
+returns `{"schema_version", "entries"}` with `at`, `group`, `target`,
+`outcome` (`applied`, `refused`, `failed`) and a bounded `reason` per entry
+(automatic decisions included).
+
 `refreshed_now` says that run got data from agy. `health.verified_now` says agy
 answered during that run. Neither boolean changes a historical timestamp into
 an ongoing verification. `unavailable` can accompany retained quota data after

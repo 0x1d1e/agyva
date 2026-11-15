@@ -74,6 +74,7 @@ agyva fail itself.
 | `tests/e2e.rs` | The real binary in a sandbox: add, use, crash and recover, exit codes. |
 | `tests/transfer.rs` | Export/import roundtrip, skip rules, alias and id conflicts, archive refusals, crash/recovery at every import failpoint. |
 | `tests/updater.rs` | Self-update: SemVer gating, checksum and digest verification, unsafe-archive refusal, atomic replace of a temp target. |
+| `tests/routing.rs`, `tests/route_apply.rs`, `tests/monitor.rs`, `tests/auto_switch.rs` | Routing slices: ranking and planning, journaled apply and history, the monitor loop, and opt-in auto-switch gates (cooldown, freshness, sessions, recovery, journaled path). |
 | `tests/real_keyring.rs` | Ignored, opt-in; throwaway service name only. |
 | unit tests under `src/` | Parsers, classification, error hints, config validation. |
 

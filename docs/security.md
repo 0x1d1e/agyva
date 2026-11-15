@@ -2,8 +2,9 @@
 
 ## Policy
 
-Agyva is a **manual** account switcher. It switches only when you run
-`agyva use` or confirm a dashboard switch. It does not rotate, balance or auto-switch accounts, does not
+Agyva is a **manual** account switcher by default. It switches only when you
+run `agyva use` or confirm a dashboard switch. It does not rotate, balance or
+auto-switch accounts **unless you explicitly opt in** (see below), does not
 retry on quota errors, and is not a way to work around usage limits. You are
 responsible for complying with Google's terms for every account you save. The
 first `add` or `use` prints this notice once (recorded as
@@ -92,11 +93,28 @@ never terminates agy; it only reports detected sessions (from
   banner) with a pointer to the Antigravity FAQ and Google support, and is
   **never retried automatically**: refresh, watch and the TUI skip it unless
   you pass `--force-refresh`. Agyva does not help work around a suspension, and
-  it does not auto-switch to another account because of one.
-- `watch` and the TUI observe; they never switch accounts on their own, never
-  warm up quota windows and never retry on quota errors. A switch from the TUI
-  needs explicit confirmation and uses the same journaled path as
-  `agyva use`.
+  it does not auto-switch to another account because of one (route
+  automation likewise ranks a `TermsSuspended` account as ineligible and
+  can never pick it).
+- `watch`, `monitor` and the TUI observe; they never switch accounts on their
+  own, never warm up quota windows and never retry on quota errors. A switch
+  from the TUI needs explicit confirmation and uses the same journaled path
+  as `agyva use`.
+- Opt-in automation is the one exception, and it is fenced: a
+  `routing.toml` group must set `auto_switch = true` **and** you must run
+  `agyva config set auto_switch_ack true` (the acknowledgment is separate
+  from `policy_acknowledged` and is re-settable to `false` to disable).
+  Even when enabled, `agyva route apply`'s automation only fires after a
+  **fresh** live quota reading (never on cached data, never on cached reset
+  times), never picks a `TermsSuspended` or otherwise ineligible account,
+  defers whenever agy sessions are detected (or detection is uncertain) or
+  a switch journal is pending recovery, waits at least 900 seconds between
+  any two switches (a manual `agyva use` also re-arms this cooldown), and
+  re-validates everything under the login lock before using the same
+  journaled switch path as `agyva use`. Every automatic decision — including
+  holds and defers — is recorded in `agyva route history`, and the cooldown
+  bookkeeping lives in `<state dir>/auto-switch.json` (mode 0600, schema
+  1). The default remains off.
 - The TUI never prompts for or displays secrets. In passphrase mode it refuses
   to switch unless `AGYVA_PASSPHRASE` is set (it will not read a passphrase
   while the screen is in raw mode). Logging is off in TUI mode, and the

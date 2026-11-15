@@ -67,7 +67,8 @@ exclusion reason, with the next weekly reset countdown. `--interval` accepts
 evaluation is cache-only). The active account's quota refresh runs on its own
 300s cadence through the existing single-flight refresh guard, so several
 monitors and a manual `usage` collapse to one run. `monitor` never switches
-accounts.
+accounts. (A dedicated interactive TUI route tab is not in 0.1.1; the route
+pane ships in this watch-style terminal monitor instead.)
 
 ## Plan a route
 
@@ -110,6 +111,20 @@ Smart ranks the fullest counting-window share, holds near-full five-hour rate
 caps back, and spends weekly budgets renewing sooner first. Ties retain listed
 order. Unknown, stale, incomplete, reset-expired, unavailable and suspended
 accounts are excluded with reasons. A reset passing never fabricates new quota.
+
+### Opt-in auto-switch
+
+Off by default, and doubly gated: a group in `routing.toml` must set
+`auto_switch = true`, **and** you must run
+`agyva config set auto_switch_ack true` once. With both set, a background
+evaluation (same 15s tick and 300s active refresh as `agyva monitor`) can run
+`route apply` for that group without you. It still refuses to act on stale
+evidence, never picks a suspended or otherwise ineligible account, defers
+while agy sessions are detected (or detection is uncertain) or a switch
+journal awaits recovery, and waits at least 900 seconds between switches —
+a manual `agyva use` re-arms that cooldown too. Holds and defers are
+recorded in `agyva route history` alongside applied switches. Set
+`auto_switch_ack` back to `false` (or `auto_switch` to `false`) to stop it.
 
 ## Recover an interrupted switch
 
@@ -191,6 +206,7 @@ the file path; `agyva config set <key> <value>` validates before saving.
 | `checkpoints_keep` | `5`; ordinary checkpoints retained, 1–20. Pinned copies are never pruned. |
 | `lock_timeout_secs` | `10`; 0–600. |
 | `policy_acknowledged` | `false`; records the first-use policy notice. |
+| `auto_switch_ack` | `false`; explicit acknowledgment that opt-in route automation may switch accounts: `true` or `false`. |
 | `quota_fresh_secs` | `300`; 10–86400. |
 | `quota_min_refresh_secs` | `60`; 10–3600. |
 | `watch_interval_secs` | `300`; 60–86400. |

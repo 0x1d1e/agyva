@@ -186,8 +186,13 @@ is the seam: the real provider shells out to agy, tests inject fakes, and the
 TUI never builds a quota value itself (a test scans `src/tui` for this).
 
 agy answers for **the currently logged-in account only**. Agyva therefore
-refreshes only the active account and never switches, copies a credential or
-calls a Google endpoint to learn about another one. Other accounts show their
+refreshes only the active account; it never copies a credential or calls a
+Google endpoint to learn about another one. The single exception to
+"never switches" is opt-in: `core::auto` may run the same journaled switch
+for a `routing.toml` group that sets `auto_switch = true` **and** whose
+acknowledgment is in `config.toml`, gated by a 900s cooldown, a fresh live
+reading, a fresh eligible candidate, the session gate (detected sessions or
+an uncertain detection defer) and recovery state. Default is off. Other accounts show their
 last cached values, labelled with their age (`cache`, `stale`), or "not
 checked yet". `plan` is shown as unavailable because `/usage` does not report
 it.
@@ -216,8 +221,8 @@ transient failures (offline, unknown) until explicit contrary evidence.
 `agyva watch` is a foreground, read-only observer. The loop in `core::watch`
 is pure: clock, sleeping, jitter, probe and output are injected. It refreshes
 the active account every `watch_interval_secs` (300), backs off
-exponentially (jittered ±20%) up to 30 minutes on transient failures, never switches accounts,
-never warms up quota, skips suspended accounts, and stops cleanly on
+exponentially (jittered ±20%) up to 30 minutes on transient failures, never
+switches accounts itself, never warms up quota, skips suspended accounts, and stops cleanly on
 SIGINT/SIGTERM (exit 0). Optional desktop notifications (`notify`) are
 best-effort. `AGYVA_WATCH_MAX_CYCLES` bounds the loop for tests.
 

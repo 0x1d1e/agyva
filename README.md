@@ -7,7 +7,10 @@
 Save your Google Antigravity CLI (`agy`) logins, inspect their cached quota,
 and choose which account to use. Agyva keeps encrypted snapshots and restores
 the login you select. One Rust binary, a terminal dashboard, no daemon.
-Switching is always manual; restart `agy` after each switch.
+Switching is manual unless you explicitly opt in to `route` automation with
+`auto_switch = true` **and** `agyva config set auto_switch_ack true`; even
+then it is bounded by a 15-minute cooldown, fresh evidence and a session
+gate, and every decision is journaled. Restart `agy` after each switch.
 
 **Unofficial, Linux only.** Google’s [Antigravity FAQ](https://antigravity.google/docs/faq/)
 says third-party tools and account rotation are not supported on consumer
@@ -28,13 +31,13 @@ quota across enabled groups**, not an account-wide allowance.
 ## Install
 
 Download the Linux x86-64 archive and `SHA256SUMS` from
-[v0.1.0](https://github.com/0x1d1e/agyva/releases/tag/v0.1.0), published November
-15, 2026. In the download directory:
+[v0.1.1](https://github.com/0x1d1e/agyva/releases/tag/v0.1.1), published November
+16, 2026. In the download directory:
 
 ```sh
 sha256sum -c SHA256SUMS
-tar -xzf agyva-0.1.0-x86_64-unknown-linux-gnu.tar.gz
-install -Dm755 agyva-0.1.0-x86_64-unknown-linux-gnu/agyva ~/.local/bin/agyva
+tar -xzf agyva-0.1.1-x86_64-unknown-linux-gnu.tar.gz
+install -Dm755 agyva-0.1.1-x86_64-unknown-linux-gnu/agyva ~/.local/bin/agyva
 ```
 
 Or install the current source with Rust 1.88 or newer:
