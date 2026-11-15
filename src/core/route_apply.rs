@@ -143,12 +143,21 @@ impl App {
     /// Decide what `route apply GROUP` would do, without mutating anything.
     /// Re-reads routing.toml and the quota cache so the decision reflects
     /// current evidence; callers re-validate under the lock before switching.
-    pub fn route_apply_plan(&self, group: &str, now: DateTime<Utc>) -> Result<ApplyPlan> {
+    ///
+    /// `for_model` is the caller's family filter and applies to EVERY plan
+    /// computed here: automation decided on a family-aware ranking, so the
+    /// switch must revalidate the same ranking (`None` for the plain CLI).
+    pub fn route_apply_plan(
+        &self,
+        group: &str,
+        for_model: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<ApplyPlan> {
         use crate::core::route_config::Ranking;
         let config =
             crate::core::route_config::RoutingFile::load(&self.dirs.config.join("routing.toml"))?;
         let g = config.group(Some(group))?;
-        let plan = self.route_group_at(Some(group), now)?;
+        let plan = self.route_group_for(Some(group), for_model, now)?;
         let Some(rec) = plan.recommendation.clone() else {
             return Err(Error::usage(format!(
                 "group `{group}` has no eligible account; nothing to apply (see `agyva route inspect {group}`)"
@@ -190,12 +199,13 @@ impl App {
     pub fn route_apply(
         &self,
         group: &str,
+        for_model: Option<&str>,
         force: bool,
         confirmed: bool,
         history: &RouteHistory,
         now: DateTime<Utc>,
     ) -> Result<ApplyOutcome> {
-        let plan = self.route_apply_plan(group, now)?;
+        let plan = self.route_apply_plan(group, for_model, now)?;
         // Revalidation pass under the login lock: the group file, cache or
         // registry may have changed between planning and locking. The lock
         // is RELEASED before the switch: `switch` takes the same locks for
@@ -203,26 +213,32 @@ impl App {
         // here would self-deadlock).
         {
             let _lock = self.lock_login()?;
-            let fresh = self.route_apply_plan(group, now)?;
+            let fresh = self.route_apply_plan(group, for_model, now)?;
             if fresh.target_id != plan.target_id {
-                history.record(refused_entry(
-                    group,
-                    &plan.target_id,
-                    "recommendation changed while preparing the switch",
-                    now,
-                ))?;
+                record_refusal_while_locked(
+                    history,
+                    refused_entry(
+                        group,
+                        &plan.target_id,
+                        "recommendation changed while preparing the switch",
+                        now,
+                    ),
+                );
                 return Err(Error::refused(format!(
                     "the recommendation for `{group}` changed while preparing the switch (now {}); re-run `agyva route plan {group}`",
                     fresh.target_alias
                 )));
             }
             if let Some(pending) = self.pending_journal()? {
-                history.record(refused_entry(
-                    group,
-                    &plan.target_id,
-                    "an interrupted switch awaits recovery",
-                    now,
-                ))?;
+                record_refusal_while_locked(
+                    history,
+                    refused_entry(
+                        group,
+                        &plan.target_id,
+                        "an interrupted switch awaits recovery",
+                        now,
+                    ),
+                );
                 return Err(Error::recovery_required(format!(
                     "an interrupted switch to account {} ({}) must be recovered first",
                     pending.target,
@@ -239,14 +255,17 @@ impl App {
             }
             // The target must still be the recommendation in the evidence
             // as seen under the lock.
-            let check = self.route_group_at(Some(group), now)?;
+            let check = self.route_group_for(Some(group), for_model, now)?;
             if check.recommendation.as_deref() != Some(plan.target_id.as_str()) && !force {
-                history.record(refused_entry(
-                    group,
-                    &plan.target_id,
-                    "cached evidence no longer supports the recommendation",
-                    now,
-                ))?;
+                record_refusal_while_locked(
+                    history,
+                    refused_entry(
+                        group,
+                        &plan.target_id,
+                        "cached evidence no longer supports the recommendation",
+                        now,
+                    ),
+                );
                 return Err(Error::refused(format!(
                     "cached evidence no longer supports `{}` as the recommendation for `{group}`; refresh and re-plan, or pass --force",
                     plan.target_alias
@@ -287,6 +306,17 @@ impl App {
 #[doc(hidden)]
 pub fn tests_bounded_reason_for_docs(text: &str) -> String {
     bounded_reason(text)
+}
+
+/// Refusals happen while `route_apply` holds the login lock, and the history
+/// lock can be held by another process. Waiting for it would turn a clear
+/// refusal into "another agyva is running", so a contention failure on the
+/// LOG LINE never replaces the refusal itself. The success path still
+/// propagates every error.
+fn record_refusal_while_locked(history: &RouteHistory, entry: HistoryEntry) {
+    if let Err(e) = history.record(entry) {
+        tracing::warn!("could not record the routing refusal: {}", e.message());
+    }
 }
 
 /// A refusal stamped with the decision clock, so an injected clock makes

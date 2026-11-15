@@ -190,10 +190,14 @@ impl Probe for MonitorProbe<'_> {
         self.last_auto = None;
         if let Some(group) = self.group.clone() {
             let history = RouteHistory::new(&self.app.dirs);
-            match self
-                .app
-                .auto_switch_for(&group, &plan, refreshed, &history, now)
-            {
+            match self.app.auto_switch_for(
+                &group,
+                &plan,
+                self.for_model.as_deref(),
+                refreshed,
+                &history,
+                now,
+            ) {
                 Ok(Some(outcome)) => {
                     self.last_auto = Some(format!("auto-switch applied: {}", outcome.alias));
                     report.note = Some(format!(

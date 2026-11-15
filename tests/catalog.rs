@@ -783,3 +783,380 @@ gpt-oss-120b\tGPT-OSS 120B\n",
         "`solo` was never a family"
     );
 }
+
+/// No mapping is not "eligible by default": the catalog says the account
+/// has the family, but nothing local says which windows pay for it, so the
+/// whole-account share must not stand in as family evidence.
+#[test]
+fn unmapped_family_is_excluded_with_the_declared_fix() {
+    let rig = Rig::new();
+    rig.add_all(&[ALICE]);
+    let app = rig.app();
+    let now = Utc::now();
+    seed_fresh(&app, ALICE, now);
+    // Healthy, 40/70, and the catalog lists the family — but no group is
+    // named after it and routing.toml declares no mapping.
+    std::fs::write(
+        app.dirs.config.join("routing.toml"),
+        "[groups.work]\naccounts = ['alice']\n",
+    )
+    .unwrap();
+    ModelsCache::new(&app.dirs)
+        .record(
+            &id_of(ALICE),
+            vec![agyva::agy::models::ModelFamily {
+                id: "gemini-4-carbon".into(),
+                display_name: "Gemini 4 Carbon".into(),
+                variants: vec!["high".into()],
+            }],
+            now,
+        )
+        .unwrap();
+
+    let plan = app
+        .route_group_for(Some("work"), Some("gemini-4-carbon"), now)
+        .unwrap();
+    assert_eq!(plan.recommendation, None, "an unmapped family never wins");
+    let row = plan.accounts.first().unwrap();
+    assert!(!row.eligible);
+    assert_eq!(
+        row.why,
+        "gemini-4-carbon: no quota group reports this family; declare it in routing.toml [groups.<name>.models]"
+    );
+    // The share stays visible as whole-account evidence, just not decisive.
+    assert!(
+        row.remaining_percent.is_some(),
+        "the raw value remains inspectable"
+    );
+}
+
+/// The re-scope changes each row's evidence, so the order must follow it. The
+/// whole-account view ranks bob first (tier 0) while alice lands in tier 1 on
+/// her unrelated five-hour bucket; on the mapped pool alice leads on both
+/// share and renewal, so `--for-model` must invert them — and eligible rows
+/// always precede ineligible ones in the JSON.
+#[test]
+fn for_model_rows_are_ranked_on_the_mapped_pool() {
+    use agyva::core::health::{AccountHealth, HealthRecord, HealthSource};
+    use agyva::core::quota::{ModelQuota, QuotaSource, QuotaWindow};
+
+    let rig = Rig::new();
+    rig.add_all(&[ALICE, BOB]);
+    let app = rig.app();
+    let now = Utc::now();
+    let window = |pct: f64, reset_in: Duration| QuotaWindow {
+        remaining_percent: pct,
+        reset_at: Some(now + reset_in),
+        observed_at: now,
+        source: QuotaSource::AgyUsageCommand,
+    };
+    let entry =
+        |mapped: (f64, Duration), other: (f64, Duration)| agyva::core::quota_cache::CacheEntry {
+            quota: Some(agyva::core::quota_cache::CachedQuota {
+                observed_at: now,
+                groups: vec![
+                    ModelQuota {
+                        group: "Gemini Pro".into(),
+                        model: None,
+                        disabled: false,
+                        five_hour: Some(window(mapped.0, Duration::hours(3))),
+                        weekly: Some(window(mapped.0, mapped.1)),
+                    },
+                    ModelQuota {
+                        group: "Claude / GPT".into(),
+                        model: None,
+                        disabled: false,
+                        five_hour: Some(window(other.0, Duration::hours(2))),
+                        weekly: Some(window(other.0, other.1)),
+                    },
+                ],
+            }),
+            health: Some(HealthRecord {
+                state: AccountHealth::Healthy,
+                observed_at: Some(now),
+                source: HealthSource::AgyUsageCommand,
+                evidence: "synthetic".into(),
+            }),
+            ..Default::default()
+        };
+    app.quota_cache()
+        .update(|c| {
+            // alice: mapped pool 60% renewing in 6h, but her Claude five-hour
+            // bucket sits at 5% — that caps the WHOLE-ACCOUNT rate in tier 1.
+            c.accounts.insert(
+                id_of(ALICE),
+                entry((60.0, Duration::hours(6)), (5.0, Duration::days(4))),
+            );
+            // bob: mapped pool 40% renewing in 12h, nothing exhausted.
+            c.accounts.insert(
+                id_of(BOB),
+                entry((40.0, Duration::hours(12)), (40.0, Duration::days(3))),
+            );
+        })
+        .unwrap();
+    std::fs::write(
+        app.dirs.config.join("routing.toml"),
+        "[groups.work]\naccounts = ['alice', 'bob']\n[groups.work.models]\n'gemini-4-carbon' = 'Gemini Pro'\n",
+    )
+    .unwrap();
+    for who in [ALICE, BOB] {
+        ModelsCache::new(&app.dirs)
+            .record(
+                &id_of(who),
+                vec![agyva::agy::models::ModelFamily {
+                    id: "gemini-4-carbon".into(),
+                    display_name: "Gemini 4 Carbon".into(),
+                    variants: vec!["high".into()],
+                }],
+                now,
+            )
+            .unwrap();
+    }
+
+    let plain: Vec<String> = app
+        .route_group_at(Some("work"), now)
+        .unwrap()
+        .accounts
+        .iter()
+        .map(|r| r.alias.clone())
+        .collect();
+    assert_eq!(
+        plain,
+        ["bob", "alice"],
+        "fixture: the whole-account view ranks bob first"
+    );
+
+    let plan = app
+        .route_group_for(Some("work"), Some("gemini-4-carbon"), now)
+        .unwrap();
+    let order: Vec<&str> = plan.accounts.iter().map(|r| r.alias.as_str()).collect();
+    assert_eq!(
+        order,
+        ["alice", "bob"],
+        "the mapped pool decides the order: 60% renewing in 6h beats 40% in 12h"
+    );
+    assert_eq!(plan.recommendation, Some(id_of(ALICE)));
+    assert_eq!(plan.accounts[0].remaining_percent, Some(60.0));
+
+    // An exhausted mapped pool makes alice ineligible; the JSON keeps her
+    // last even though her whole-account view is the fuller one.
+    app.quota_cache()
+        .update(|c| {
+            c.accounts.insert(
+                id_of(ALICE),
+                entry((0.0, Duration::hours(6)), (99.0, Duration::days(4))),
+            );
+        })
+        .unwrap();
+    let plan = app
+        .route_group_for(Some("work"), Some("gemini-4-carbon"), now)
+        .unwrap();
+    assert_eq!(plan.recommendation, Some(id_of(BOB)));
+    let json = serde_json::to_value(&plan).unwrap();
+    let rows = json["accounts"].as_array().unwrap();
+    let eligible: Vec<bool> = rows
+        .iter()
+        .map(|r| r["eligible"].as_bool().unwrap())
+        .collect();
+    assert_eq!(
+        eligible,
+        [true, false],
+        "`--json` puts eligible rows before ineligible ones"
+    );
+    assert_eq!(rows[1]["alias"], "alice");
+    assert_eq!(rows[1]["remaining_percent"], 0.0);
+}
+
+/// A suspended account is never retried automatically — the monitor's
+/// catalog tick must not spawn `agy models` against it either. `--force`
+/// (an explicit `agyva models --refresh`) still checks once.
+#[test]
+fn suspended_account_is_not_polled_for_models() {
+    let rig = Rig::new();
+    rig.add_all(&[ALICE]);
+    let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
+    let app = rig.app_with_agy(&fake);
+    rig.login(ALICE);
+    fake.models(MODELS_TSV);
+    let now = Utc::now();
+    app.suspended_markers().mark(&id_of(ALICE), now).unwrap();
+
+    let out = app.refresh_models_at(false, now).unwrap();
+    assert_eq!(
+        out.status,
+        agyva::core::catalog::ModelsRefreshStatus::Skipped
+    );
+    assert!(
+        out.note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("suspended"),
+        "the skip note names the reason: {:?}",
+        out.note
+    );
+    assert_eq!(
+        fake.model_calls(),
+        0,
+        "no spawn against a suspended account"
+    );
+
+    // The explicit check still works.
+    let forced = app.refresh_models_at(true, now).unwrap();
+    assert_eq!(
+        forced.status,
+        agyva::core::catalog::ModelsRefreshStatus::Refreshed
+    );
+    assert_eq!(fake.model_calls(), 1);
+}
+
+/// The cached health marker counts too: the disposable cache is pruned, but
+/// while it says `TermsSuspended` the tick must not spawn either.
+#[test]
+fn cached_suspension_health_also_blocks_the_models_tick() {
+    use agyva::core::health::{AccountHealth, HealthRecord, HealthSource};
+
+    let rig = Rig::new();
+    rig.add_all(&[ALICE]);
+    let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
+    let app = rig.app_with_agy(&fake);
+    rig.login(ALICE);
+    fake.models(MODELS_TSV);
+    let now = Utc::now();
+    app.quota_cache()
+        .update(|c| {
+            c.accounts.insert(
+                id_of(ALICE),
+                agyva::core::quota_cache::CacheEntry {
+                    health: Some(HealthRecord {
+                        state: AccountHealth::TermsSuspended,
+                        observed_at: Some(now),
+                        source: HealthSource::AgyUsageCommand,
+                        evidence: "synthetic".into(),
+                    }),
+                    ..Default::default()
+                },
+            );
+        })
+        .unwrap();
+
+    let out = app.refresh_models_at(false, now).unwrap();
+    assert_eq!(
+        out.status,
+        agyva::core::catalog::ModelsRefreshStatus::Skipped
+    );
+    assert_eq!(fake.model_calls(), 0);
+}
+
+/// An agy build we were never verified against is not spawned from a
+/// background tick: skip with a note instead of erroring.
+#[test]
+fn untested_agy_version_skips_the_models_tick() {
+    let rig = Rig::new();
+    rig.add_all(&[ALICE]);
+    let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
+    let app = rig
+        .app_with_agy(&fake)
+        .with_compat(agyva::agy::compatibility::Compat::Unknown(
+            "unparseable version".into(),
+        ));
+    rig.login(ALICE);
+    fake.models(MODELS_TSV);
+    let now = Utc::now();
+
+    let out = app.refresh_models_at(true, now).unwrap();
+    assert_eq!(
+        out.status,
+        agyva::core::catalog::ModelsRefreshStatus::Skipped
+    );
+    assert!(
+        out.note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("unparseable"),
+        "the note carries the compat refusal: {:?}",
+        out.note
+    );
+    assert_eq!(fake.model_calls(), 0, "unsupported agy is never spawned");
+}
+
+/// A removed account's catalog entry is pruned instead of lingering forever
+/// in cache/models.json, and the prune never fails when no catalog file
+/// exists (the common case for an account that was never refreshed).
+#[test]
+fn removing_an_account_prunes_its_catalog_entry() {
+    let rig = Rig::new();
+    // alice is added last, so she is the ACTIVE account the catalog run
+    // targets (and the live login).
+    rig.add_all(&[BOB, ALICE]);
+    let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
+    let app = rig.app_with_agy(&fake);
+    rig.login(ALICE);
+    fake.models(MODELS_TSV);
+    assert_eq!(
+        app.refresh_models(true).unwrap().status,
+        agyva::core::catalog::ModelsRefreshStatus::Refreshed
+    );
+    assert!(
+        app.models_cache()
+            .load()
+            .accounts
+            .contains_key(&id_of(ALICE))
+    );
+
+    // alice is active, so removing her needs --force (agy keeps the login).
+    app.remove("alice", true).unwrap();
+    assert!(
+        !app.models_cache()
+            .load()
+            .accounts
+            .contains_key(&id_of(ALICE)),
+        "the dead id is gone from the catalog cache"
+    );
+
+    // And a removal when no catalog file exists still succeeds.
+    std::fs::remove_file(app.dirs.cache.join("models.json")).ok();
+    app.remove("bob", true).unwrap();
+    assert!(app.models_cache().load().accounts.is_empty());
+}
+
+/// The quota refresh prunes the catalog cache in the same breath, so an
+/// account removed while its entry was still cached cannot survive a tick.
+#[test]
+fn quota_refresh_prunes_the_catalog_cache() {
+    let rig = Rig::new();
+    rig.add_all(&[BOB, ALICE]);
+    let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
+    let app = rig.app_with_agy(&fake);
+    rig.login(ALICE);
+    fake.models(MODELS_TSV);
+    app.refresh_models(true).unwrap();
+    // A stale id that is not in the registry, as `save_registry` racing a
+    // crash could leave behind.
+    ModelsCache::new(&app.dirs)
+        .record(
+            "dead-account-id",
+            vec![agyva::agy::models::ModelFamily {
+                id: "gone".into(),
+                display_name: "Gone".into(),
+                variants: Vec::new(),
+            }],
+            Utc::now(),
+        )
+        .unwrap();
+    fake.ok(0.6, 0.6);
+    app.refresh_active(true).unwrap();
+    assert!(
+        !app.models_cache()
+            .load()
+            .accounts
+            .contains_key("dead-account-id"),
+        "the refresh pruned the dead id"
+    );
+    assert!(
+        app.models_cache()
+            .load()
+            .accounts
+            .contains_key(&id_of(ALICE)),
+        "the live entry survives"
+    );
+}

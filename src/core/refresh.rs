@@ -289,6 +289,13 @@ impl App {
         let groups = ran.groups.clone().ok();
         let mut effective = fresh.clone();
         let ids: Vec<String> = reg.accounts.iter().map(|a| a.id.clone()).collect();
+        // The catalog cache is pruned in the same breath as quota: a removed
+        // account's observation is dead weight and must not linger forever
+        // in cache/models.json. Best effort — a failure here must not turn a
+        // successful quota refresh into an error.
+        if let Err(e) = self.models_cache().retain(&ids) {
+            tracing::warn!("could not prune the models cache: {}", e.message());
+        }
         let write = cache.update(|f| {
             f.accounts.retain(|k, _| ids.contains(k));
             let e = f.accounts.entry(active.clone()).or_default();

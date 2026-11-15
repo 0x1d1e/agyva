@@ -261,7 +261,7 @@ fn dispatch(app: &App, command: Command, io: &mut Io<'_>, st: Style) -> Result<i
             if let Some(super::RouteCommand::Apply { group, yes, force }) = &a.command {
                 let history = crate::core::route_apply::RouteHistory::new(&app.dirs);
                 let now = chrono::Utc::now();
-                let plan = app.route_apply_plan(group, now)?;
+                let plan = app.route_apply_plan(group, None, now)?;
                 let mut plan_warnings = Vec::new();
                 if let Some(w) = &plan.session_warning {
                     plan_warnings.push(w.clone());
@@ -292,7 +292,7 @@ fn dispatch(app: &App, command: Command, io: &mut Io<'_>, st: Style) -> Result<i
                         return Ok(exit::OK);
                     }
                 }
-                let outcome = app.route_apply(group, *force, true, &history, now)?;
+                let outcome = app.route_apply(group, None, *force, true, &history, now)?;
                 if a.json {
                     #[derive(Serialize)]
                     struct AppliedJson<'a> {

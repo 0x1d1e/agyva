@@ -92,6 +92,14 @@ impl App {
         let path = self.dirs.snapshot_file(&rec.id);
         fsutil::remove_durable(&path)
             .map_err(|e| Error::io(format!("removing {}", path.display()), e))?;
+        // The catalog cache keys on the account id, so a removed account
+        // would otherwise keep a dead observation forever. Pruning is best
+        // effort: the account is already gone, and a missing cache file (the
+        // common case for an account never refreshed) is not a failure.
+        let ids: Vec<String> = reg.accounts.iter().map(|a| a.id.clone()).collect();
+        if let Err(e) = self.models_cache().retain(&ids) {
+            tracing::warn!("could not prune the models cache: {}", e.message());
+        }
         Ok(view)
     }
 }

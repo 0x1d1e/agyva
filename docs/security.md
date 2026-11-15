@@ -91,11 +91,12 @@ never terminates agy; it only reports detected sessions (from
 - A Terms-of-Service suspension is detected only from an explicit agy message.
   The account is then marked `TermsSuspended`, shown prominently (CLI and TUI
   banner) with a pointer to the Antigravity FAQ and Google support, and is
-  **never retried automatically**: refresh, watch and the TUI skip it unless
-  you pass `--force-refresh`. Agyva does not help work around a suspension, and
-  it does not auto-switch to another account because of one (route
-  automation likewise ranks a `TermsSuspended` account as ineligible and
-  can never pick it).
+  **never retried automatically**: refresh, watch, the TUI and the monitor's
+  `agy models` catalog tick all skip it unless you explicitly force a check
+  (`--force-refresh`, or `agyva models --refresh`). Agyva does not help work
+  around a suspension, and it does not auto-switch to another account because
+  of one (route automation likewise ranks a `TermsSuspended` account as
+  ineligible and can never pick it).
 - `watch`, `monitor` and the TUI observe; they never switch accounts on their
   own, never warm up quota windows and never retry on quota errors. A switch
   from the TUI needs explicit confirmation and uses the same journaled path

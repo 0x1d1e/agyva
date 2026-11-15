@@ -270,7 +270,10 @@ impl App {
     /// When a mapping resolves, that group's windows — not the whole-account
     /// aggregate — decide both share and eligibility, so a family whose own
     /// quota is healthy is eligible even if another bucket on the same
-    /// account is empty. Health and a missing reading still block.
+    /// account is empty. Health and a missing reading still block. Because
+    /// every row's evidence changed, the plan is then RE-RANKED on the
+    /// re-scoped values (ineligible last, then the group's ranking, then its
+    /// listed order, then the id), so ordering never contradicts the share.
     pub fn route_group_for(
         &self,
         group: Option<&str>,
@@ -345,7 +348,15 @@ impl App {
             let crate::core::catalog::FamilyGroups::Mapped((group_name, model)) =
                 crate::core::catalog::map_family_to_groups(family, declared.as_deref(), views)
             else {
-                // No mapping: the whole-account verdict stands.
+                // No group reports this family and none is declared: the
+                // catalog listed it, but nothing local says which windows
+                // would pay for it, so the whole-account share is NOT
+                // evidence about this family. Excluded, with the fix spelled
+                // out — never silently promoted on unrelated quota.
+                row.eligible = false;
+                row.why = format!(
+                    "{requested}: no quota group reports this family; declare it in routing.toml [groups.<name>.models]"
+                );
                 continue;
             };
             let windows: Vec<&crate::core::usage::WindowView> = usage
@@ -455,6 +466,72 @@ impl App {
                 );
             }
         }
+        // The re-scope above changes every row's evidence, so the order
+        // `route_group_at` produced no longer reflects this question: a
+        // 95%-overall account whose mapped pool sits at 5% must not rank
+        // above a 60/60 one, and an ineligible row must never precede an
+        // eligible one. Re-rank deterministically on the re-scoped values,
+        // keeping the group's declared ordering where it is a tiebreak
+        // (priority order, least-used plans) and ending on the id so the
+        // output is stable.
+        let declared_order: Vec<String> = plan.accounts.iter().map(|r| r.id.clone()).collect();
+        let used_rank = |row: &RouteRow| -> u8 {
+            let Some(g) = &group_config else {
+                return 3;
+            };
+            match g.plans.get(&row.alias).or_else(|| g.plans.get(&row.id)) {
+                Some(crate::core::route_config::DeclaredPlan::Free) => 0,
+                Some(crate::core::route_config::DeclaredPlan::Pro) => 1,
+                Some(crate::core::route_config::DeclaredPlan::Ultra) => 2,
+                None => 3,
+            }
+        };
+        let priority = |row: &RouteRow| -> i32 {
+            let Some(g) = &group_config else {
+                return 0;
+            };
+            g.priorities
+                .get(&row.alias)
+                .or_else(|| g.priorities.get(&row.id))
+                .copied()
+                .unwrap_or_default()
+        };
+        let ranking = group_config.as_ref().map(|g| g.ranking).unwrap_or_default();
+        plan.accounts.sort_by(|a, b| {
+            let by_tier = tier(a).cmp(&tier(b));
+            if by_tier != Ordering::Equal {
+                return by_tier;
+            }
+            let by_ranking = match ranking {
+                crate::core::route_config::Ranking::Priority => {
+                    b_priority_cmp(priority(a), priority(b))
+                }
+                crate::core::route_config::Ranking::LeastUsed => used_rank(a).cmp(&used_rank(b)),
+                crate::core::route_config::Ranking::Smart => Ordering::Equal,
+            };
+            if by_ranking != Ordering::Equal {
+                return by_ranking;
+            }
+            freshness_rank(a.freshness)
+                .cmp(&freshness_rank(b.freshness))
+                .then_with(|| {
+                    if tier(a) == 0 {
+                        known_time(a.renewals[0], b.renewals[0])
+                            .then_with(|| known_time(a.renewals[1], b.renewals[1]))
+                    } else {
+                        b.remaining_percent
+                            .partial_cmp(&a.remaining_percent)
+                            .unwrap_or(Ordering::Equal)
+                    }
+                })
+                .then_with(|| {
+                    declared_order
+                        .iter()
+                        .position(|id| id == &a.id)
+                        .cmp(&declared_order.iter().position(|id| id == &b.id))
+                })
+                .then_with(|| a.id.cmp(&b.id))
+        });
         plan.recommendation = plan
             .accounts
             .iter()
@@ -462,4 +539,9 @@ impl App {
             .map(|r| r.id.clone());
         Ok(plan)
     }
+}
+
+/// Priority ranking: the larger declared number wins.
+fn b_priority_cmp(a: i32, b: i32) -> Ordering {
+    b.cmp(&a)
 }

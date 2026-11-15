@@ -115,9 +115,18 @@ only.
 reports (`gemini-4-carbon-high`), case-insensitively; a variant resolves to
 its family's mapping, so both spellings give the same share. An id that is a
 standalone catalog entry (nothing else shares its base) keeps its own
-identity instead of being re-based. When a quota group maps to the family
-(declared mapping first, then group names), the ranked share follows that
-group's windows — an exhausted unrelated bucket cannot hide a usable one.
+identity instead of being re-based.
+
+The family must also be mapped: when no quota group reports it and
+`routing.toml [groups.<name>.models]` declares nothing, the account is
+excluded with a reason naming that fix — the whole-account share is not
+evidence about a family no local group pays for. When a group does map to
+the family (declared mapping first, then group names), the ranked share and
+eligibility follow that group's windows — an exhausted unrelated bucket
+cannot hide a usable one — and rows are re-ranked on those numbers:
+ineligible accounts last, then the group's ranking (smart by tier,
+freshness and renewal; priority by declared number; least-used by declared
+plan), then the group's listed order.
 
 `agyva route apply GROUP` activates the group's recommended account through
 the same journaled, checkpointed switch as `agyva use` — exactly one switch,
@@ -126,9 +135,11 @@ pending recovery) immediately before anything changes. It asks for
 confirmation first (`--yes` to skip); if agy sessions are running it warns
 that they keep their old login. If the evidence moved between planning and
 switching, apply refuses and says so (`--force` overrides the drift check,
-never the recovery check). `agyva route history [--limit N]` shows the most
-recent decisions with their reasons — aliases and outcomes only, never
-credentials.
+never the recovery check). Auto-switch passes its `--for-model` filter into
+apply, so the account it activates is the one the pane and the decision
+named: revalidation ranks the same family, never the whole account.
+`agyva route history [--limit N]` shows the most recent decisions with their
+reasons — aliases and outcomes only, never credentials.
 
 `least-used` orders by declared plan instead — free before pro before ultra,
 with undeclared accounts last and smart's ordering breaking ties — so a

@@ -203,6 +203,7 @@ impl crate::core::app::App {
         &self,
         group: &str,
         plan: &crate::core::route::RoutePlan,
+        for_model: Option<&str>,
         refreshed: bool,
         history: &RouteHistory,
         now: DateTime<Utc>,
@@ -278,7 +279,11 @@ impl crate::core::app::App {
                         )));
                     }
                 }
-                let outcome = self.route_apply(group, false, true, history, now)?;
+                // The switch revalidates the SAME ranking the decision used:
+                // without the caller's model filter, apply would fall back
+                // to the whole-account order and activate a different
+                // account than the one `decide` and the pane reported.
+                let outcome = self.route_apply(group, for_model, false, true, history, now)?;
                 note_switch(&self.dirs, now, true)?;
                 Ok(Some(outcome))
             }

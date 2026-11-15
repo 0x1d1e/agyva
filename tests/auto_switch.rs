@@ -139,7 +139,7 @@ fn stale_evidence_defers_never_switches_on_cached_reset() {
     // Nothing happened.
     let history = RouteHistory::new(&app.dirs);
     let out = app
-        .auto_switch_for("work", &plan, false, &history, now)
+        .auto_switch_for("work", &plan, None, false, &history, now)
         .unwrap();
     assert!(out.is_none());
     assert_eq!(rig.live_id(), Some(id_of(BOB)), "no switch happened");
@@ -202,7 +202,7 @@ fn detected_sessions_defer() {
     ));
     let history = RouteHistory::new(&app.dirs);
     let out = app
-        .auto_switch_for("work", &plan, true, &history, now)
+        .auto_switch_for("work", &plan, None, true, &history, now)
         .unwrap();
     assert!(out.is_none());
     assert_eq!(rig.live_id(), Some(id_of(BOB)));
@@ -236,7 +236,7 @@ fn suspended_candidate_and_active_are_never_chosen() {
     );
     let history = RouteHistory::new(&app.dirs);
     let out = app
-        .auto_switch_for("work", &plan, true, &history, now)
+        .auto_switch_for("work", &plan, None, true, &history, now)
         .unwrap();
     assert!(out.is_none());
     assert_eq!(rig.live_id(), Some(id_of(BOB)));
@@ -262,7 +262,7 @@ fn pending_recovery_blocks_auto_switch() {
     let history = RouteHistory::new(&app.dirs);
     let plan = app.route_group_at(Some("work"), now).unwrap();
     let err = app
-        .auto_switch_for("work", &plan, true, &history, now)
+        .auto_switch_for("work", &plan, None, true, &history, now)
         .unwrap_err();
     assert_eq!(err.kind(), agyva::core::error::ErrorKind::RecoveryRequired);
 }
@@ -296,7 +296,7 @@ fn concurrent_manual_switch_wins_and_cools_automation_down() {
     assert_eq!(rig.live_id(), Some(id_of(CAROL)));
     let history = RouteHistory::new(&app.dirs);
     let out = app
-        .auto_switch_for("work", &plan, true, &history, now)
+        .auto_switch_for("work", &plan, None, true, &history, now)
         .unwrap();
     assert!(out.is_none(), "cooldown from the manual switch holds");
     assert_eq!(rig.live_id(), Some(id_of(CAROL)));
@@ -320,7 +320,7 @@ fn auto_switch_applies_through_the_journaled_path() {
     let plan = fresh_plan(&app, now);
     let history = RouteHistory::new(&app.dirs);
     let out = app
-        .auto_switch_for("work", &plan, true, &history, now)
+        .auto_switch_for("work", &plan, None, true, &history, now)
         .unwrap()
         .expect("switch happened");
     assert_eq!(out.alias, "alice");
@@ -541,7 +541,7 @@ fn unknown_session_detection_defers_instead_of_switching() {
     // The whole switch path agrees: nothing moves, and the defer is recorded.
     let history = RouteHistory::new(&app.dirs);
     let out = app
-        .auto_switch_for("work", &plan, true, &history, now)
+        .auto_switch_for("work", &plan, None, true, &history, now)
         .unwrap();
     assert!(out.is_none(), "no switch on an unknown session answer");
     assert_eq!(rig.live_id(), Some(id_of(BOB)), "the login never moved");
@@ -551,5 +551,140 @@ fn unknown_session_detection_defers_instead_of_switching() {
             .last()
             .is_some_and(|e| e.reason.contains("could not determine")),
         "the defer reason is recorded: {entries:?}"
+    );
+}
+
+/// Automation must activate the account the pane and `decide` named. The
+/// family filter makes alice eligible (95% in the mapped pool) even though
+/// her whole-account minimum is 0, while bob is the plain winner at 60/60.
+/// If apply re-ranked without the filter it would silently switch to bob —
+/// visible only in the journal.
+#[test]
+fn auto_switch_activates_the_family_capable_account_not_the_overall_best() {
+    use agyva::core::catalog::ModelsCache;
+
+    let rig = Rig::new();
+    // carol is ACTIVE (added last) and is the account automation leaves.
+    rig.add_all(&[ALICE, BOB, CAROL]);
+    let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
+    fake.ok(0.5, 0.5);
+    let mut app = rig.app_with_agy(&fake);
+    let now = Utc::now();
+    let entry = |gemini: f64, other: f64, five: i64, week: i64| CacheEntry {
+        quota: Some(CachedQuota {
+            observed_at: now,
+            groups: vec![
+                ModelQuota {
+                    group: "Gemini Pro".into(),
+                    model: None,
+                    disabled: false,
+                    five_hour: Some(QuotaWindow {
+                        remaining_percent: gemini,
+                        reset_at: Some(now + Duration::hours(five)),
+                        observed_at: now,
+                        source: QuotaSource::AgyUsageCommand,
+                    }),
+                    weekly: Some(QuotaWindow {
+                        remaining_percent: gemini,
+                        reset_at: Some(now + Duration::hours(week)),
+                        observed_at: now,
+                        source: QuotaSource::AgyUsageCommand,
+                    }),
+                },
+                ModelQuota {
+                    group: "Claude / GPT".into(),
+                    model: None,
+                    disabled: false,
+                    five_hour: Some(QuotaWindow {
+                        remaining_percent: other,
+                        reset_at: Some(now + Duration::hours(3)),
+                        observed_at: now,
+                        source: QuotaSource::AgyUsageCommand,
+                    }),
+                    weekly: Some(QuotaWindow {
+                        remaining_percent: other,
+                        reset_at: Some(now + Duration::days(5)),
+                        observed_at: now,
+                        source: QuotaSource::AgyUsageCommand,
+                    }),
+                },
+            ],
+        }),
+        health: Some(HealthRecord {
+            state: AccountHealth::Healthy,
+            observed_at: Some(now),
+            source: HealthSource::AgyUsageCommand,
+            evidence: "synthetic".into(),
+        }),
+        ..Default::default()
+    };
+    // The mapping is Gemini Pro. alice's Claude bucket is empty (so the
+    // whole-account verdict excludes her) while her mapped pool is nearly
+    // full and renews soonest; bob is a plain 60/60 renewing later; carol is
+    // the active account, weakest and slowest to renew.
+    let alice = entry(95.0, 0.0, 3, 2);
+    let bob = entry(60.0, 60.0, 5, 72);
+    let carol = entry(30.0, 30.0, 4, 96);
+    app.quota_cache()
+        .update(|c| {
+            c.accounts.insert(id_of(ALICE), alice);
+            c.accounts.insert(id_of(BOB), bob);
+            c.accounts.insert(id_of(CAROL), carol);
+        })
+        .unwrap();
+    std::fs::write(
+        app.dirs.config.join("routing.toml"),
+        "[groups.work]\nranking = 'smart'\nauto_switch = true\naccounts = ['alice', 'bob', 'carol']\n[groups.work.models]\n'gemini-4-carbon' = 'Gemini Pro'\n",
+    )
+    .unwrap();
+    app.config.auto_switch_ack = true;
+    for who in [ALICE, BOB, CAROL] {
+        ModelsCache::new(&app.dirs)
+            .record(
+                &id_of(who),
+                vec![agyva::agy::models::ModelFamily {
+                    id: "gemini-4-carbon".into(),
+                    display_name: "Gemini 4 Carbon".into(),
+                    variants: vec!["high".into()],
+                }],
+                now,
+            )
+            .unwrap();
+    }
+
+    // Unfiltered, alice is excluded (quota exhausted) and bob wins.
+    let plain = app.route_group_for(Some("work"), None, now).unwrap();
+    assert_eq!(
+        plain.recommendation,
+        Some(id_of(BOB)),
+        "fixture: bob is the best whole-account pick"
+    );
+    // Filtered, the mapped pool is decisive and alice wins.
+    let plan = app
+        .route_group_for(Some("work"), Some("gemini-4-carbon"), now)
+        .unwrap();
+    assert_eq!(plan.recommendation, Some(id_of(ALICE)));
+    assert_eq!(
+        decide(&app, "work", &plan, true, now),
+        AutoDecision::Switch {
+            id: id_of(ALICE),
+            alias: "alice".to_owned()
+        }
+    );
+
+    let history = RouteHistory::new(&app.dirs);
+    let out = app
+        .auto_switch_for("work", &plan, Some("gemini-4-carbon"), true, &history, now)
+        .unwrap();
+    let out = out.expect("automation switched");
+    assert_eq!(
+        out.alias, "alice",
+        "the family-capable account is activated, not the whole-account winner"
+    );
+    assert_eq!(rig.live_id(), Some(id_of(ALICE)));
+    assert_eq!(
+        history.load().entries.last().map(|e| e.target.clone()),
+        Some(id_of(ALICE)),
+        "the journal names alice"
     );
 }

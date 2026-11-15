@@ -57,7 +57,9 @@ fn apply_switches_to_the_recommendation_through_the_journaled_path() {
     write_group(&app, "[groups.work]\naccounts = ['alice', 'bob']\n");
 
     let history = RouteHistory::new(&app.dirs);
-    let out = app.route_apply("work", false, true, &history, now).unwrap();
+    let out = app
+        .route_apply("work", None, false, true, &history, now)
+        .unwrap();
     assert_eq!(out.alias, "alice");
     assert!(!out.already_active);
     assert_eq!(rig.live_id(), Some(id_of(ALICE)));
@@ -88,7 +90,7 @@ fn apply_refuses_on_pending_recovery_and_records_it() {
 
     let history = RouteHistory::new(&app.dirs);
     let err = app
-        .route_apply("work", false, true, &history, now)
+        .route_apply("work", None, false, true, &history, now)
         .unwrap_err();
     assert_eq!(err.kind(), ErrorKind::RecoveryRequired);
     assert_eq!(err.exit_code(), exit::RECOVERY_REQUIRED);
@@ -113,11 +115,11 @@ fn apply_refuses_when_evidence_drifts_from_the_plan() {
     // (same process); instead simulate drift by emptying the cache between
     // plan and apply via a custom re-check: plan says alice, then the cache
     // is dropped, so the fresh evidence recommends nobody.
-    let plan = app.route_apply_plan("work", now).unwrap();
+    let plan = app.route_apply_plan("work", None, now).unwrap();
     assert_eq!(plan.target_id, id_of(ALICE));
     app.quota_cache().update(|c| c.accounts.clear()).unwrap();
     let err = app
-        .route_apply("work", false, true, &history, now)
+        .route_apply("work", None, false, true, &history, now)
         .unwrap_err();
     assert!(
         err.message().contains("no eligible account"),
@@ -141,11 +143,11 @@ fn apply_refuses_when_recommendation_changed_under_the_lock() {
 
     // The group file changes between plan and lock: the apply must refuse
     // rather than switch to a target that is no longer recommended.
-    let plan = app.route_apply_plan("work", now).unwrap();
+    let plan = app.route_apply_plan("work", None, now).unwrap();
     assert_eq!(plan.target_id, id_of(ALICE));
     write_group(&app, "[groups.work]\naccounts = ['bob']\n");
     let err = app
-        .route_apply("work", false, true, &history, now)
+        .route_apply("work", None, false, true, &history, now)
         .unwrap_err();
     assert!(
         err.message().contains("no longer")
@@ -166,7 +168,9 @@ fn already_active_apply_is_recorded_and_harmless() {
     seed_fresh(&app, BOB, now);
     write_group(&app, "[groups.work]\naccounts = ['bob']\n");
     let history = RouteHistory::new(&app.dirs);
-    let out = app.route_apply("work", false, true, &history, now).unwrap();
+    let out = app
+        .route_apply("work", None, false, true, &history, now)
+        .unwrap();
     assert!(out.already_active);
     let file = history.load();
     assert_eq!(file.entries.len(), 1);
@@ -262,7 +266,7 @@ fn refusals_are_stamped_with_the_injected_clock() {
     write_group(&app, "[groups.work]\naccounts = ['bob']\n");
     let history = RouteHistory::new(&app.dirs);
     let err = app
-        .route_apply("work", false, true, &history, now)
+        .route_apply("work", None, false, true, &history, now)
         .unwrap_err();
     assert_eq!(err.kind(), ErrorKind::RecoveryRequired);
     let entry = &history.load().entries[0];
@@ -270,4 +274,54 @@ fn refusals_are_stamped_with_the_injected_clock() {
         entry.at, now,
         "the refusal is stamped with the decision clock, not wall time"
     );
+}
+
+/// A refusal is the answer the user asked for; the history line is not.
+/// While another process holds the history lock, `RouteHistory::record`
+/// would return `Locked` after waiting — and the caller would see "another
+/// agyva is running" instead of the real reason. Refusals record best-effort.
+#[test]
+fn refusal_survives_history_lock_contention() {
+    use agyva::storage::lock::StateLock;
+
+    let rig = Rig::new();
+    rig.add_all(&[BOB, ALICE]);
+    let _ = rig
+        .app_with(agyva::core::failpoint::Failpoints::armed(
+            "after-native-write",
+            agyva::core::failpoint::Fault::Crash,
+        ))
+        .switch("bob", false);
+    let app = rig.app();
+    let now = Utc::now();
+    seed_fresh(&app, BOB, now);
+    write_group(&app, "[groups.work]\naccounts = ['bob']\n");
+    assert!(app.pending_journal().unwrap().is_some());
+
+    let history = RouteHistory::new(&app.dirs);
+    let lock_path = app.dirs.state.join("route-history.lock");
+    let held = std::thread::spawn(move || -> Option<StateLock> {
+        // The real answer is the recovery refusal below; this only makes
+        // the log write fail. Wait for the caller to report before leaving.
+        let guard = StateLock::acquire(&lock_path, std::time::Duration::from_millis(500)).ok()?;
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        Some(guard)
+    });
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    let err = app
+        .route_apply("work", None, false, true, &history, now)
+        .unwrap_err();
+    let _ = held.join();
+    assert_eq!(
+        err.kind(),
+        ErrorKind::RecoveryRequired,
+        "the real refusal survives: {}",
+        err.message()
+    );
+    assert!(
+        !err.message().contains("another agyva"),
+        "lock contention never masks the refusal"
+    );
+    // Nothing was mutated and no bogus entry appeared.
+    assert_eq!(rig.live_id(), Some(id_of(BOB)));
 }

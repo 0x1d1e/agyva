@@ -23,6 +23,7 @@ use crate::agy::models::ModelFamily;
 use crate::agy::usage_run::RunLimits;
 use crate::core::app::App;
 use crate::core::error::Result;
+use crate::core::health::AccountHealth;
 use crate::paths::Dirs;
 use crate::storage::fsutil;
 use crate::storage::lock::StateLock;
@@ -377,6 +378,31 @@ impl App {
             return Ok(ModelsRefresh::skipped(
                 id,
                 format!("using saved catalog (observed {age}s ago)"),
+            ));
+        }
+        // Same suspension gate as `refresh_active_at`: a suspended account
+        // is never retried automatically (only an explicit `--force`), so
+        // automation must not spawn `agy models` against it either. The
+        // persisted marker outlives the disposable cache.
+        if !force {
+            let entry = self.quota_cache().load().accounts.remove(&active);
+            let flagged = entry
+                .and_then(|e| e.health)
+                .is_some_and(|h| h.state == AccountHealth::TermsSuspended)
+                || self.suspended_markers().get(&active).is_some();
+            if flagged {
+                return Ok(ModelsRefresh::skipped(
+                    id,
+                    "account is suspended; not running `agy models` (use `agyva models --refresh` to check once)",
+                ));
+            }
+        }
+        // Same compatibility gate as `add`/`switch`: an agy build we were
+        // never verified against is not spawned from a background tick.
+        if let Err(e) = self.require_compat() {
+            return Ok(ModelsRefresh::skipped(
+                id,
+                format!("{}; catalog refresh skipped", e.message()),
             ));
         }
         // Same attribution rule as quota: only the account agy is logged in
