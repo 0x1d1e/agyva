@@ -325,6 +325,7 @@ fn dispatch(app: &App, command: Command, io: &mut Io<'_>, st: Style) -> Result<i
             };
             let report = app.route_group_for(group, for_model, chrono::Utc::now())?;
             if a.json {
+                print_json(io, &report)?
             } else {
                 for row in &report.accounts {
                     writeln!(

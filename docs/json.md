@@ -41,14 +41,18 @@ and `weekly` windows. A present window has `remaining_percent`, `reset_at`,
 `observed_at` and `source` (`cache` or `agy_usage_command`). A missing window is
 `null`, not zero, and not full. Reset timestamps may also be `null`.
 
-`agyva route plan GROUP --json` returns `{"group", "generated_at", "fresh",
-"accounts"}`; each account row carries `alias`, `id`, `eligibility`
-(`eligible` or a reason string), `rank`, the two windows (same shape as
-above) and `score` when eligible. Rows are ranked best-first; `fresh` is
-false when no live reading backs the plan. `agyva route history --json`
-returns `{"schema_version", "entries"}` with `at`, `group`, `target`,
-`outcome` (`applied`, `refused`, `failed`) and a bounded `reason` per entry
-(automatic decisions included).
+`agyva route plan [--for MODEL] [--json]` (named groups via
+`route plan GROUP` / `route inspect GROUP`) returns
+`{"schema_version", "generated_at", "recommendation", "accounts"}`. The
+recommendation is an account id or `null`. Each account row carries `id`,
+`alias`, `active`, `freshness` (`fresh`/`stale`/`expired`/`missing`),
+`eligible`, `remaining_percent`, `rate_remaining_percent`, `renewals` (the
+two reset timestamps, each possibly `null`), `why` (a human reason, the
+machine-readable eligibility signal) and `command`. Rows are ranked
+best-first with ineligible accounts last. `agyva route history --json`
+returns `{"schema_version", "entries"}` with `at`, `target`, `outcome`
+(`applied`, `refused`, `failed`), an optional `group` and a bounded `reason`
+per entry (automatic decisions included).
 
 `refreshed_now` says that run got data from agy. `health.verified_now` says agy
 answered during that run. Neither boolean changes a historical timestamp into

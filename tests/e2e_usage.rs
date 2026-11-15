@@ -426,3 +426,67 @@ fn doctor_and_status_cover_agy_and_the_quota_provider() {
         .expect("doctor");
     assert!(String::from_utf8_lossy(&o.stdout).contains("quota-provider"));
 }
+
+#[test]
+fn route_plan_and_inspect_json_expose_the_documented_shape() {
+    let sb = Sandbox::new();
+    sb.with_account();
+    sb.fake.ok(0.72, 0.4);
+    std::fs::write(
+        sb.p("cfg/routing.toml"),
+        "[groups.work]\naccounts = [\"alice\"]\n",
+    )
+    .expect("routing.toml");
+
+    // Route planning is cache-only, so warm the cache with a real run
+    // first; the plan itself never spawns agy.
+    let warm = sb.run(&["usage"]);
+    assert_eq!(warm.code, 0, "{}{}", warm.out, warm.err);
+    let r = sb.run(&["route", "plan", "work", "--json"]);
+    assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+    let v = json(&r);
+    assert_eq!(v["schema_version"], 1);
+    assert!(
+        v["generated_at"].as_str().is_some(),
+        "generated_at must be a timestamp"
+    );
+    let rec = v["recommendation"].as_str().expect("recommendation id");
+    let rows = v["accounts"].as_array().expect("accounts array");
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(rec, row["id"], "recommendation names the top row");
+    for key in [
+        "id",
+        "alias",
+        "active",
+        "freshness",
+        "eligible",
+        "remaining_percent",
+        "rate_remaining_percent",
+        "renewals",
+        "why",
+        "command",
+    ] {
+        assert!(row.get(key).is_some(), "missing key {key}: {row}");
+    }
+    assert_eq!(row["alias"], "alice");
+    assert_eq!(row["eligible"], true);
+    assert_eq!(row["freshness"], "fresh");
+    // The headline share is the fullest window (weekly 40), the rate
+    // window carries the 5h 72.
+    assert!((row["remaining_percent"].as_f64().unwrap() - 40.0).abs() < 1e-6);
+    assert!((row["rate_remaining_percent"].as_f64().unwrap() - 72.0).abs() < 1e-6);
+    assert_eq!(row["renewals"].as_array().unwrap().len(), 2);
+
+    // inspect shares the plan shape for a named group.
+    let i = sb.run(&["route", "inspect", "work", "--json"]);
+    assert_eq!(i.code, 0, "{}{}", i.out, i.err);
+    let iv = json(&i);
+    assert_eq!(iv["schema_version"], 1);
+    assert!(iv["accounts"].as_array().is_some());
+
+    // Human output for the same run stays plain and starred.
+    let human = sb.run(&["route", "plan", "work"]);
+    assert_eq!(human.code, 0);
+    assert!(human.out.contains("* alice"), "{}", human.out);
+}
