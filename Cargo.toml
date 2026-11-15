@@ -33,7 +33,7 @@ crossterm = "0.29.0"
 ctrlc = { version = "3.5.2", features = ["termination"] }
 directories = "6"
 fs4 = "1.1"
-getrandom = "0.3"
+getrandom = "0.4"
 hex = "0.4"
 keyring-core = "1"
 notify-rust = "4.17.0"
