@@ -40,7 +40,8 @@ vault passphrase). AGYVA_FAILPOINT works only with AGYVA_TEST_MODE=1.";
     version,
     about = "Account manager for Google's Antigravity CLI (agy)",
     long_about = "Save agy logins in an encrypted vault and switch between them on request.\n\
-                  Switching is always manual: agyva never rotates accounts by itself.",
+                  Switching is manual unless a route group opts in to automation\n\
+                  (auto_switch = true plus `config set auto_switch_ack true`).",
     after_help = EXIT_CODES,
     help_template = "{name} {version}\n{about-with-newline}\n{usage-heading} {usage}\n\nAccounts:\n  add          Save the current agy login\n  list         List saved accounts\n  use          Switch manually, then restart agy\n  current      Inspect agy's login\n  rename       Change an alias\n  remove       Forget a saved account\n\nQuota and health:\n  usage        Remaining quota by group and window\n  health       Account health and evidence\n  watch        Read-only foreground monitor\n  monitor      Route-aware cache-only monitor (--interval)\n\nDiagnostics and recovery:\n  status       State and pending recovery\n  doctor       Read-only checks\n  recover      Finish or undo an interrupted switch\n\nTransfer and updates:\n  export       Save accounts to a portable encrypted archive\n  import       Add accounts from an archive (skips existing)\n  update       Check GitHub for a newer release; install on request\n\nSetup:\n  config       View or change settings\n  completions  Fish, Bash or Zsh completion\n  version      agyva and agy versions\n  help         Help for a command\n\nOptions:\n{options}\n{after-help}",
     propagate_version = true
@@ -121,6 +122,10 @@ pub struct JsonFlag {
 }
 
 #[derive(Debug, Args)]
+/// With a group opted in (`auto_switch = true` + acknowledged
+/// `auto_switch_ack`), `route apply` can be driven by the background
+/// evaluation instead of a person; it still only ever switches through the
+/// journaled path under the same gates.
 pub struct RouteArgs {
     #[command(subcommand)]
     pub command: Option<RouteCommand>,

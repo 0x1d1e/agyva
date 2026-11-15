@@ -58,6 +58,10 @@ pub const KEYS: &[(&str, &str)] = &[
         "desktop_notifications",
         "let `agyva watch` send desktop notifications: true | false",
     ),
+    (
+        "auto_switch_ack",
+        "explicit acknowledgement that opt-in route automation may switch accounts: true | false",
+    ),
 ];
 
 macro_rules! string_enum {
@@ -111,6 +115,9 @@ pub struct Config {
     pub models_cache_secs: u64,
     pub watch_interval_secs: u64,
     pub desktop_notifications: bool,
+    /// Explicit re-acknowledgment for opt-in auto-switching (routing.toml
+    /// `auto_switch = true` additionally requires this).
+    pub auto_switch_ack: bool,
 }
 
 impl Default for Config {
@@ -129,6 +136,7 @@ impl Default for Config {
             models_cache_secs: 86_400,
             watch_interval_secs: 300,
             desktop_notifications: false,
+            auto_switch_ack: false,
         }
     }
 }
@@ -214,6 +222,7 @@ impl Config {
             "models_cache_secs" => self.models_cache_secs.to_string(),
             "watch_interval_secs" => self.watch_interval_secs.to_string(),
             "desktop_notifications" => self.desktop_notifications.to_string(),
+            "auto_switch_ack" => self.auto_switch_ack.to_string(),
             _ => return None,
         })
     }
@@ -240,6 +249,7 @@ impl Config {
             "allow_untested_agy" => next.allow_untested_agy = parse_bool(value).map_err(bad)?,
             "check_updates" => next.check_updates = parse_bool(value).map_err(bad)?,
             "policy_acknowledged" => next.policy_acknowledged = parse_bool(value).map_err(bad)?,
+            "auto_switch_ack" => next.auto_switch_ack = parse_bool(value).map_err(bad)?,
             "desktop_notifications" => {
                 next.desktop_notifications = parse_bool(value).map_err(bad)?
             }

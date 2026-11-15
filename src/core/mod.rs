@@ -1,6 +1,7 @@
 pub mod account;
 pub mod add;
 pub mod app;
+pub mod auto;
 pub mod catalog;
 pub mod checkpoint;
 pub mod dashboard;

@@ -36,6 +36,11 @@ pub struct RouteGroup {
     /// (`"gemini-4-carbon" = "Gemini Pro"`). Specific pools are matched
     /// before broad ones; unmapped families are not eligible for `--for`.
     pub models: BTreeMap<String, String>,
+    /// Opt-in automation: when true AND `auto_switch_ack = true` in
+    /// config.toml, `route` may run the journaled switch for this group's
+    /// recommendation under the auto-switch gates (cooldown, fresh
+    /// evidence, session gate). Default false.
+    pub auto_switch: bool,
 }
 
 /// A plan label the user typed, with its provenance explicit.

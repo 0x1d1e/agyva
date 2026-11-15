@@ -23,6 +23,8 @@
 //! A crash leaves the journal behind and `agyva recover` finishes or undoes
 //! the work.
 
+use chrono::Utc;
+
 use crate::agy::companion::{self, Mode};
 use crate::agy::credentials::{CredentialInfo, RawCredential, parse_credential};
 use crate::agy::sessions;
@@ -66,6 +68,17 @@ impl Live {
 
 impl App {
     pub fn switch(&self, selector: &str, force: bool) -> Result<SwitchOutcome> {
+        let out = self.switch_inner(selector, force);
+        // A successful switch of any kind resets the auto-switch cooldown
+        // (a manual `use` must win over pending automation); failures and
+        // refusals leave the bookkeeping alone.
+        if out.is_ok() {
+            let _ = crate::core::auto::note_switch(&self.dirs, Utc::now(), false);
+        }
+        out
+    }
+
+    fn switch_inner(&self, selector: &str, force: bool) -> Result<SwitchOutcome> {
         let _lock = self.lock_login()?;
         self.require_no_pending()?;
         self.require_compat()?;
