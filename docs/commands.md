@@ -85,6 +85,17 @@ quota group maps to the family (declared mapping first, then group names),
 the ranked share follows that group's windows — an exhausted unrelated
 bucket cannot hide a usable one.
 
+`agyva route apply GROUP` activates the group's recommended account through
+the same journaled, checkpointed switch as `agyva use` — exactly one switch,
+revalidated under the lock (recommendation, group file, cached evidence,
+pending recovery) immediately before anything changes. It asks for
+confirmation first (`--yes` to skip); if agy sessions are running it warns
+that they keep their old login. If the evidence moved between planning and
+switching, apply refuses and says so (`--force` overrides the drift check,
+never the recovery check). `agyva route history [--limit N]` shows the most
+recent decisions with their reasons — aliases and outcomes only, never
+credentials.
+
 Smart ranks the fullest counting-window share, holds near-full five-hour rate
 caps back, and spends weekly budgets renewing sooner first. Ties retain listed
 order. Unknown, stale, incomplete, reset-expired, unavailable and suspended

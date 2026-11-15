@@ -21,6 +21,7 @@ pub mod recover;
 pub mod refresh;
 pub mod registry;
 pub mod route;
+pub mod route_apply;
 pub mod route_config;
 pub mod selector;
 pub mod status;

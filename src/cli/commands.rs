@@ -235,6 +235,85 @@ fn dispatch(app: &App, command: Command, io: &mut Io<'_>, st: Style) -> Result<i
                 }
                 return Ok(exit::OK);
             }
+            // Apply and History have their own paths; the rest is the
+            // cache-only plan rendering.
+            if let Some(super::RouteCommand::Apply { group, yes, force }) = &a.command {
+                let history = crate::core::route_apply::RouteHistory::new(&app.dirs);
+                let now = chrono::Utc::now();
+                let plan = app.route_apply_plan(group, now)?;
+                if a.json {
+                    #[derive(Serialize)]
+                    struct ApplyPlanJson<'a> {
+                        group: &'a str,
+                        target: &'a str,
+                        reason: &'a str,
+                        declared_plan: &'a Option<String>,
+                        session_warning: &'a Option<String>,
+                    }
+                    print_json(
+                        io,
+                        &ApplyPlanJson {
+                            group: &plan.group,
+                            target: &plan.target_alias,
+                            reason: &plan.reason,
+                            declared_plan: &plan.declared_plan,
+                            session_warning: &plan.session_warning,
+                        },
+                    )?;
+                }
+                if !*yes {
+                    let mut question = format!(
+                        "Switch to {} (recommendation for `{}`)?",
+                        plan.target_alias, plan.group
+                    );
+                    if let Some(w) = &plan.session_warning {
+                        question.push_str(&format!("\nwarning: {w}"));
+                    }
+                    let ok = confirm(io, &question)?;
+                    if !ok {
+                        writeln!(io.out, "Cancelled; nothing changed.").map_err(w)?;
+                        return Ok(exit::OK);
+                    }
+                }
+                let outcome = app.route_apply(group, *force, true, &history, now)?;
+                if outcome.already_active {
+                    writeln!(io.out, "{} is already active.", outcome.alias).map_err(w)?;
+                } else {
+                    writeln!(io.out, "Switched to {}", outcome.alias).map_err(w)?;
+                }
+                for warning in &outcome.warnings {
+                    writeln!(io.err, "note: {warning}").map_err(w)?;
+                }
+                return Ok(exit::OK);
+            }
+            if let Some(super::RouteCommand::History { limit }) = &a.command {
+                let limit = (*limit).clamp(1, crate::core::route_apply::MAX_HISTORY_ENTRIES);
+                let file = crate::core::route_apply::RouteHistory::new(&app.dirs).load();
+                if a.json {
+                    print_json(io, &file)?;
+                } else {
+                    for e in file.entries.iter().rev().take(limit) {
+                        writeln!(
+                            io.out,
+                            "{} {} group={} target={} {}",
+                            e.at.format("%Y-%m-%d %H:%M:%S UTC"),
+                            match e.outcome {
+                                crate::core::route_apply::HistoryOutcome::Applied => "applied",
+                                crate::core::route_apply::HistoryOutcome::Refused => "refused",
+                                crate::core::route_apply::HistoryOutcome::Failed => "failed",
+                            },
+                            e.group.as_deref().unwrap_or("-"),
+                            e.target,
+                            e.reason,
+                        )
+                        .map_err(w)?;
+                    }
+                    if file.entries.is_empty() {
+                        writeln!(io.out, "No routing decisions recorded yet.").map_err(w)?;
+                    }
+                }
+                return Ok(exit::OK);
+            }
             let (group, for_model) = match &a.command {
                 Some(super::RouteCommand::Inspect { group, for_model }) => {
                     (Some(group.as_str()), for_model.as_deref())
@@ -246,7 +325,6 @@ fn dispatch(app: &App, command: Command, io: &mut Io<'_>, st: Style) -> Result<i
             };
             let report = app.route_group_for(group, for_model, chrono::Utc::now())?;
             if a.json {
-                print_json(io, &report)?;
             } else {
                 for row in &report.accounts {
                     writeln!(

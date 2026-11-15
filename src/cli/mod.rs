@@ -145,6 +145,22 @@ pub enum RouteCommand {
         #[arg(long)]
         for_model: Option<String>,
     },
+    /// Activate the group's recommended account (one journaled switch).
+    Apply {
+        group: String,
+        /// Switch without asking for confirmation.
+        #[arg(long)]
+        yes: bool,
+        /// Override a recommendation that no longer matches current evidence.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Show recent routing decisions (bounded, no credentials).
+    History {
+        /// Maximum entries to show (1-50).
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
 }
 
 #[derive(Debug, Args)]

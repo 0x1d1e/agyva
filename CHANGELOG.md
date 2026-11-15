@@ -44,6 +44,12 @@ tagged; release artifacts are built by pushing a `v*` tag (see
   reference list is descriptive only. User-declared quota-group mappings
   (`[groups.X.models]`) apply the requested family's windows, specific pools
   before broad ones; plans stay user-declared, never inferred.
+- `agyva route apply GROUP`: activate a group's recommended account with one
+  journaled switch, confirmed by default (`--yes` non-interactively) and
+  revalidated under the lock against pending recovery, a changed group file
+  and evidence drift before any mutation. `agyva route history` shows a
+  bounded, redacted log of routing decisions (applied/refused/failed with
+  reasons; never credentials).
 
 ### Fixed
 
