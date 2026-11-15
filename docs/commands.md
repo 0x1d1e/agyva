@@ -107,11 +107,17 @@ work = "pro" # declared plan for least-used ranking (alias or id)
 catalog offers the family. The catalog comes from a bounded `agy models` run
 for the active account only, cached for `models_cache_secs` (default one
 day); `agyva models --refresh` runs it on demand, `agyva monitor`'s tick keeps
-it current, and a failure keeps the prior observation. A missing or stale catalog never
-proves support, and the built-in reference list is descriptive only. When a
-quota group maps to the family (declared mapping first, then group names),
-the ranked share follows that group's windows — an exhausted unrelated
-bucket cannot hide a usable one.
+it current, and a failure keeps the prior observation. A missing or stale
+catalog never proves support, and the built-in reference list is descriptive
+only.
+
+`--for-model` accepts the family id or any effort-suffixed id the account
+reports (`gemini-4-carbon-high`), case-insensitively; a variant resolves to
+its family's mapping, so both spellings give the same share. An id that is a
+standalone catalog entry (nothing else shares its base) keeps its own
+identity instead of being re-based. When a quota group maps to the family
+(declared mapping first, then group names), the ranked share follows that
+group's windows — an exhausted unrelated bucket cannot hide a usable one.
 
 `agyva route apply GROUP` activates the group's recommended account through
 the same journaled, checkpointed switch as `agyva use` — exactly one switch,

@@ -97,7 +97,10 @@ Routing, route automation, transfer and self-update, building on `0.1.0`.
 - `--for-model` no longer excludes an account whose requested family still has
   quota just because an unrelated group is exhausted: catalog support and the
   mapped group's windows are evaluated first, and eligibility plus the
-  headline share come from that group.
+  headline share come from that group. An effort-suffixed id
+  (`gemini-4-carbon-high`, any case) now inherits its family's declared
+  mapping instead of falling back to the whole-account verdict; a standalone
+  id that merely ends in an effort word keeps its own identity.
 - `route history --json` honours `--limit` like the human table, `route apply
   --json` emits exactly one JSON value (warnings go to stderr), refusals are
   stamped with the decision clock, and concurrent `RouteHistory` writers are

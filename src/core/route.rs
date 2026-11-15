@@ -277,17 +277,14 @@ impl App {
         for_model: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<RoutePlan> {
-        let Some(wanted) = for_model.map(str::trim).filter(|w| !w.is_empty()) else {
+        let Some(requested) = for_model.map(str::trim).filter(|w| !w.is_empty()) else {
             return self.route_group_at(group, now);
         };
         let config =
             crate::core::route_config::RoutingFile::load(&self.dirs.config.join("routing.toml"))?;
-        let declared = match group {
-            Some(name) => config.group(Some(name))?.models.get(wanted).cloned(),
-            None => config
-                .groups
-                .values()
-                .find_map(|g| g.models.get(wanted).cloned()),
+        let group_config = match group {
+            Some(name) => Some(config.group(Some(name))?),
+            None => None,
         };
         let policy = FreshnessPolicy::new(self.config.quota_fresh_secs);
         let mut plan = self.route_group_at(group, now)?;
@@ -298,16 +295,43 @@ impl App {
             // verdict was: an unrelated exhausted bucket must never answer
             // a question about this family.
             let state = cache.read_state(&row.id, self.config.models_cache_secs, now);
-            let support = crate::core::catalog::offers_family(&state, wanted);
+            let support = crate::core::catalog::offers_family(&state, requested);
             if !support.eligible() {
                 row.eligible = false;
                 let fix = match support {
                     crate::core::catalog::FamilySupport::UnknownCatalog => " (run `agyva models`)",
                     _ => "",
                 };
-                row.why = format!("{wanted}: {}{fix}", support.reason());
+                row.why = format!("{requested}: {}{fix}", support.reason());
                 continue;
             }
+            // An effort-suffixed id (`gemini-4-carbon-high`) is the same
+            // family as its base for mapping purposes. The catalog decides
+            // the base: `offers_family` only reports `Supported(family)`
+            // when this account's observation lists that exact id, so a
+            // standalone id that merely ends in an effort word resolves to
+            // itself and is never silently re-based.
+            let family = match &support {
+                crate::core::catalog::FamilySupport::Supported(f)
+                    if !f.is_empty() && f.eq_ignore_ascii_case(requested) =>
+                {
+                    requested
+                }
+                crate::core::catalog::FamilySupport::Supported(f) if !f.is_empty() => f.as_str(),
+                _ => requested,
+            };
+            let declared = match &group_config {
+                Some(g) => g
+                    .models
+                    .get(family)
+                    .or_else(|| g.models.get(requested))
+                    .cloned(),
+                None => config
+                    .groups
+                    .values()
+                    .find_map(|g| g.models.get(family).or_else(|| g.models.get(requested)))
+                    .cloned(),
+            };
             let Some(usage) = usages.iter().find(|a| a.id == row.id) else {
                 continue;
             };
@@ -319,7 +343,7 @@ impl App {
                     model: g.model.as_deref(),
                 });
             let crate::core::catalog::FamilyGroups::Mapped((group_name, model)) =
-                crate::core::catalog::map_family_to_groups(wanted, declared.as_deref(), views)
+                crate::core::catalog::map_family_to_groups(family, declared.as_deref(), views)
             else {
                 // No mapping: the whole-account verdict stands.
                 continue;
@@ -335,7 +359,7 @@ impl App {
             if windows.is_empty() {
                 row.eligible = false;
                 row.why = format!(
-                    "{wanted}: mapped quota group {} reports no windows; refresh required",
+                    "{requested}: mapped quota group {} reports no windows; refresh required",
                     group_label(&group_name, model.as_deref())
                 );
                 continue;
@@ -413,17 +437,18 @@ impl App {
                 row.why = "unavailable reading".into();
             } else if row.freshness != Freshness::Fresh {
                 row.eligible = false;
-                row.why = format!("{wanted}: quota stale; refresh required");
+                row.why = format!("{requested}: quota stale; refresh required");
             } else if !window_ok {
                 row.eligible = false;
-                row.why = format!("{wanted}: mapped quota is stale, incomplete, or reset passed");
+                row.why =
+                    format!("{requested}: mapped quota is stale, incomplete, or reset passed");
             } else if !enough {
                 row.eligible = false;
-                row.why = format!("{wanted}: mapped quota exhausted");
+                row.why = format!("{requested}: mapped quota exhausted");
             } else {
                 row.eligible = true;
                 row.why = format!(
-                    "{wanted}: {} cache; {:.0}% remains in {}",
+                    "{requested}: {} cache; {:.0}% remains in {}",
                     row.freshness.label(),
                     remaining.unwrap_or_default(),
                     group_label(&group_name, model.as_deref())

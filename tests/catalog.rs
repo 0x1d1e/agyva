@@ -526,3 +526,260 @@ fn models_command_makes_for_model_reachable() {
     );
     assert_eq!(fake.model_calls(), calls + 1);
 }
+
+/// A raw effort id is the same family as its base: `--for-model
+/// gemini-4-carbon-high` must inherit the declared family mapping instead of
+/// falling back to the whole-account verdict (which would reintroduce the
+/// exhausted-unrelated-bucket bug for a documented spelling).
+#[test]
+fn for_model_variant_id_inherits_the_family_mapping() {
+    use agyva::core::health::{AccountHealth, HealthRecord, HealthSource};
+    use agyva::core::quota::{ModelQuota, QuotaSource, QuotaWindow};
+
+    let rig = Rig::new();
+    rig.add_all(&[ALICE]);
+    let app = rig.app();
+    let now = Utc::now();
+    let window = |pct: f64, reset_in: Duration| QuotaWindow {
+        remaining_percent: pct,
+        reset_at: Some(now + reset_in),
+        observed_at: now,
+        source: QuotaSource::AgyUsageCommand,
+    };
+    app.quota_cache()
+        .update(|c| {
+            c.accounts.insert(
+                id_of(ALICE),
+                agyva::core::quota_cache::CacheEntry {
+                    quota: Some(agyva::core::quota_cache::CachedQuota {
+                        observed_at: now,
+                        groups: vec![
+                            ModelQuota {
+                                group: "Gemini Pro".into(),
+                                model: None,
+                                disabled: false,
+                                five_hour: Some(window(60.0, Duration::hours(3))),
+                                weekly: Some(window(60.0, Duration::days(2))),
+                            },
+                            ModelQuota {
+                                group: "Claude / GPT".into(),
+                                model: None,
+                                disabled: false,
+                                five_hour: Some(window(0.0, Duration::hours(3))),
+                                weekly: Some(window(0.0, Duration::days(2))),
+                            },
+                        ],
+                    }),
+                    health: Some(HealthRecord {
+                        state: AccountHealth::Healthy,
+                        observed_at: Some(now),
+                        source: HealthSource::AgyUsageCommand,
+                        evidence: "synthetic".into(),
+                    }),
+                    ..Default::default()
+                },
+            );
+        })
+        .unwrap();
+    std::fs::write(
+        app.dirs.config.join("routing.toml"),
+        "[groups.work]\naccounts = ['alice']\n[groups.work.models]\n'gemini-4-carbon' = 'Gemini Pro'\n",
+    )
+    .unwrap();
+    ModelsCache::new(&app.dirs)
+        .record(
+            &id_of(ALICE),
+            vec![agyva::agy::models::ModelFamily {
+                id: "gemini-4-carbon".into(),
+                display_name: "Gemini 4 Carbon".into(),
+                variants: vec!["high".into(), "low".into()],
+            }],
+            now,
+        )
+        .unwrap();
+
+    for asked in [
+        "gemini-4-carbon",
+        "gemini-4-carbon-high",
+        "GEMINI-4-CARBON-LOW",
+    ] {
+        let plan = app.route_group_for(Some("work"), Some(asked), now).unwrap();
+        let alice = plan.accounts.first().unwrap();
+        assert!(
+            alice.eligible,
+            "`--for-model {asked}` must inherit the family mapping, got {:?}",
+            alice.why
+        );
+        assert_eq!(
+            alice.remaining_percent,
+            Some(60.0),
+            "`--for-model {asked}` uses the mapped group, not the exhausted one"
+        );
+        assert_eq!(plan.recommendation.as_deref(), Some(id_of(ALICE).as_str()));
+        assert!(
+            alice.why.starts_with(&format!("{asked}:")),
+            "the user's own string stays in the reason: {:?}",
+            alice.why
+        );
+    }
+}
+
+/// The other direction: an id that merely ENDS in an effort word is a
+/// standalone family, not a variant of a base that happens to exist. It must
+/// keep its own identity — no silent re-basing onto another family's mapping.
+#[test]
+fn standalone_effort_suffixed_id_is_not_rebased() {
+    use agyva::core::health::{AccountHealth, HealthRecord, HealthSource};
+    use agyva::core::quota::{ModelQuota, QuotaSource, QuotaWindow};
+
+    let rig = Rig::new();
+    rig.add_all(&[ALICE]);
+    let app = rig.app();
+    let now = Utc::now();
+    let window = |pct: f64| QuotaWindow {
+        remaining_percent: pct,
+        reset_at: Some(now + Duration::hours(3)),
+        observed_at: now,
+        source: QuotaSource::AgyUsageCommand,
+    };
+    app.quota_cache()
+        .update(|c| {
+            c.accounts.insert(
+                id_of(ALICE),
+                agyva::core::quota_cache::CacheEntry {
+                    quota: Some(agyva::core::quota_cache::CachedQuota {
+                        observed_at: now,
+                        groups: vec![
+                            ModelQuota {
+                                group: "Gemini Pro".into(),
+                                model: None,
+                                disabled: false,
+                                five_hour: Some(window(60.0)),
+                                weekly: Some(window(60.0)),
+                            },
+                            ModelQuota {
+                                group: "Claude / GPT".into(),
+                                model: None,
+                                disabled: false,
+                                five_hour: Some(window(0.0)),
+                                weekly: Some(window(0.0)),
+                            },
+                        ],
+                    }),
+                    health: Some(HealthRecord {
+                        state: AccountHealth::Healthy,
+                        observed_at: Some(now),
+                        source: HealthSource::AgyUsageCommand,
+                        evidence: "synthetic".into(),
+                    }),
+                    ..Default::default()
+                },
+            );
+        })
+        .unwrap();
+    // The catalog lists gemini-4-carbon as a REAL family AND a standalone
+    // "solo-high" model. "solo-high" is not a variant of "solo"; the base
+    // does not exist, so its identity is itself.
+    std::fs::write(
+        app.dirs.config.join("routing.toml"),
+        "[groups.work]\naccounts = ['alice']\n[groups.work.models]\n'gemini-4-carbon' = 'Gemini Pro'\n'solo' = 'Gemini Pro'\n'solo-high' = 'Claude / GPT'\n",
+    )
+    .unwrap();
+    ModelsCache::new(&app.dirs)
+        .record(
+            &id_of(ALICE),
+            vec![
+                agyva::agy::models::ModelFamily {
+                    id: "gemini-4-carbon".into(),
+                    display_name: "Gemini 4 Carbon".into(),
+                    variants: vec!["high".into(), "low".into()],
+                },
+                agyva::agy::models::ModelFamily {
+                    id: "solo-high".into(),
+                    display_name: "Solo High".into(),
+                    variants: Vec::new(),
+                },
+            ],
+            now,
+        )
+        .unwrap();
+
+    // `solo-high` keeps its OWN declared mapping (Claude / GPT, exhausted),
+    // so it is excluded — it is not silently re-based onto `solo`'s mapping.
+    let plan = app
+        .route_group_for(Some("work"), Some("solo-high"), now)
+        .unwrap();
+    let alice = plan.accounts.first().unwrap();
+    assert!(
+        !alice.eligible,
+        "a standalone id must use its own mapping, got {:?}",
+        alice.why
+    );
+    assert_eq!(alice.why, "solo-high: mapped quota exhausted");
+
+    // Its own share comes from its own mapping, never `solo`'s Gemini Pro.
+    assert_eq!(alice.remaining_percent, Some(0.0));
+
+    // And the real family's variant still resolves to the family.
+    let plan = app
+        .route_group_for(Some("work"), Some("gemini-4-carbon-high"), now)
+        .unwrap();
+    assert!(plan.accounts.first().unwrap().eligible);
+    assert_eq!(plan.accounts.first().unwrap().remaining_percent, Some(60.0));
+}
+
+/// Whatever `agyva models` displays is pasteable into `--for-model`: the id
+/// it prints for each recorded family resolves to that same family.
+#[test]
+fn models_display_ids_are_pasteable_into_for_model() {
+    let rig = Rig::new();
+    rig.add_all(&[ALICE]);
+    let app = rig.app();
+    let now = Utc::now();
+    seed_fresh(&app, ALICE, now);
+    // One family with two efforts, one lone suffixed id (standalone by the
+    // parser's rule) and one plain id.
+    let catalog = agyva::agy::models::parse_models(
+        "Fetching available models...\n\
+gemini-4-carbon-high\tGemini 4 Carbon (High)\n\
+gemini-4-carbon-low\tGemini 4 Carbon (Low)\n\
+solo-high\tSolo (High)\n\
+gpt-oss-120b\tGPT-OSS 120B\n",
+    );
+    let ids: Vec<String> = catalog.models.iter().map(|f| f.id.clone()).collect();
+    assert_eq!(
+        ids,
+        ["gemini-4-carbon", "gpt-oss-120b", "solo-high"],
+        "a lone suffixed id stays standalone with its full raw id"
+    );
+    ModelsCache::new(&app.dirs)
+        .record(&id_of(ALICE), catalog.models, now)
+        .unwrap();
+
+    let report = app.models_report(false, now).unwrap();
+    let displayed: Vec<String> = report.accounts[0]
+        .families
+        .iter()
+        .map(|f| f.id.clone())
+        .collect();
+    assert_eq!(displayed, ids, "the table shows exactly the recorded ids");
+    for id in &displayed {
+        let plan = app.route_group_for(None, Some(id), now).unwrap();
+        let row = plan.accounts.first().unwrap();
+        assert!(
+            !row.why.contains("does not offer"),
+            "the displayed id {id} must resolve, got {:?}",
+            row.why
+        );
+    }
+    // The lone suffixed id is NOT re-based onto a family named "solo".
+    let plan = app.route_group_for(None, Some("solo"), now).unwrap();
+    assert!(
+        plan.accounts
+            .first()
+            .unwrap()
+            .why
+            .contains("does not offer"),
+        "`solo` was never a family"
+    );
+}
