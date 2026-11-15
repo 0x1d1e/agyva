@@ -8,11 +8,14 @@ cargo check --all-targets
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
 cargo build --release --locked
+python3 -I scripts/check-links.py   # relative links and anchors in Markdown
 cargo deny check            # needs cargo-deny and network access for the RustSec database
 ```
 
-CI runs the same set (`.github/workflows/ci.yml`). `scripts/release.sh` builds
-and packages a release (see the README).
+`make ci` runs the local set (format check, check, clippy, test, release build,
+link check). CI runs the same checks and additionally builds with the declared
+MSRV, Rust 1.88 (`.github/workflows/ci.yml`). `scripts/release.sh` builds and
+packages a release (see the README).
 
 The package is a library (`src/lib.rs`) plus a thin binary; everything,
 including crash recovery, is reachable from tests through the library.
@@ -87,7 +90,8 @@ It never reads or writes any credential.
 | Script | Purpose |
 | --- | --- |
 | `scripts/demo-sandbox.sh <dir>` | Build a synthetic sandbox (fake accounts, fake agy, scratch HOME) and print `export` lines. Use it to try agyva without touching anything real. |
-| `scripts/capture-tui.sh [file]` | Capture the TUI from a sandbox into `docs/tui-capture.txt` (needs `tmux`; private socket). |
+| `scripts/capture-tui.sh [file]` | Capture the TUI from a sandbox into `docs/tui-capture.txt` and `docs/tui.svg` (needs `tmux` and `python3`; private socket). |
+| `scripts/check-links.py` | Check every relative Markdown link and heading anchor without network access. |
 | `scripts/release.sh` | `cargo build --release --locked`, package into `dist/`, write and check `SHA256SUMS`. |
 
 ```sh

@@ -3,8 +3,14 @@ name = "agyva"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "Account manager for Google's Antigravity CLI (agy)"
+description = "Manual account manager for Google's Antigravity CLI (agy)"
+repository = "https://github.com/0x1d1e/agyva"
+homepage = "https://github.com/0x1d1e/agyva"
+readme = "README.md"
 license = "MIT"
+keywords = ["antigravity", "agy", "account-manager", "credentials", "cli"]
+categories = ["command-line-utilities", "authentication"]
+exclude = ["/target", "/dist", "/.github", "/deny.toml"]
 publish = false
 
 [lib]

@@ -23,7 +23,7 @@ Tab views  ↑↓ select  Enter switch  r refresh  d details  / filter  ? help  
         │Id:       61602d69cb                                                          │
         │Active:   no                                                                  │
         │Plan:     unknown                                                             │
-        │Health:   unknown (last seen healthy at 2026-11-15 06:50 UTC (cached; not     │
+        │Health:   unknown (last seen healthy at 2026-11-15 08:29 UTC (cached; not     │
         │verified now))                                                                │
         │Data:     fresh                                                               │
         │Last successful update: just now                                              │

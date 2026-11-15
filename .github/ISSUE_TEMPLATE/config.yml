@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/0x1d1e/agyva/security/advisories/new
+    about: Private report for credential handling, the vault, or switch/recovery issues. Never post secrets publicly.
+  - name: Read the documentation
+    url: https://github.com/0x1d1e/agyva/blob/main/docs/development.md
+    about: Build, test, environment overrides and how to use the synthetic sandbox.
+  - name: Compatibility and known limitations
+    url: https://github.com/0x1d1e/agyva/blob/main/docs/compatibility.md
+    about: What has been verified against agy, and what has not.

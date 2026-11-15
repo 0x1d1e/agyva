@@ -35,7 +35,9 @@ mkdir -p "$stage/docs"
 install -m755 target/release/agyva "$stage/agyva"
 install -m644 README.md LICENSE "$stage/"
 install -m644 docs/*.md "$stage/docs/"
-[ -f docs/tui-capture.txt ] && install -m644 docs/tui-capture.txt "$stage/docs/"
+for extra in docs/tui-capture.txt docs/tui.svg; do
+  [ -f "$extra" ] && install -m644 "$extra" "$stage/docs/"
+done
 
 (
   cd dist

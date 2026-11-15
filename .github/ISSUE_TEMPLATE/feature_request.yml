@@ -1,0 +1,58 @@
+name: Feature request
+description: Suggest a change or an addition to agyva.
+title: "[feature] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Agyva is deliberately small and manual: it never rotates accounts and
+        never works around quota limits or a suspension. Requests that depend
+        on automatic rotation, private endpoints or evasion are out of scope.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the situation, not only the proposed command.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should agyva do? Mention commands, flags and output if you have a shape in mind.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Existing commands, workarounds, or doing nothing.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - CLI commands and output
+        - Credential storage and the vault
+        - Switching and recovery
+        - Quota and health
+        - Terminal UI
+        - Documentation
+        - Packaging, CI or development
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: agyva and agy versions, platform, and anything else relevant. No credentials or personal data.
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: This request does not require automatic account rotation, quota-limit evasion or a private API client.
+          required: true
+        - label: I have not included credentials, tokens or personal data.
+          required: true

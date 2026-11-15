@@ -1,151 +1,124 @@
 # agyva
 
-A manual account manager for Google's Antigravity CLI (`agy`). Save the logins
-you already have, see their quota and health, and switch between them with one
-command. Written in Rust; one static-ish binary, no daemon.
+[![CI](https://github.com/0x1d1e/agyva/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/0x1d1e/agyva/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/github/license/0x1d1e/agyva.svg)](LICENSE)
+[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](#install)
+[![Latest release](https://img.shields.io/github/v/release/0x1d1e/agyva?include_prereleases&sort=semver)](https://github.com/0x1d1e/agyva/releases)
+
+A manual account manager for Google's Antigravity CLI (`agy`). `agy` keeps one
+login at a time; agyva saves the logins you already have as encrypted snapshots
+and puts the one you pick back where `agy` expects it. It also shows quota and
+health, offers a terminal UI, and never switches accounts on its own. Rust, one
+binary, no daemon, Linux only for now.
 
 > **Unofficial.** Agyva is not affiliated with or endorsed by Google. See
 > [Policy](#policy-read-this-first) before saving more than one account.
 
-## Contents
+## Why not just log out and in?
 
-- [What it does](#what-it-does)
-- [Install](#install)
-- [Walkthrough: Arch / CachyOS with Fish](#walkthrough-arch--cachyos-with-fish)
-- [Command reference](#command-reference)
-- [Terminal UI](#terminal-ui)
-- [Credential security model](#credential-security-model)
-- [agy compatibility](#agy-compatibility)
-- [Quota and health](#quota-and-health)
-- [Troubleshooting and recovery](#troubleshooting-and-recovery)
-- [Limitations](#limitations)
-- [Policy (read this first)](#policy-read-this-first)
-- [Comparison with agy-auth](#comparison-with-agy-auth)
-- [Development](#development)
-- [License](#license)
+Because `agy` holds one login at a time, so every change of account is a
+browser round-trip that also leaves the previous login nowhere. Agyva keeps
+the logins you already have, puts the one you pick back where `agy` expects
+it, and treats that move as a verified local transaction with an encrypted
+copy of what was there before.
 
-## What it does
+## Screenshot
 
-`agy` keeps exactly one login. If you use more than one Google account, you
-have to log out and in again, by hand, every time. Agyva keeps an encrypted
-copy of each login and puts the one you pick back where `agy` expects it.
+![Synthetic agyva terminal interface: three fake accounts with quota bars and an example.invalid email](docs/tui.svg)
 
-- **Save** the account `agy` is logged in as (`agyva add`), under an alias.
-- **Switch** to any saved account (`agyva use work`). The switch is a
-  journaled transaction: an encrypted checkpoint of the current login is taken
-  first, the result is read back and verified, and an interrupted switch is
-  finished or undone by `agyva recover`.
-- **See quota and health** for the active account, with the last cached
-  reading for the others, always labelled with its age.
-- **Watch** usage in the foreground (`agyva watch`) and get optional desktop
-  notifications. It only observes.
-- **Browse** everything in a terminal UI (run bare `agyva`).
-- **Diagnose** with `agyva doctor` (read-only) and `agyva status`.
-- Shell completions for Fish, Bash and Zsh; Fish also completes saved aliases.
-- Machine-readable `--json` output for the listing and report commands.
+**SYNTHETIC**: fake accounts (`example.invalid`), a fake `agy` script and
+made-up quota numbers, captured from a throwaway sandbox by
+`scripts/capture-tui.sh`. This is not a recording of any real account. More
+frames: [`docs/tui-capture.txt`](docs/tui-capture.txt).
 
-Switching is always manual. Agyva never rotates accounts, never switches
-because of a quota error, and never retries an account that was suspended.
+## Quick start
+
+```sh
+agyva add --alias personal   # while agy is logged in as that account
+agyva add --alias work       # after logging in to the second account with agy
+agyva use personal
+agyva usage
+```
+
+`agyva add` saves whatever login `agy` currently holds. Log in with `agy` first,
+once per account, then save it. Switching is manual, and a running `agy` keeps
+the login it started with: restart `agy` after `agyva use`.
 
 ## Install
 
-Requirements: a Rust toolchain (stable, 1.88 or newer; `rustup` picks it up
-from `rust-toolchain.toml`), and on Linux a running Secret Service provider
-(GNOME Keyring, KeePassXC, KWallet with the Secret Service bridge) for the
-default key storage. Without one, see [Headless](#headless-and-no-d-bus-systems).
+Requirements: Linux, a Rust toolchain (stable, 1.88 or newer; `rustup` reads
+`rust-toolchain.toml`), and a Secret Service provider (GNOME Keyring,
+KeePassXC, KWallet with the Secret Service bridge) for the default key storage.
 
 ### From source
 
 ```sh
-git clone <this repository> agyva && cd agyva
-cargo install --path . --locked      # installs to ~/.cargo/bin/agyva
+git clone https://github.com/0x1d1e/agyva.git
+cd agyva
+cargo install --path . --locked     # installs to ~/.cargo/bin/agyva
 ```
 
-### Reproducible release build and tarball
+### Release tarball
+
+A tagged release publishes a Linux archive and `SHA256SUMS` on the
+[releases page](https://github.com/0x1d1e/agyva/releases); none has been
+tagged yet. Verify before installing:
 
 ```sh
-cargo build --release --locked       # target/release/agyva
-scripts/release.sh                   # dist/agyva-<version>-<target>.tar.gz + dist/SHA256SUMS
-(cd dist && sha256sum -c SHA256SUMS) # verify
+sha256sum -c SHA256SUMS
+tar -xzf agyva-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+install -Dm755 agyva-0.1.0-x86_64-unknown-linux-gnu/agyva ~/.local/bin/agyva
 ```
 
-Install without root (the script's archive layout is `agyva-<version>-<target>/`):
-
-```sh
-tar -xzf dist/agyva-0.1.0-x86_64-unknown-linux-gnu.tar.gz -C /tmp
-install -Dm755 /tmp/agyva-0.1.0-x86_64-unknown-linux-gnu/agyva ~/.local/bin/agyva
-```
-
-`--locked` builds with the exact dependency versions in `Cargo.lock`, and the
+You can also build the same archive locally with `scripts/release.sh`. The
 archive is normalised (sorted entries, fixed owner and mtime, no gzip
-timestamp). The checksum identifies the tarball you built; bit-identical
-output across different machines or compilers is not promised.
-
-Make sure `~/.local/bin` (or `~/.cargo/bin`) is on your `PATH`. Agyva does not
-edit your shell configuration.
+timestamp), but bit-identical output across different machines or compilers is
+not promised. Agyva does not edit your shell configuration.
 
 ### Shell completions
 
 ```sh
 # Fish (also completes saved aliases for use / rename / remove / usage / health)
-mkdir -p ~/.config/fish/completions
 agyva completions fish > ~/.config/fish/completions/agyva.fish
 
 # Bash
-mkdir -p ~/.local/share/bash-completion/completions
 agyva completions bash > ~/.local/share/bash-completion/completions/agyva
 
-# Zsh (any directory on $fpath; this one must be added to fpath yourself)
-mkdir -p ~/.zfunc
+# Zsh (put a directory on $fpath yourself)
 agyva completions zsh > ~/.zfunc/_agyva
 ```
 
-The Fish alias completion runs `agyva list --json`, which reads only the
-public registry (no keyring access, no secrets).
+The Fish alias completion runs `agyva list --json`, which reads only the public
+registry (no keyring access, no secrets).
 
-## Walkthrough: Arch / CachyOS with Fish
+## Safety at a glance
 
-```fish
-# 1. Dependencies: Rust and a Secret Service provider.
-sudo pacman -S --needed rust gnome-keyring libsecret
+- **Encrypted snapshots.** Every saved login and pre-switch checkpoint is an
+  AES-256-GCM envelope with a random nonce and authenticated metadata. The
+  vault key lives in the OS keyring, or is derived with Argon2id from a
+  passphrase when no keyring is available.
+- **Journaled switches.** The current login is checkpointed first; the result is
+  read back and verified; an interrupted switch is finished or rolled back by
+  `agyva recover`.
+- **No automatic rotation.** Agyva never switches because of a quota error and
+  never retries an account marked suspended.
+- **The `agy` binary is untouched.** Agyva moves `agy`'s own stored login as
+  opaque bytes and never writes to, patches or wraps the executable.
+- **No network of its own.** Quota comes only from running `agy -p "/usage"`;
+  agyva makes no HTTP requests and sends no telemetry.
+- **No secrets in output.** Errors and `--json` never carry credential
+  material, and secrets live in zeroizing wrappers with redacted `Debug`.
 
-# 2. Build and install.
-cd ~/Projects/agyva
-cargo install --path . --locked
-fish_add_path ~/.cargo/bin            # once; this edits your own fish universals
-agyva completions fish > ~/.config/fish/completions/agyva.fish
+Full detail: [`docs/security.md`](docs/security.md).
 
-# 3. Log in to the first account with agy as usual, then save it.
-agy                                    # complete the login, then exit
-agyva add --alias personal
-
-# 4. Log in to the second account with agy, then save that too.
-agy                                    # log out/in as the other account, then exit
-agyva add --alias work
-
-# 5. Look around.
-agyva list
-agyva current
-agyva usage --all
-
-# 6. Switch (then restart agy: running sessions keep their old login).
-agyva use personal
-agyva use -                            # back to the previous account
-```
-
-The first `add` or `use` prints the [policy notice](#policy-read-this-first)
-once. With GNOME Keyring the first access may show an unlock prompt; answer it
-and, if agyva reported a timeout, run `agyva recover` (see
-[Troubleshooting](#troubleshooting-and-recovery)).
-
-## Command reference
+## Commands at a glance
 
 | Command | Purpose |
 | --- | --- |
 | `agyva` | Terminal UI on a terminal, help otherwise. |
 | `add [--alias A] [--refresh]` | Save the account `agy` is logged in as. `--refresh` updates an already saved account. |
 | `list [--json]` | Saved accounts. |
-| `use <selector> [--force]` | Switch `agy` to a saved account. `--force` replaces an `agy` login agyva has not saved (an encrypted copy is kept, never pruned). |
+| `use <selector> [--force]` | Switch `agy` to a saved account. `--force` replaces an `agy` login agyva has not saved (an encrypted copy is kept). |
 | `current [--json]` | Which account `agy` is logged in as. |
 | `rename <selector> <new>` | Change an alias. |
 | `remove <selector> [-y] [--force]` | Forget a saved account. `agy`'s own login is never touched. |
@@ -166,7 +139,7 @@ unique prefix), or `-` for the previous account. Global flag:
 ```console
 $ agyva list
 #   ALIAS  EMAIL                  ID          LAST USED
-*1  alice  alice@example.invalid  c043558106  2026-11-15 06:51
+*1  alice  alice@example.invalid  c043558106  2026-11-15 08:33
  2  bob    bob@example.invalid    61602d69cb  never
  3  carol  carol@example.invalid  75350e5035  never
 
@@ -177,13 +150,9 @@ note: Restart agy to use the new account; agy sessions that are already running 
 $ agyva use nobody
 error: no saved account matches `nobody`
 hint: see `agyva list` for aliases, numbers and ids
-
-$ agyva usage --all --no-refresh      # cached readings, labelled with their source and age
-$ agyva health --json                 # schema_version, accounts[].health.{state,evidence,source,verified_now}
-$ agyva doctor                        # read-only checks, one line each
 ```
 
-(Captured from the synthetic sandbox of `scripts/demo-sandbox.sh`: fake
+(Captured from the synthetic sandbox in `scripts/demo-sandbox.sh`; fake
 accounts, no real data.)
 
 ### Exit codes
@@ -197,7 +166,7 @@ accounts, no real data.)
 
 Exit code 99 exists only for the test-mode crash simulation.
 
-### Configuration
+## Configuration
 
 `agyva config show` lists every setting with its meaning; `agyva config path`
 prints the file. Keys: `backend`, `vault_key`, `color`, `allow_untested_agy`,
@@ -205,29 +174,17 @@ prints the file. Keys: `backend`, `vault_key`, `color`, `allow_untested_agy`,
 `quota_fresh_secs`, `quota_min_refresh_secs`, `watch_interval_secs`,
 `desktop_notifications`.
 
+`backend` chooses how agyva reads agy's live credential: `auto`,
+`secret-service` or `file`. The test-only `memory` backend is available only
+through `AGYVA_BACKEND=memory` with every sandbox directory redirected.
+
 ## Terminal UI
 
 Bare `agyva` on a terminal opens an interactive view: accounts with 5-hour and
 weekly quota bars, health, a details window, a usage view and diagnostics.
-Enter switches (after a confirmation that warns when `agy` is running), `r`
-refreshes the active account, `/` filters, `?` shows the keys.
-
-The capture below is **SYNTHETIC**: fake accounts (`example.invalid`), a fake
-`agy` script and made-up quota numbers, produced by `scripts/capture-tui.sh`
-in a throwaway sandbox. It is not a recording of any real account.
-
-```text
- agyva  Accounts  Usage  Diagnostics
-     ACCOUNT                                     5H          STATUS          WEEKLY      PLAN
-●  1 alice                                       [███░]  82% unknown         [███░]  64% —
-   2 bob                                         [█░░░]  35% unknown         [██░░]  48% —
-   3 carol                                       [░░░░]   7% unknown         [█░░░]  22% —
-
-Tab views  ↑↓ select  Enter switch  r refresh  d details  / filter  ? help  q quit
-```
-
-More frames are in [`docs/tui-capture.txt`](docs/tui-capture.txt). Colours use
-the terminal's named ANSI palette, so the view follows your theme.
+Enter switches (after a confirmation that reminds you to restart `agy`), `r`
+refreshes the active account, `d` opens details, `Tab` changes views, `/`
+filters, `?` lists every key. See the [screenshot](#screenshot) above.
 
 ## Credential security model
 
@@ -279,7 +236,7 @@ Full detail: [`docs/security.md`](docs/security.md).
 | `agy -p "/usage" --output-format json` schema (groups, buckets, `remaining_fraction`, `reset_time`) | **Observed on agy 1.5.9**; undocumented, parsed defensively, anything else is "schema changed". |
 | Credential document shape (consumer login) | **OBSERVED-LOCALLY on `agy 1.5.9`**: `token` (`access_token`, `token_type`, `refresh_token`, `expiry`, `expires_in`), `auth_method`, `id_token_email`; `id_token` is optional and omitted on consumer logins. One live sample; GCP/enterprise shapes are unverified. |
 | Companion files (`installation_id`, `settings.json` `gcp` block), token-file path | **FROM-REFERENCE**: taken from public descriptions, exercised only with synthetic data. |
-| Writing the Secret Service item (`gemini` / `antigravity`) byte-compatibly with what real `agy` (go-keyring) expects: attributes, label, content type | **UNVERIFIED** against a real `agy`. Agyva writes `application/octet-stream`; go-keyring uses `text/plain`. |
+| Writing the Secret Service item (`gemini` / `antigravity`) byte-compatibly with what real `agy` expects: attributes, label, content type | **UNVERIFIED** against a real `agy`. Agyva writes `application/octet-stream`; the Go keyring library agy is believed to use writes `text/plain`. |
 | The opt-in real-keyring test (`tests/real_keyring.rs`) | **NOT RUN** in this release. |
 | macOS Keychain and Windows Credential Manager | Not supported; code and CI jobs are disabled. |
 
@@ -369,36 +326,19 @@ Google's terms for every account you save. Accounts can be suspended; agyva
 cannot prevent that and does not hide or work around it. The first `add` or
 `use` prints a notice to this effect. Agyva is an unofficial project.
 
-Agyva uses no OAuth client of its own, no private Google endpoints and no
-spoofed user agent. It moves `agy`'s own stored login between local slots and
-reads quota only by running `agy` itself.
-
-## Comparison with agy-auth
-
-Agy-auth is a similar community tool. This is a comparison of design choices
-as described to this project, not a claim of superiority; check agy-auth's own
-documentation for anything that has changed.
-
-| | agyva | agy-auth |
-| --- | --- | --- |
-| Language / distribution | Rust, single binary | Go |
-| Private Google endpoints, user-agent spoofing, OAuth client-secret extraction | None. Quota comes only from running `agy` itself. | Not asserted here |
-| Encryption of saved logins | AES-256-GCM; the key is held in the OS keyring (or derived from a passphrase) | Key file stored next to the data |
-| Per-account quota | Active account only (`agy -p "/usage"`); other accounts show a labelled cache | Not asserted here |
-| Switch safety | Journaled transaction, encrypted checkpoint, read-back verification, `recover` | Not asserted here |
-
-No speed or security-superiority claims are made.
+Agyva calls no private endpoints, spoofs no User-Agent and uses no OAuth client
+of its own. It moves `agy`'s own stored login between local slots and reads
+quota only by running `agy` itself.
 
 ## Development
 
 See [`docs/development.md`](docs/development.md) (build, tests, environment
 overrides, the fake `agy`), [`docs/architecture.md`](docs/architecture.md),
 [`docs/security.md`](docs/security.md) and
-[`docs/compatibility.md`](docs/compatibility.md).
+[`docs/compatibility.md`](docs/compatibility.md). Start with the
+[`CONTRIBUTING.md`](CONTRIBUTING.md) guide. Security reports:
+[`SECURITY.md`](SECURITY.md).
 
 ## License
 
-MIT, see [`LICENSE`](LICENSE).
-
-Other projects (including agy-auth and go-keyring) were studied as references
-for behaviour and file formats. No code was copied from them.
+MIT, see [`LICENSE`](LICENSE). No third-party code is copied into agyva.
