@@ -49,8 +49,8 @@ Release artifacts are cut by pushing a `v*` tag ([`release.yml`](.github/workflo
 
 ```sh
 sha256sum -c SHA256SUMS
-tar -xzf agyva-0.1.0-x86_64-unknown-linux-gnu.tar.gz
-install -Dm755 agyva-0.1.0-x86_64-unknown-linux-gnu/agyva ~/.local/bin/agyva
+tar -xzf agyva-0.1.1-x86_64-unknown-linux-gnu.tar.gz
+install -Dm755 agyva-0.1.1-x86_64-unknown-linux-gnu/agyva ~/.local/bin/agyva
 ```
 
 Or build this tree:
@@ -61,8 +61,9 @@ cargo install --path . --locked
 ```
 
 Put the binary directory on your `PATH`; Agyva does not edit shell configuration. The published release is
-[v0.1.0](https://github.com/0x1d1e/agyva/releases/tag/v0.1.0) while this tree builds `v0.1.1`. The gate accepts `agy`
-1.5.x, shaped from 1.5.9 observations, but **keyring writes are unverified** — see [compatibility](docs/compatibility.md).
+[v0.1.1](https://github.com/0x1d1e/agyva/releases/tag/v0.1.1), and this tree builds the same version. The gate
+accepts `agy` 1.5.x, shaped from 1.5.9 observations, but **keyring writes are unverified** — see
+[compatibility](docs/compatibility.md).
 
 ## Quick start
 
