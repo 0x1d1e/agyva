@@ -1,5 +1,7 @@
 # Development
 
+[README](../README.md) · [Commands](commands.md) · [Architecture](architecture.md) · [Contributing](../CONTRIBUTING.md)
+
 ## Build and check
 
 ```sh

@@ -1,8 +1,27 @@
 # Architecture
 
+[README](../README.md) · [Commands](commands.md) · [Security](security.md) · [Development](development.md)
+
 Agyva is one Rust package: a library (`src/lib.rs`) and a thin binary
 (`src/main.rs`). Every behavior, including crash recovery, is reachable from
 tests through the library.
+
+## Table of Contents
+
+- [Layers](#layers)
+- [Storage layout](#storage-layout)
+- [Switching (journaled)](#switching-journaled)
+- [Native credential](#native-credential)
+- [Errors and exit codes](#errors-and-exit-codes)
+- [Development and test environment](#development-and-test-environment)
+- [Transfer (export/import)](#transfer-exportimport)
+- [Self-update](#self-update)
+- [Quota provider boundary](#quota-provider-boundary)
+- [Health](#health)
+- [Watch](#watch)
+- [TUI](#tui)
+- [Shell completions](#shell-completions)
+- [Not yet built (deferred)](#not-yet-built-deferred)
 
 ## Layers
 

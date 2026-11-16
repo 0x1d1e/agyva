@@ -1,5 +1,21 @@
 # Security and policy
 
+[README](../README.md) · [Commands](commands.md) · [Compatibility](compatibility.md) · [JSON and exit codes](json.md)
+
+Agyva is a local, manual account switcher: it moves agy's own stored login
+between encrypted local slots and nothing else.
+
+## Table of Contents
+
+- [Policy](#policy)
+- [What is protected](#what-is-protected)
+- [Usage, health and the TUI](#usage-health-and-the-tui)
+- [Switch safety](#switch-safety)
+- [Known limits](#known-limits)
+- [Unverified compatibility](#unverified-compatibility)
+- [Compatibility policy](#compatibility-policy)
+- [Reporting](#reporting)
+
 ## Policy
 
 Agyva is a **manual** account switcher by default. It switches only when you
@@ -23,11 +39,15 @@ never terminates agy; it only reports detected sessions (from
 
 ## What is protected
 
-- Saved credentials and checkpoints are AES-256-GCM envelopes: versioned
-  header, random 96-bit nonce, and AAD binding the format version, algorithm
-  and a context string (`snapshot:<id>`, `checkpoint:<txn>`). A file moved to
-  another account's slot, a flipped bit or a changed version fails to open.
-- The vault key lives in the OS keyring (`agyva`/`vault-key`). If no keyring
+Saved credentials and checkpoints are sealed at rest, and the surrounding files
+are written defensively:
+
+- **Envelope.** Saved credentials and checkpoints are AES-256-GCM envelopes: a
+  versioned header, a random 96-bit nonce, and AAD binding the format version,
+  algorithm and a context string (`snapshot:<id>`, `checkpoint:<txn>`). A file
+  moved to another account's slot, a flipped bit or a changed version fails to
+  open.
+- **Vault key.** It lives in the OS keyring (`agyva`/`vault-key`). If no keyring
   is reachable, or `vault_key = passphrase`, the key is derived with Argon2id
   (19 MiB, t=2, p=1 by default) from a passphrase of at least 8 characters
   taken from a TTY prompt or `AGYVA_PASSPHRASE`; never from argv. The mode is
@@ -35,96 +55,97 @@ never terminates agy; it only reports detected sessions (from
   bounds-checked (memory 8 KiB to 1 GiB, t and p 1 to 16, salt 8 to 64 bytes);
   anything outside is treated as a corrupt vault, so a tampered file cannot
   demand absurd memory or time.
-- No plaintext key file, no plaintext credential copies, no `.bak` files.
-- Files are created 0600 and directories 0700; writes are atomic
-  (temp file, fsync, rename, directory fsync).
-- `AGYVA_PASSPHRASE` is moved out of the environment map into a zeroizing
-  holder at startup and is never passed to child processes (`agy` runs with
-  all `AGYVA_*` variables removed). It cannot be removed from the process's own
-  environment without `unsafe` code, which the project does not use; prefer the
-  interactive prompt.
-- Account ids and checkpoint names read from disk (registry, journal) are
-  validated (10 lowercase hex characters; a fixed name shape) before any file
-  path is built from them.
-- Test hooks are fenced: `AGYVA_BACKEND` (which swaps agy's credential store
-  and seals the keyring) is honored only when the config, state and agy-home
+- **No plaintext residue.** No plaintext key file, no plaintext credential
+  copies, no `.bak` files.
+- **Filesystem discipline.** Files are created 0600 and directories 0700; writes
+  are atomic (temp file, fsync, rename, directory fsync).
+- **Passphrase hygiene.** `AGYVA_PASSPHRASE` is moved out of the environment map
+  into a zeroizing holder at startup and is never passed to child processes
+  (`agy` runs with all `AGYVA_*` variables removed). It cannot be removed from
+  the process's own environment without `unsafe` code, which the project does
+  not use; prefer the interactive prompt.
+- **Ids from disk.** Account ids and checkpoint names read from disk (registry,
+  journal) are validated (10 lowercase hex characters; a fixed name shape)
+  before any file path is built from them.
+- **Fenced test hooks.** `AGYVA_BACKEND` (which swaps agy's credential store and
+  seals the keyring) is honored only when the config, state and agy-home
   directories are redirected too; `AGYVA_FAILPOINT` only with
   `AGYVA_TEST_MODE=1`.
-- Secrets are held in zeroizing wrappers with redacted `Debug`. Keyring errors
-  are mapped by variant so their text cannot echo secret bytes. JSON output
-  and error messages never include credential material.
+- **No secrets in output.** Secrets are held in zeroizing wrappers with redacted
+  `Debug`. Keyring errors are mapped by variant so their text cannot echo secret
+  bytes. JSON output and error messages never include credential material.
 
 ## Usage, health and the TUI
 
-- Quota comes only from agy's own `/usage` command for the active login.
-  Agyva makes no network request of its own for quota, uses no OAuth client of
-  its own and never passes a credential to agy; agy is run with no stdin and
-  with all `AGYVA_*` variables (including the vault passphrase) removed from
-  its environment. Its output is size-bounded and time-limited.
-- The one deliberate network surface is self-update (`src/updater.rs`): HTTPS
-  GETs to the GitHub API releases endpoint and the release asset URLs, with
-  `https_only` enforced, a hard timeout and size ceilings. Every request and
-  every redirect hop is restricted to `api.github.com`, `github.com` and
-  `objects.githubusercontent.com`; the decompressed stream as a whole is
-  bounded, not just each member. Archives are verified against `SHA256SUMS`
-  and, when GitHub exposes one, the per-asset digest (a malformed digest is
-  refused, never treated as absent); every tar member is screened (no
-  traversal, no links, plain directories tolerated, exactly one executable),
-  and the binary is staged and renamed atomically. The startup check is
-  passive: one metadata request, silent failure. It runs at the start of every
-  invocation whose config allows it — including JSON output, completions and
-  the TUI, which makes it once per process and shows the result on the
-  dashboard. What those modes suppress is only the notice on stderr, never the
-  request. `check_updates = false` or `AGYVA_UPDATE_CHECK=0` disables the
-  request itself, and the check never runs for the `update` command, which
-  makes its own single metadata request.
-- Export archives (`core::transfer`) are sealed with AES-256-GCM under the
-  dedicated `archive:1` context with a key derived from a **separate** archive
-  passphrase via the production Argon2id profile; the vault key is never
-  exported. The whole archive — including entries that will be skipped — is
-  validated before any destination state is read, and imports only ever add:
-  existing identities are skipped bit-for-bit untouched.
-- The quota cache (`<cache>/quota.json`, 0600) holds percentages, reset times,
-  health state and a one-line rule description. It holds no tokens, no email
-  and no raw agy output. The TUI and JSON output show the same data. Tests
-  assert none of the synthetic secrets appear in the cache or output.
-- A Terms-of-Service suspension is detected only from an explicit agy message.
-  The account is then marked `TermsSuspended`, shown prominently (CLI and TUI
-  banner) with a pointer to the Antigravity FAQ and Google support, and is
-  **never retried automatically**: refresh, watch, the TUI and the monitor's
-  `agy models` catalog tick all skip it unless you explicitly force a check
-  (`--force-refresh`, or `agyva models --refresh`). Agyva does not help work
-  around a suspension, and it does not auto-switch to another account because
-  of one (route automation likewise ranks a `TermsSuspended` account as
-  ineligible and can never pick it).
-- `watch`, `monitor` and the TUI observe; they never switch accounts on their
-  own, never warm up quota windows and never retry on quota errors. A switch
-  from the TUI needs explicit confirmation and uses the same journaled path
-  as `agyva use`.
-- Opt-in automation is the one exception, and it is fenced: a
-  `routing.toml` group must set `auto_switch = true` **and** you must run
-  `agyva config set auto_switch_ack true` (the acknowledgment is separate
-  from `policy_acknowledged` and is re-settable to `false` to disable).
-  The only driver is `agyva monitor --group NAME`'s evaluation cycle, so
-  automation exists only while that foreground loop runs. Even when
-  enabled, it only fires after a
-  **fresh** live quota reading (never on cached data, never on cached reset
-  times), never picks a `TermsSuspended` or otherwise ineligible account,
-  defers whenever agy sessions are detected (or detection is uncertain) or
-  a switch journal is pending recovery, waits at least 900 seconds between
-  any two switches (a manual `agyva use` also re-arms this cooldown), and
-  re-validates everything under the login lock before using the same
-  journaled switch path as `agyva use`. Every automatic decision — including
-  holds and defers — is recorded in `agyva route history`, and the cooldown
-  bookkeeping lives in `<state dir>/auto-switch.json` (mode 0600, schema
-  1). The default remains off.
-- The TUI never prompts for or displays secrets. In passphrase mode it refuses
-  to switch unless `AGYVA_PASSPHRASE` is set (it will not read a passphrase
-  while the screen is in raw mode). Logging is off in TUI mode, and the
-  terminal is restored on exit, panic and Ctrl+C.
-- Desktop notifications carry an alias and a state, never credentials.
+Everything Agyva reads or reports about quota, health and the dashboard stays
+local, read-only and credential-free, with self-update as the single network
+exception.
+
+| Surface | What it does | What it never does |
+| --- | --- | --- |
+| Quota | Runs agy's own `/usage` for the active login: no stdin, all `AGYVA_*` variables removed, bounded output, time-limited. | Make a network request of its own, use an OAuth client of its own, or pass a credential to agy. |
+| Quota cache (`<cache>/quota.json`, 0600) | Holds percentages, reset times, health state and a one-line rule description. | Hold tokens, email or raw agy output. The TUI and JSON show the same data, and tests assert none of the synthetic secrets appear in the cache or output. |
+| Self-update | See [below](#self-update): HTTPS GETs to GitHub Releases, verified and staged atomically. | Touch any other host, or treat a malformed digest as absent. |
+| Export archives (`core::transfer`) | Sealed with AES-256-GCM under the dedicated `archive:1` context, keyed from a **separate** archive passphrase via the production Argon2id profile. | Export the vault key, or modify existing identities on import (they are skipped bit-for-bit untouched). |
+| Suspension state | Detects a Terms-of-Service suspension only from an explicit agy message, marks the account `TermsSuspended`, and shows it prominently (CLI and TUI banner) with a pointer to the Antigravity FAQ and Google support. | Retry it automatically — refresh, watch, the TUI and the monitor's `agy models` catalog tick all skip it unless you explicitly force a check (`--force-refresh`, or `agyva models --refresh`) — or auto-switch away from it (route automation ranks it ineligible). |
+| `watch`, `monitor`, TUI | Observe; a switch from the TUI needs explicit confirmation and uses the same journaled path as `agyva use`. | Switch accounts on their own, warm up quota windows, or retry on quota errors. |
+| TUI secrets and logging | Logging is off in TUI mode, and the terminal is restored on exit, panic and Ctrl+C. | Prompt for or display secrets. In passphrase mode it refuses to switch unless `AGYVA_PASSPHRASE` is set, because it will not read a passphrase while the screen is in raw mode. |
+| Desktop notifications | Carry an alias and a state. | Carry credentials. |
+
+The whole-archive check is part of the import contract: every entry — including
+ones that will be skipped — is validated before any destination state is read,
+and imports only ever add.
+
+### Self-update
+
+`src/updater.rs` is the one deliberate network surface.
+
+- HTTPS GETs to the GitHub API releases endpoint and the release asset URLs,
+  with `https_only` enforced, a hard timeout and size ceilings.
+- Every request and every redirect hop is restricted to `api.github.com`,
+  `github.com` and `objects.githubusercontent.com`.
+- The decompressed stream as a whole is bounded, not just each member.
+- Archives are verified against `SHA256SUMS` and, when GitHub exposes one, the
+  per-asset digest (a malformed digest is refused, never treated as absent).
+- Every tar member is screened (no traversal, no links, plain directories
+  tolerated, exactly one executable), and the binary is staged and renamed
+  atomically.
+- The startup check is passive: one metadata request, silent failure. It runs at
+  the start of every invocation whose config allows it — including JSON output,
+  completions and the TUI, which makes it once per process and shows the result
+  on the dashboard. What those modes suppress is only the notice on stderr,
+  never the request.
+- `check_updates = false` or `AGYVA_UPDATE_CHECK=0` disables the request itself,
+  and the check never runs for the `update` command, which makes its own single
+  metadata request.
+
+### Opt-in automation
+
+The one exception to "never switches", and it is fenced:
+
+- A `routing.toml` group must set `auto_switch = true` **and** you must run
+  `agyva config set auto_switch_ack true`; the acknowledgment is separate from
+  `policy_acknowledged` and is re-settable to `false` to disable.
+- The only driver is `agyva monitor --group NAME`'s evaluation cycle, so
+  automation exists only while that foreground loop runs.
+- It fires only after a **fresh** live quota reading — never on cached data,
+  never on cached reset times.
+- It never picks a `TermsSuspended` or otherwise ineligible account.
+- It defers whenever agy sessions are detected (or detection is uncertain), or
+  while a switch journal is pending recovery.
+- It waits at least 900 seconds between any two switches; a manual `agyva use`
+  also re-arms this cooldown.
+- It re-validates everything under the login lock and then uses the same
+  journaled switch path as `agyva use`.
+- Every automatic decision — including holds and defers — is recorded in
+  `agyva route history`, and the cooldown bookkeeping lives in
+  `<state dir>/auto-switch.json` (mode 0600, schema 1).
+
+The default remains off.
 
 ## Switch safety
+
+A switch is journaled, checkpointed and verified rather than assumed:
 
 - A switch never overwrites an agy login agyva has not saved unless you pass
   `--force`; the unsaved login is then kept in a **pinned** encrypted

@@ -1,5 +1,7 @@
 # Compatibility
 
+[README](../README.md) · [Commands](commands.md) · [Security](security.md) · [Antigravity setup](antigravity.md)
+
 What agyva assumes about `agy`, and how much of it has actually been checked.
 Three labels are used throughout:
 

@@ -88,15 +88,23 @@ AGYVA_REAL_KEYRING_TEST=1 cargo test --test real_keyring -- --ignored
 ## Documentation and screenshots
 
 Documentation is part of the product. Keep it accurate about what is
-implemented, what is observed and what is unverified. The terminal screenshot in
-the README must stay synthetic: regenerate it with
+implemented, what is observed and what is unverified, and update the docs that
+state the behavior you changed.
+
+The README and dashboard screenshots must stay free of real identities:
+regenerate them from the sanitized replay, or with explicitly synthetic data,
+never from a real account registry:
 
 ```sh
-scripts/capture-tui.sh          # docs/tui-capture.txt and docs/tui.svg
+scripts/capture-tui.sh                      # docs/tui-capture.txt, docs/tui.svg, docs/tui-usage.svg
+scripts/capture-tui.sh --synthetic /tmp/demo.txt
 ```
 
-which uses the fake sandbox in `scripts/demo-sandbox.sh` and never reads a real
-login. Real-account screenshots will be rejected.
+The default replay reads [sanitized evidence](docs/capture-data/accounts.json)
+into scratch directories and renders the production views; `--synthetic` labels
+its output as made up. [Capture provenance](docs/dashboard.md#capture-provenance)
+records what each capture preserves. Screenshots containing real accounts will
+be rejected.
 
 ## Code of Conduct
 

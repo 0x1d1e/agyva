@@ -307,6 +307,7 @@ fn help_completions_config_and_version() {
     for task in [
         "Accounts:",
         "Quota and health:",
+        "Routing:",
         "Diagnostics and recovery:",
         "Setup:",
         "Examples:",
