@@ -142,7 +142,7 @@ impl App {
 
         self.check_agy_extras(&mut c);
 
-        let s = sessions::detect(&self.agy);
+        let s = sessions::detect(&self.agy, self.session_scan);
         match (s.is_known(), s.warning()) {
             (false, w) => c.add(
                 "sessions",

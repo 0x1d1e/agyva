@@ -145,6 +145,10 @@ fn build_app(
     .with_kdf(kdf)
     .with_compat(compat)
     .with_failpoints(failpoints)
+    // The fake agy installed by tests is a real process named `agy`; a host
+    // process scan would report it as a user session. The presence-lock
+    // check (the in-sandbox signal) stays on.
+    .with_session_scan(agyva::agy::sessions::SessionScan::PresenceOnly)
     .with_lock_timeout(Duration::from_millis(200))
 }
 

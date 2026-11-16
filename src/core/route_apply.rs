@@ -177,7 +177,7 @@ impl App {
             .map(|p| format!("{p:?}").to_ascii_lowercase());
         // Session warning is informational only: apply never signals or
         // kills anything, and switching does not retarget running sessions.
-        let session_warning = crate::agy::sessions::detect(&self.agy).warning();
+        let session_warning = crate::agy::sessions::detect(&self.agy, self.session_scan).warning();
         let ranking = match g.ranking {
             Ranking::Priority => "priority order",
             Ranking::LeastUsed => "least-used ranking",

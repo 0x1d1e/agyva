@@ -179,7 +179,7 @@ pub fn decide(
     // Session gate: detected sessions defer, and so does an UNKNOWN answer
     // (unreadable presence directory or process table): automation never
     // treats "could not look" as "nothing is running".
-    let sessions = crate::agy::sessions::detect(&app.agy);
+    let sessions = crate::agy::sessions::detect(&app.agy, app.session_scan);
     if !sessions.is_known() {
         return AutoDecision::Defer(format!(
             "could not determine whether agy sessions are running ({}); refusing to switch blind",

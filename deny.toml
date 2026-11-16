@@ -41,6 +41,9 @@ allow = [
     "Zlib",
     "CC0-1.0",
     "MPL-2.0",
+    # webpki-roots (via ureq, the self-updater) ships the rustls/ISRG CA root
+    # bundle under this permissive data license: no copyleft on our code.
+    "CDLA-Permissive-2.0",
 ]
 
 [bans]

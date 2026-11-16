@@ -60,6 +60,11 @@ pub struct App {
     /// vice versa.
     pub(crate) archive_passphrases: Arc<dyn PassphraseSource>,
     pub(crate) provider_override: Option<Arc<dyn QuotaProvider>>,
+    /// How far session detection may look (see [`crate::agy::sessions::SessionScan`]).
+    /// Production scans the host process table; the test harness narrows it
+    /// to its own AGY home so a stray `agy` on the machine cannot pose as a
+    /// session.
+    pub(crate) session_scan: crate::agy::sessions::SessionScan,
     native_override: Option<NativeAuth>,
     native: OnceCell<NativeAuth>,
     vault: OnceCell<Vault>,
@@ -95,6 +100,7 @@ impl App {
             had_env_passphrase,
             kdf: None,
             provider_override: None,
+            session_scan: crate::agy::sessions::SessionScan::default(),
             compat_override: None,
             native_override: None,
             native: OnceCell::new(),
@@ -197,6 +203,18 @@ impl App {
     pub fn with_refresh_grace(mut self, d: Duration) -> Self {
         self.refresh_grace = d;
         self
+    }
+
+    /// Narrow session detection to this context's own AGY home (tests).
+    #[must_use]
+    pub fn with_session_scan(mut self, scan: crate::agy::sessions::SessionScan) -> Self {
+        self.session_scan = scan;
+        self
+    }
+
+    /// How far session detection looks for this context.
+    pub fn session_scan(&self) -> crate::agy::sessions::SessionScan {
+        self.session_scan
     }
 
     pub fn with_lock_timeout(mut self, d: Duration) -> Self {

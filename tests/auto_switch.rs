@@ -170,7 +170,7 @@ fn cooldown_holds_and_manual_switch_resets_it() {
     assert!(
         matches!(d0, AutoDecision::Switch { .. }),
         "expected switch, got {d0:?}, plan={plan:?}, sessions={:?}",
-        agyva::agy::sessions::detect(&app.agy)
+        agyva::agy::sessions::detect(&app.agy, app.session_scan())
     );
     // A switch just now (as a manual `use` does) re-arms the 900s cooldown.
     note_switch(&app.dirs, now, false).unwrap();
@@ -286,7 +286,7 @@ fn concurrent_manual_switch_wins_and_cools_automation_down() {
     let AutoDecision::Switch { alias, .. } = decision else {
         panic!(
             "expected a switch, got {decision:?} sessions={:?}",
-            agyva::agy::sessions::detect(&app.agy)
+            agyva::agy::sessions::detect(&app.agy, app.session_scan())
         );
     };
     assert_eq!(alias, "alice");
@@ -509,7 +509,7 @@ fn unknown_session_detection_defers_instead_of_switching() {
     std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
     std::fs::write(&dir, b"not a directory").unwrap();
 
-    let report = agyva::agy::sessions::detect(&app.agy);
+    let report = agyva::agy::sessions::detect(&app.agy, app.session_scan());
     assert!(
         !report.is_known(),
         "an unlistable presence path is an unknown answer, not zero sessions"

@@ -69,7 +69,7 @@ impl App {
             vault,
             config_dir: self.dirs.config.display().to_string(),
             state_dir: self.dirs.state.display().to_string(),
-            sessions: sessions::detect(&self.agy),
+            sessions: sessions::detect(&self.agy, self.session_scan),
             recovery_pending,
         })
     }

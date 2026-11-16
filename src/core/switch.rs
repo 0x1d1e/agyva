@@ -188,7 +188,7 @@ impl App {
         let rec = reg
             .find(&target.id)
             .ok_or_else(|| Error::format("account vanished from the registry"))?;
-        warnings.extend(sessions::detect(&self.agy).warning());
+        warnings.extend(sessions::detect(&self.agy, self.session_scan).warning());
         Ok(SwitchOutcome {
             account: AccountView::of(&reg, rec),
             already_active: false,
