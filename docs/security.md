@@ -107,7 +107,8 @@ and imports only ever add.
 - HTTPS GETs to the GitHub API releases endpoint and the release asset URLs,
   with `https_only` enforced, a hard timeout and size ceilings.
 - Every request and every redirect hop is restricted to `api.github.com`,
-  `github.com` and `objects.githubusercontent.com`.
+  `github.com`, `objects.githubusercontent.com`, and
+  `release-assets.githubusercontent.com`.
 - The decompressed stream as a whole is bounded, not just each member.
 - Archives are verified against `SHA256SUMS` and, when GitHub exposes one, the
   per-asset digest (a malformed digest is refused, never treated as absent).

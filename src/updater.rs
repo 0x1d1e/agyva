@@ -191,10 +191,15 @@ impl Transport for HttpTransport {
 }
 
 /// Hosts a GitHub release asset may live on, exactly.
+/// GitHub redirects `/releases/download/...` to `objects.githubusercontent.com`
+/// and `release-assets.githubusercontent.com`.
 fn host_allowed(host: &str) -> bool {
     matches!(
         host,
-        "api.github.com" | "github.com" | "objects.githubusercontent.com"
+        "api.github.com"
+            | "github.com"
+            | "objects.githubusercontent.com"
+            | "release-assets.githubusercontent.com"
     )
 }
 
@@ -625,10 +630,16 @@ mod origin_tests {
         assert!(release_origin(
             "https://objects.githubusercontent.com/x?y=1"
         ));
+        assert!(release_origin(
+            "https://release-assets.githubusercontent.com/x?y=1"
+        ));
         assert!(!release_origin("https://evil.example/objects"));
         assert!(!release_origin("http://github.com/x"));
         assert!(!host_allowed("not-github.com"));
         assert!(!host_allowed("github.com.evil.example"));
+        assert!(!host_allowed(
+            "release-assets.githubusercontent.com.evil.example"
+        ));
         assert!(host_allowed("github.com"));
     }
 }
