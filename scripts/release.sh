@@ -4,6 +4,7 @@
 #   scripts/release.sh [--target <triple>]
 #
 # Output (dist/):
+#   agyva-<version>-<target>          standalone executable binary
 #   agyva-<version>-<target>.tar.gz   binary + README + LICENSE + docs
 #   SHA256SUMS                        verify with: (cd dist && sha256sum -c SHA256SUMS)
 #
@@ -70,6 +71,7 @@ fi
 rm -rf dist
 stage="dist/$name"
 mkdir -p "$stage/docs"
+install -m755 "$bin_path" "dist/$name"
 install -m755 "$bin_path" "$stage/agyva"
 install -m644 README.md LICENSE "$stage/"
 install -m644 docs/*.md "$stage/docs/"
@@ -82,11 +84,12 @@ install -Dm644 docs/capture-data/accounts.json "$stage/docs/capture-data/account
   cd dist
   tar --sort=name --mtime="@$epoch" --owner=0 --group=0 --numeric-owner \
       --format=gnu -cf - "$name" | gzip -n -9 > "$name.tar.gz"
-  sha256sum "$name.tar.gz" > SHA256SUMS
+  sha256sum "$name.tar.gz" "$name" > SHA256SUMS
   sha256sum -c SHA256SUMS
 )
 rm -rf "$stage"
 
 echo
+echo "binary:  $PWD/dist/$name"
 echo "tarball: $PWD/dist/$name.tar.gz"
 echo "sums:    $PWD/dist/SHA256SUMS"

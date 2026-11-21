@@ -1,6 +1,6 @@
 name: release
 
-# Push a tag like v0.1.0 to build the Linux x86_64 tarball and checksums.
+# Push a tag like v0.1.0 to build the Linux x86_64 and aarch64 release binaries, tarballs and checksums.
 # Artifacts are attached to a DRAFT release; review and publish by hand.
 on:
   push:
@@ -20,15 +20,30 @@ jobs:
   build:
     # The workflow is inert on forks; releases are only built from the main repo.
     if: github.repository == '0x1d1e/agyva'
-    name: release (linux x86_64)
+    name: release (${{ matrix.target }})
     permissions:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            cross: true
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install cross-compiler
+        if: matrix.cross
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
       - name: Check tag matches Cargo.toml
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
@@ -36,14 +51,18 @@ jobs:
             echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
             exit 1
           fi
-      - run: scripts/release.sh
+      - name: Build release artifacts
+        env:
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: scripts/release.sh --target "${{ matrix.target }}"
       - name: Verify checksums
         run: cd dist && sha256sum -c SHA256SUMS
       - uses: actions/upload-artifact@v7
         with:
-          name: agyva-linux-x86_64
+          name: agyva-${{ matrix.target }}
           path: |
-            dist/*.tar.gz
+            dist/agyva-*
             dist/SHA256SUMS
 
   publish:
@@ -57,17 +76,21 @@ jobs:
     steps:
       - uses: actions/download-artifact@v7
         with:
-          name: agyva-linux-x86_64
-          path: dist
-      - name: Verify checksums
-        run: cd dist && sha256sum -c SHA256SUMS
+          pattern: agyva-*
+          path: dist-in
+      - name: Combine and verify checksums
+        run: |
+          mkdir -p dist
+          cp dist-in/*/agyva-* dist/
+          cat dist-in/*/SHA256SUMS > dist/SHA256SUMS
+          (cd dist && sha256sum -c SHA256SUMS)
       - name: Draft release
         uses: softprops/action-gh-release@v3
         with:
           draft: true
           generate_release_notes: true
           files: |
-            dist/*.tar.gz
+            dist/agyva-*
             dist/SHA256SUMS
 
   # Not supported yet (see ci.yml). Disabled on purpose.

@@ -106,7 +106,7 @@ pub enum Command {
         /// Archive file to import.
         file: std::path::PathBuf,
     },
-    /// Check GitHub Releases for a newer agyva; install with --install.
+    /// Check GitHub Releases for a newer agyva (--check) or download and install it.
     Update {
         /// Only check and report; do not download or install anything.
         #[arg(long)]

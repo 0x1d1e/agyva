@@ -27,7 +27,7 @@ Three labels are used throughout:
 | Native store alternative: file `~/.gemini/antigravity-cli/antigravity-oauth-token` | FROM-REFERENCE | Select with `backend = file`. |
 | **Byte-compatibility of agyva's keyring write with real agy** (attributes, label `Password for 'antigravity' on 'gemini'`, `xdg:schema`, content type) | **UNVERIFIED** | Agyva sets `application/octet-stream`; go-keyring (which agy is believed to use) writes `text/plain`. Reads of agy's own item are expected to work; whether agy accepts an item agyva created or overwrote is not proven. See "Checking it yourself". |
 | Companion state: `installation_id`, `settings.json` `gcp` block | FROM-REFERENCE | Only the `gcp` block of `settings.json` is ever modified. |
-| Running-session detection (`presence/*.lock`, process name `agy`) | FROM-REFERENCE | Advisory only; agyva never signals a process. |
+| Running-session detection (`presence/*.lock`, process name `agy`) | FROM-REFERENCE | Advisory only; agyva never signals a process. Uses a non-blocking `flock` liveness probe on `presence/*.lock` (ignoring stale locks) and filters `agy` processes to the current UID. |
 | Health wording (Terms of Service message) | FROM-REFERENCE | Matched against the wording seen in the reference material; a changed message degrades to `unknown`. |
 | macOS Keychain, Windows Credential Manager | UNVERIFIED / not supported | Disabled in CI and release jobs. |
 

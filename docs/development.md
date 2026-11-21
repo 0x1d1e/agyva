@@ -43,6 +43,7 @@ These exist for tests and sandboxes. Normal use needs none of them.
 | `AGYVA_BACKEND` | `file` or `memory`: sandbox mode. The OS keyring is never touched and the vault key falls back to a passphrase. **Requires** `AGYVA_CONFIG_DIR`, `AGYVA_STATE_DIR` and `AGYVA_AGY_HOME` too, otherwise agyva refuses (a stray variable must not mix real and fake state). `memory` keeps the login inside one process; use `file` for multi-command scripts. |
 | `AGYVA_VAULT_KEY` | `auto`, `keyring` or `passphrase`. |
 | `AGYVA_PASSPHRASE` | Vault passphrase (minimum 8 characters), never read from argv. Moved into a zeroizing holder at startup; it cannot be removed from the process environment without `unsafe`. |
+| `AGYVA_NEW_PASSPHRASE` | New passphrase for `agyva rekey` (minimum 8 characters); otherwise prompts interactively. Moved into a zeroizing holder at startup. |
 | `AGYVA_LOG` | `tracing` filter; stderr. Disabled in TUI mode. |
 | `AGYVA_TEST_MODE` | Set to `1` to enable test-only hooks (currently `AGYVA_FAILPOINT`). |
 | `AGYVA_FAILPOINT` | `<name>[:crash\|:error]`. Honored only with `AGYVA_TEST_MODE=1`; otherwise ignored with one warning on stderr. See below. |
@@ -99,7 +100,8 @@ It never reads or writes any credential.
 | `scripts/demo-sandbox.sh <dir>` | Build a synthetic sandbox (fake accounts, fake agy, scratch HOME) and print `export` lines. Use it to try agyva without touching anything real. |
 | `scripts/capture-tui.sh [--snapshot\|--synthetic] [file]` | Rebuild the debug CLI and capture helper; replay sanitized cached evidence by default, or explicitly generate synthetic data. Writes text plus Accounts/Usage SVGs; needs Python 3. |
 | `scripts/check-links.py` | Check every relative Markdown link and heading anchor without network access. |
-| `scripts/release.sh` | `cargo build --release --locked`, package into `dist/`, write and check `SHA256SUMS`. |
+| `install.sh` | Download, verify (`SHA256SUMS`), and install or uninstall a GitHub Release on Linux x86-64 / ARM64 (glibc). |
+| `scripts/release.sh [--target <triple>]` | `cargo build --release --locked`, output the standalone binary and `.tar.gz` into `dist/`, write and check `SHA256SUMS`. |
 
 ```sh
 eval "$(scripts/demo-sandbox.sh /tmp/agyva-demo)"   # bash/zsh
@@ -130,10 +132,12 @@ algorithm. Keep the focused wrapped-content regressions when upgrading it.
 ## Dependencies and policy checks
 
 `deny.toml` configures `cargo deny` (advisories, licenses, bans, sources).
-Three advisories are ignored with a reason each: RUSTSEC-2026-0370/0371/0372
-mark `zbus_names`, `zvariant` and `zvariant_derive` as unmaintained (no
-vulnerability); they arrive through `zbus`, which the Secret Service store and
-desktop notifications need. Revisit when `zbus` moves off them.
+Four unmaintained-only advisories (no vulnerability) are ignored with a reason
+each: `RUSTSEC-2026-0370/0371/0372` mark `zbus_names`, `zvariant` and
+`zvariant_derive` as unmaintained (via `zbus`, needed for the Secret Service
+store and desktop notifications), and `RUSTSEC-2026-0543` marks `chrono` as
+unmaintained (direct dependency with no drop-in upgrade). Revisit when fixed
+releases exist.
 
 ## Conventions
 

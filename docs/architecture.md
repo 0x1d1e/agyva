@@ -28,7 +28,7 @@ tests through the library.
 | Module | Role |
 | --- | --- |
 | `cli` | clap definition, dispatch, table rendering. No business logic. |
-| `core` | Domain: `App` context, add/switch/recover/manage/status/doctor, registry, selectors, views, failpoints. |
+| `core` | Domain: `App` context, add/switch/recover/manage/rekey/status/doctor, registry, selectors, views, failpoints. |
 | `agy` | Everything about agy: credential parsing, native backends, companion state, session detection, version compatibility. |
 | `storage` | Encrypted vault, vault-key provider, atomic file IO, state lock, journal. |
 | `paths`, `config` | Directory resolution (`Env` snapshot, no ad hoc env reads) and `config.toml`. |
@@ -147,9 +147,10 @@ See `docs/development.md` for the full table. Two gates matter architecturally:
   every build (the binary-level tests need it) but honored only with
   `AGYVA_TEST_MODE=1`; otherwise it is ignored with one warning on stderr.
 
-`AGYVA_PASSPHRASE` is taken out of the `Env` map into a zeroizing holder in
-`App::new`, so it is not cloned around or handed to child processes. It is not
-removed from the process environment (that needs `unsafe` in edition 2024).
+`AGYVA_PASSPHRASE`, `AGYVA_NEW_PASSPHRASE`, and `AGYVA_ARCHIVE_PASSPHRASE` are
+taken out of the `Env` map into zeroizing holders in `App::new`, so they are not
+cloned around or handed to child processes. They are not removed from the
+process environment (that needs `unsafe` in edition 2024).
 
 Failpoint names: `after-checkpoint`, `after-prepared`, `after-native-write`,
 `after-companion`, `after-credential-written`, `verify`, `after-verified`,
@@ -163,10 +164,12 @@ fails the step normally and exercises automatic rollback.
 `core::transfer` implements `agyva export` / `agyva import` over portable,
 passphrase-encrypted archives: a versioned envelope holding AES-256-GCM
 ciphertext (the dedicated `archive:1` context) whose key comes from a separate
-archive passphrase under the production Argon2id profile (19 MiB, t=2, p=1,
-16-byte salt). The payload is only `{record, snapshot}` entries — no vault
-key, no `active` pointer, no quota cache. Export always creates a new file
-(no clobber) and requires an absolute path.
+archive passphrase under the 64 MiB Argon2id export profile (`t=3`, `p=1`,
+16-byte salt), while `import` accepts archives down to the 19 MiB (`t=2`,
+`p=1`) floor for compatibility with existing archives. The payload is only
+`{record, snapshot}` entries — no vault key, no `active` pointer, no quota
+cache. Export always creates a new file (no clobber) and requires an absolute
+path.
 
 Import validates every entry (including ones that will be skipped) before
 reading destination state, then plans under the state lock: identities already
@@ -182,17 +185,19 @@ next run; unexpected staging entries are preserved and reported.
 
 ## Self-update
 
-`updater.rs` checks GitHub Releases (one GET, 2 s, silent) on every enabled
-invocation — including help and version exits — and `agyva update` installs:
-stable SemVer must be strictly newer, the `agyva-<version>-<target>.tar.gz`
-asset plus `SHA256SUMS` are downloaded and verified (file sums and the GitHub
-per-asset digest when exposed), exactly `<stem>/agyva` is extracted (single
-regular executable; links, traversal names and duplicates refused) and the
-binary is staged next to the running one and renamed atomically. The
-`Transport` trait is the seam: production uses `ureq` with `https_only`,
-tests inject in-memory transports. The notice reaches humans on stderr and
-the TUI through `Dashboard::update_notice`, never stderr under the alternate
-screen.
+`updater.rs` checks GitHub Releases (one GET, 2 s, silent) on supported Linux
+targets (`x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`), caching
+results in `<cache>/update-check.json` (24 hours on success, 1 hour on failure)
+and skipping checks for `--json` and `completions` invocations. `agyva update`
+installs: stable SemVer must be strictly newer, the
+`agyva-<version>-<target>.tar.gz` asset plus `SHA256SUMS` are downloaded and
+verified (file sums and the GitHub per-asset digest when exposed), exactly
+`<stem>/agyva` is extracted (single regular executable; links, traversal names
+and duplicates refused) and the binary is staged next to the running one and
+renamed atomically. The `Transport` trait is the seam: production uses `ureq`
+with `https_only`, tests inject in-memory transports. The notice reaches humans
+on stderr and the TUI through `Dashboard::update_notice`, never stderr under the
+alternate screen.
 
 ## Quota provider boundary
 
@@ -209,12 +214,16 @@ refreshes only the active account; it never copies a credential or calls a
 Google endpoint to learn about another one. The single exception to
 "never switches" is opt-in: `core::auto` may run the same journaled switch
 for a `routing.toml` group that sets `auto_switch = true` **and** whose
-acknowledgment is in `config.toml`, gated by a 900s cooldown, a fresh live
-reading, a fresh eligible candidate, the session gate (detected sessions or
-an uncertain detection defer) and recovery state. Default is off. Other accounts show their
-last cached values, labelled with their age (`cache`, `stale`), or "not
-checked yet". `plan` is shown as unavailable because `/usage` does not report
-it.
+acknowledgement is in `config.toml`, gated by a configurable cooldown
+(`auto_switch_cooldown_secs` / per-group `cooldown_secs`, default 900s) over
+fail-closed `auto-switch.json` state, a fresh live reading, active thresholds
+and hysteresis, standby candidate eligibility up to
+`auto_switch_candidate_max_age_secs`, the session gate (`flock` liveness probe on
+`presence/*.lock` plus current-UID process filtering; detected or uncertain
+defers), recovery state, and lock-held revalidation immediately before switching.
+Default is off. Other accounts show their last cached values, labelled with
+their age (`cache`, `stale`), or "not checked yet". `plan` is shown as
+unavailable because `/usage` does not report it.
 
 `core::refresh` rules, in order:
 1. A pending interrupted switch blocks refreshing (exit 3 in the CLI).

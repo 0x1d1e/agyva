@@ -156,7 +156,7 @@ Summarize local state and pending recovery, or run read-only checks.
 | `accounts`, `active` | Count, and the active account alias or `null`. |
 | `backend`, `vault` | Native store and vault-key mode. |
 | `config_dir`, `state_dir` | Resolved directories. |
-| `sessions` | Detected agy sessions. |
+| `sessions` | Detected agy sessions (`presence_locks`, `agy_pids`, optional `stale_presence_locks` omitted when zero, optional `uncertain`). |
 | `recovery_pending` | `txn_id`, `target`, `phase`, `started_at`, optional `detail`; `null` when none. |
 
 `doctor --json` reports `healthy` and `recovery_pending` booleans plus `checks[]`,

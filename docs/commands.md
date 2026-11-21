@@ -91,7 +91,7 @@ the prior observation. Accounts other than the active one only get a catalog by
 being active when it runs. `--refresh` runs under the same version gate as every
 write path: an untested agy is skipped, and `--allow-untested` (or
 `allow_untested_agy = true`) is the only bypass — `--refresh` does not override
-the gate. A dedicated interactive TUI route tab is not in 0.1.1; the route pane
+the gate. A dedicated interactive TUI route tab is not in 0.1.2; the route pane
 ships in the watch-style terminal monitor instead.
 
 ### Route-aware monitor
@@ -312,23 +312,29 @@ back automatically on the next command.
 
 ## Update Agyva
 
-Check for a newer stable release, or install it.
+Check for a newer stable release, or download, verify, and install it.
 
 ```sh
-agyva update                      # download, verify and install
-agyva update --install            # same, spelled out
-agyva update --check              # report only; installs nothing
+agyva update --check              # check and report only; installs nothing
+agyva update                      # check, verify, download and install
+agyva update --install            # same as `agyva update`
 ```
+
+`agyva update --check` queries GitHub Releases and reports whether a newer
+version exists without modifying anything; `agyva update` (or
+`agyva update --install`) downloads, verifies, and replaces the running binary
+atomically. Fresh installs can also use [`install.sh`](../install.sh) on Linux
+x86-64 and ARM64 (glibc).
 
 Updates come from this project’s GitHub Releases on supported targets
 (`x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`): the release
 tarball and its `SHA256SUMS` are verified before the running binary is replaced
-atomically. Every invocation also checks for a newer stable release once at
-startup (2 s timeout, silent on failure, cached in `<cache>/update-check.json`
-for 24 hours on success and 1 hour on failure, skipped on unsupported targets)
-and prints a one-line notice on stderr; disable that with `check_updates = false`
-in the config or `AGYVA_UPDATE_CHECK=0` in the environment.
-[Self-update internals](architecture.md#self-update).
+atomically. Every human-output startup also checks for a newer stable release
+(2 s timeout, silent on failure, cached in `<cache>/update-check.json` for 24
+hours on success and 1 hour on failure; skipped on unsupported targets and for
+`--json` or `completions`) and prints a one-line notice on stderr; disable that
+with `check_updates = false` in the config or `AGYVA_UPDATE_CHECK=0` in the
+environment. [Self-update internals](architecture.md#self-update).
 
 ## Rekey the vault
 

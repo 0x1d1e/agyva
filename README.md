@@ -38,14 +38,24 @@ overview](docs/tui.svg) shows the **minimum remaining quota across enabled group
 
 ## Requirements
 
-Linux x86-64 only; macOS and Windows are unsupported. Install `agy` 1.5.x and sign in separately — Agyva does not sign
-you in. The default store needs a Secret Service provider (GNOME Keyring, KeePassXC, KWallet’s bridge) or the passphrase
-vault; see [Antigravity setup](docs/antigravity.md#choose-a-credential-store). Building needs Rust 1.88 or newer.
+Linux only (x86-64 and ARM64 / aarch64 glibc); macOS and Windows are unsupported. Install `agy` 1.5.x and sign in
+separately — Agyva does not sign you in. The default store needs a Secret Service provider (GNOME Keyring, KeePassXC,
+KWallet’s bridge) or the passphrase vault; see [Antigravity setup](docs/antigravity.md#choose-a-credential-store).
+Building needs Rust 1.88 or newer.
 
 ## Install
 
-Release artifacts are cut by pushing a `v*` tag ([`release.yml`](.github/workflows/release.yml)); download the archive and
-`SHA256SUMS` from the release page, then run in that directory:
+Install the latest release on Linux x86-64 or ARM64 (glibc) with [`install.sh`](install.sh):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/0x1d1e/agyva/main/install.sh | sh
+```
+
+The installer checks OS, architecture, and glibc, verifies the release archive against `SHA256SUMS`, and installs into
+`~/.local/bin/agyva`. Pass options via `sh -s --`: `--version <vX.Y.Z>`, `--prefix <dir>`, or `--uninstall`.
+
+Or download the release archive or standalone binary and `SHA256SUMS` from a `v*` release ([`release.yml`](.github/workflows/release.yml))
+and verify manually:
 
 ```sh
 sha256sum -c SHA256SUMS
@@ -95,7 +105,9 @@ pays for a model family.
   for the active account.
 
 Auto-switch is off by default and doubly gated: the group sets `auto_switch = true` **and** you run
-`agyva config set auto_switch_ack true`. Only `agyva monitor --group NAME` drives it — 15-minute cooldown, fresh-evidence
+`agyva config set auto_switch_ack true`. Only `agyva monitor --group NAME` drives it — configurable cooldown
+(`auto_switch_cooldown_secs`, default 900s, fail-closed cooldown state), candidate age
+(`auto_switch_candidate_max_age_secs`, default 21600s), active thresholds and hysteresis (default 10%), fresh-evidence
 and session gates, every decision journaled. See [Plan a route](docs/commands.md#plan-a-route) and
 [Opt-in auto-switch](docs/commands.md#opt-in-auto-switch).
 
@@ -108,6 +120,7 @@ and session gates, every decision journaled. See [Plan a route](docs/commands.md
 | Recover an interrupted switch | `agyva status`, `agyva doctor`; exit 3 means run `agyva recover` after resolving any unlock prompt · [Recovery](docs/commands.md#recover-an-interrupted-switch) |
 | Script an inspection | `agyva list --json`, `agyva usage --all --no-refresh --json` · [JSON](docs/json.md) |
 | Change settings, add completions | `agyva config show`, `agyva config set <key> <value>`, `agyva completions fish\|bash\|zsh` · [Settings](docs/commands.md#settings) |
+| Rotate vault key or migrate mode | `agyva rekey [--mode keyring\|passphrase]` · [Rekey](docs/commands.md#rekey-the-vault) |
 | Move accounts between machines | `agyva export FILE`, `agyva import FILE`; adds missing accounts, never alters saved ones · [Transfer](docs/commands.md#move-accounts-between-machines) |
 | Update Agyva | `agyva update --check` reports; `agyva update` verifies and installs · [Update](docs/commands.md#update-agyva) |
 
@@ -115,14 +128,16 @@ and session gates, every decision journaled. See [Plan a route](docs/commands.md
 
 - Saved logins and checkpoints are AES-256-GCM envelopes; the vault key lives in the OS keyring or comes from a
   passphrase via Argon2id. Export archives are sealed under a separate passphrase (`AGYVA_ARCHIVE_PASSPHRASE`, minimum
-  8 characters); the vault key is never exported.
+  8 characters) using 64 MiB Argon2id (`import` accepts down to the 19 MiB floor); the vault key is never exported.
 - Switches are journaled, read back and verified locally. Exit 3 means recovery is required: resolve any keyring unlock
   prompt, then run `agyva recover`.
 - Quota comes only from `agy -p "/usage" --output-format json`; that envelope is locally observed and undocumented, so a
   changed shape reads as unavailable. Quota never switches because of an error, and suspended accounts are never retried.
 - No telemetry and no other endpoints. The only other traffic is the optional self-update: one HTTPS request to this
-  project’s GitHub Releases per enabled startup, silent on failure. `check_updates = false` or `AGYVA_UPDATE_CHECK=0`
-  disables the request; for JSON, completions and the TUI only the *notice* is suppressed.
+  project’s GitHub Releases on supported Linux targets (`x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`),
+  cached in `<cache>/update-check.json` (24 hours on success, 1 hour on failure) and silent on failure.
+  `check_updates = false` or `AGYVA_UPDATE_CHECK=0` disables the request; `--json` and `completions` skip the check,
+  and in the TUI the notice appears on the dashboard instead of stderr.
 - Encryption protects saved copies at rest, not an unlocked, compromised session. Details: [security
   model](docs/security.md) · [compatibility matrix](docs/compatibility.md).
 
