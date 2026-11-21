@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 
 use super::Io;
 use super::usage_out::render_event;
@@ -24,10 +25,18 @@ pub const ENV_MAX_CYCLES: &str = "AGYVA_WATCH_MAX_CYCLES";
 /// keep `agyva watch` from hammering the quota endpoint.
 pub const ENV_INTERVAL_MS: &str = "AGYVA_WATCH_INTERVAL_MS";
 
+#[derive(Serialize)]
+struct JsonWatchEvent<'a> {
+    at: DateTime<Utc>,
+    #[serde(flatten)]
+    event: &'a WatchEvent,
+}
+
 struct Printer<'a, 'b> {
     io: &'a mut Io<'b>,
     notifier: Box<dyn Notifier>,
     stop: Arc<AtomicBool>,
+    json_stream: bool,
     /// First write failure, if any: the loop is stopped and the caller
     /// turns this into an exit code instead of spinning quietly forever.
     error: Option<std::io::Error>,
@@ -35,7 +44,13 @@ struct Printer<'a, 'b> {
 
 impl Printer<'_, '_> {
     fn write(&mut self, at: DateTime<Utc>, e: &WatchEvent) -> std::io::Result<()> {
-        writeln!(self.io.out, "{}", render_event(at, e))?;
+        if self.json_stream {
+            let line = serde_json::to_string(&JsonWatchEvent { at, event: e })
+                .unwrap_or_else(|_| "{}".to_owned());
+            writeln!(self.io.out, "{line}")?;
+        } else {
+            writeln!(self.io.out, "{}", render_event(at, e))?;
+        }
         // Best effort: a flush error surfaces on the next write.
         let _ = self.io.out.flush();
         Ok(())
@@ -78,18 +93,68 @@ impl Sink for Printer<'_, '_> {
                     &format!("{alias} is suspended (ToS); see the Antigravity FAQ"),
                 );
             }
+            WatchEvent::Note { text }
+                if text.starts_with("CRITICAL ") || text.starts_with("WARN ") =>
+            {
+                self.notifier.notify("agyva: quota threshold", text);
+            }
             _ => {}
         }
     }
 }
 
-pub fn watch(app: &App, io: &mut Io<'_>) -> Result<i32> {
-    let max_cycles = match app.env.get(ENV_MAX_CYCLES) {
-        None => None,
-        Some(v) => Some(
-            v.parse::<u64>()
-                .map_err(|_| Error::usage(format!("invalid {ENV_MAX_CYCLES}: {v}")))?,
-        ),
+pub(super) fn resolve_thresholds(
+    warn_cli: Option<f64>,
+    crit_cli: Option<f64>,
+    warn_prof: Option<f64>,
+    crit_prof: Option<f64>,
+    warn_cfg: f64,
+    crit_cfg: f64,
+) -> Result<(f64, f64)> {
+    let warn = warn_cli.or(warn_prof).unwrap_or(warn_cfg);
+    let crit = crit_cli.or(crit_prof).unwrap_or(crit_cfg);
+    if !warn.is_finite() || !(0.0..=100.0).contains(&warn) {
+        return Err(Error::usage(
+            "--warn-below must be finite and between 0 and 100",
+        ));
+    }
+    if !crit.is_finite() || !(0.0..=100.0).contains(&crit) {
+        return Err(Error::usage(
+            "--critical-below must be finite and between 0 and 100",
+        ));
+    }
+    if crit > warn {
+        return Err(Error::usage(
+            "--critical-below must be less than or equal to --warn-below",
+        ));
+    }
+    Ok((warn, crit))
+}
+
+pub fn watch(app: &App, io: &mut Io<'_>, args: &super::WatchArgs) -> Result<i32> {
+    let profile = match args.profile.as_deref() {
+        Some(name) => app.resolve_active_profile(Some(name), None)?,
+        None => app.resolve_active_profile(None, None).ok().flatten(),
+    };
+    let (warn_pct, crit_pct) = resolve_thresholds(
+        args.warn_below,
+        args.critical_below,
+        profile.as_ref().and_then(|p| p.spec.warn_percent),
+        profile.as_ref().and_then(|p| p.spec.critical_percent),
+        app.config.warn_percent,
+        app.config.critical_percent,
+    )?;
+
+    let max_cycles = if args.once {
+        Some(1)
+    } else {
+        match app.env.get(ENV_MAX_CYCLES) {
+            None => None,
+            Some(v) => Some(
+                v.parse::<u64>()
+                    .map_err(|_| Error::usage(format!("invalid {ENV_MAX_CYCLES}: {v}")))?,
+            ),
+        }
     };
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
@@ -118,9 +183,9 @@ pub fn watch(app: &App, io: &mut Io<'_>) -> Result<i32> {
         }
         None => Duration::from_secs(app.config.watch_interval_secs),
     };
-    let mut cfg = WatchConfig::new(interval);
+    let mut cfg = WatchConfig::new(interval).with_thresholds(Some(warn_pct), Some(crit_pct));
     cfg.max_cycles = max_cycles;
-    let notifier: Box<dyn Notifier> = if app.config.desktop_notifications {
+    let notifier: Box<dyn Notifier> = if args.notify || app.config.desktop_notifications {
         Box::new(Desktop::new())
     } else {
         Box::new(Silent)
@@ -129,6 +194,7 @@ pub fn watch(app: &App, io: &mut Io<'_>) -> Result<i32> {
         io,
         notifier,
         stop: stop.clone(),
+        json_stream: args.json_stream,
         error: None,
     };
     let mut probe = AppProbe(app);

@@ -1,8 +1,13 @@
 //! Human-readable rendering. Pure functions returning strings.
 
+use serde::Serialize;
 use unicode_width::UnicodeWidthStr;
 
-use crate::core::doctor::{DoctorReport, Level};
+use super::StatuslineFormat;
+use crate::core::app_integrations::StatuslineData;
+use crate::core::checkpoints::CheckpointInfo;
+use crate::core::doctor::{DoctorFixReport, DoctorReport, Level};
+use crate::core::error::{Error, Result};
 use crate::core::status::StatusView;
 use crate::core::view::{AccountView, CurrentView, ListView};
 
@@ -146,4 +151,116 @@ pub fn render_doctor(r: &DoctorReport) -> String {
         }
     }
     out
+}
+
+pub fn render_doctor_fix(r: &DoctorFixReport) -> String {
+    let mut out = String::new();
+    if r.actions.is_empty() {
+        out.push_str("No safe fixes needed.\n");
+    } else {
+        for act in &r.actions {
+            out.push_str(&format!("fix: {act}\n"));
+        }
+    }
+    out.push_str(&render_doctor(&r.report));
+    out
+}
+
+pub fn render_checkpoints(items: &[CheckpointInfo], style: Style) -> String {
+    if items.is_empty() {
+        return "No saved checkpoints.\n".to_owned();
+    }
+    let rows: Vec<[String; 5]> = items
+        .iter()
+        .map(|c| {
+            [
+                c.name.clone(),
+                if c.pinned { "pinned" } else { "auto" }.to_owned(),
+                if c.valid { "valid" } else { "invalid" }.to_owned(),
+                c.created_at.map_or_else(
+                    || "-".into(),
+                    |t| t.format("%Y-%m-%d %H:%M UTC").to_string(),
+                ),
+                format!("{} B", c.size_bytes),
+            ]
+        })
+        .collect();
+    let head = ["NAME", "KIND", "STATE", "CREATED", "SIZE"];
+    let widths: Vec<usize> = (0..5)
+        .map(|c| {
+            rows.iter()
+                .map(|r| UnicodeWidthStr::width(r[c].as_str()))
+                .chain([head[c].len()])
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let line = |cells: &[String; 5]| -> String {
+        cells
+            .iter()
+            .zip(&widths)
+            .map(|(c, w)| pad(c, *w))
+            .collect::<Vec<_>>()
+            .join("  ")
+            .trim_end()
+            .to_owned()
+    };
+    let mut out = style.dim(&line(&head.map(str::to_owned))) + "\n";
+    for (row, item) in rows.iter().zip(items) {
+        let l = line(row);
+        out.push_str(&if item.pinned { style.bold(&l) } else { l });
+        out.push('\n');
+    }
+    out
+}
+
+pub fn render_statusline(data: &StatuslineData, fmt: StatuslineFormat) -> Result<String> {
+    match fmt {
+        StatuslineFormat::Compact => data.render("compact"),
+        StatuslineFormat::Full | StatuslineFormat::Plain => data.render("full"),
+        StatuslineFormat::Json => data.render("json"),
+        StatuslineFormat::Starship => {
+            let compact = data.render("compact")?;
+            Ok(format!("agyva:{compact}"))
+        }
+        StatuslineFormat::Tmux => {
+            let compact = data.render("compact")?;
+            let color = if data.suspended
+                || data.recovery_pending
+                || data.threshold_alert.as_deref() == Some("critical")
+            {
+                "red"
+            } else if data.threshold_alert.as_deref() == Some("warn") {
+                "yellow"
+            } else {
+                "green"
+            };
+            Ok(format!("#[fg={color}]{compact}#[default]"))
+        }
+        StatuslineFormat::Waybar => {
+            #[derive(Serialize)]
+            struct WaybarPayload {
+                text: String,
+                tooltip: String,
+                class: &'static str,
+            }
+            let text = data.render("compact")?;
+            let tooltip = data.render("full")?;
+            let class = if data.suspended {
+                "suspended"
+            } else if data.recovery_pending || data.threshold_alert.as_deref() == Some("critical") {
+                "critical"
+            } else if data.threshold_alert.as_deref() == Some("warn") {
+                "warning"
+            } else {
+                "ok"
+            };
+            serde_json::to_string(&WaybarPayload {
+                text,
+                tooltip,
+                class,
+            })
+            .map_err(|e| Error::format(format!("encoding waybar statusline json: {e}")))
+        }
+    }
 }

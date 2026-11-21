@@ -11,6 +11,52 @@ use crate::core::watch::{StopReason, WatchEvent};
 
 const BAR_CELLS: usize = 10;
 
+pub fn format_duration_short(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        if m == 0 {
+            format!("{h}h")
+        } else {
+            format!("{h}h{m}m")
+        }
+    } else {
+        let d = secs / 86_400;
+        let h = (secs % 86_400) / 3600;
+        if h == 0 {
+            format!("{d}d")
+        } else {
+            format!("{d}d{h}h")
+        }
+    }
+}
+
+fn burn_suffix(w: &WindowView) -> String {
+    let Some(br) = &w.burn_rate else {
+        return String::new();
+    };
+    let Some(rate) = br.percent_per_hour else {
+        return String::new();
+    };
+    if rate <= 0.0 {
+        return "  burn 0.0%/h".to_owned();
+    }
+    let eta = br
+        .eta_exhaustion_secs
+        .map(|s| format!(" ETA {}", format_duration_short(s)))
+        .unwrap_or_default();
+    let warn = if br.exhausts_before_reset == Some(true) {
+        "!"
+    } else {
+        ""
+    };
+    format!("  burn {rate:.1}%/h{eta}{warn}")
+}
+
 fn window(label: &str, w: Option<&WindowView>, now: DateTime<Utc>) -> String {
     match w {
         None => format!("{label} not reported"),
@@ -19,8 +65,9 @@ fn window(label: &str, w: Option<&WindowView>, now: DateTime<Utc>) -> String {
                 || "reset time unknown".to_owned(),
                 |t| format!("resets {}", until(now, t)),
             );
+            let burn = burn_suffix(w);
             format!(
-                "{label} {} {:>4}  {reset}",
+                "{label} {} {:>4}  {reset}{burn}",
                 bar(w.remaining_percent, BAR_CELLS),
                 percent_text(w.remaining_percent)
             )
@@ -99,6 +146,62 @@ pub fn render_usage(r: &UsageReport, st: Style) -> String {
             };
             out.push_str(&format!("    {label}: {}\n", u.text()));
         }
+    }
+    out
+}
+
+pub fn render_usage_compact(r: &UsageReport, st: Style) -> String {
+    let mut out = String::new();
+    if r.accounts.is_empty() {
+        out.push_str(
+            r.notice
+                .as_deref()
+                .unwrap_or("No accounts to show. Use --all to include every account."),
+        );
+        out.push('\n');
+        return out;
+    }
+    out.push_str(&st.dim(&format!(
+        "{:<3} {:<16} {:<6} {:<6} {:<10} {:<12} {}",
+        "#", "ALIAS", "5H", "WEEK", "FRESH", "HEALTH", "BURN / NOTE"
+    )));
+    out.push('\n');
+    for a in &r.accounts {
+        let (five, week) = a.lowest();
+        let p5 = five.map_or_else(|| "-".to_owned(), |w| percent_text(w.remaining_percent));
+        let pw = week.map_or_else(|| "-".to_owned(), |w| percent_text(w.remaining_percent));
+        let burn = [five, week]
+            .into_iter()
+            .flatten()
+            .filter_map(|w| {
+                w.burn_rate
+                    .as_ref()
+                    .and_then(|br| br.percent_per_hour.map(|r| (r, br.eta_exhaustion_secs)))
+            })
+            .filter(|(r, _)| *r > 0.0)
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(r, eta)| {
+                let e = eta
+                    .map(|s| format!(" ETA {}", format_duration_short(s)))
+                    .unwrap_or_default();
+                format!("{r:.1}%/h{e}")
+            })
+            .or_else(|| a.unavailable.as_ref().map(|u| truncate(&u.text(), 36)))
+            .unwrap_or_else(|| "-".to_owned());
+
+        let line = format!(
+            "{}{:<2} {} {:<6} {:<6} {:<10} {:<12} {}",
+            if a.active { "*" } else { " " },
+            a.number,
+            fit(&a.alias, 16),
+            p5,
+            pw,
+            a.freshness.label(),
+            a.health.label,
+            burn,
+        );
+        out.push_str(&if a.active { st.bold(&line) } else { line });
+        out.push('\n');
     }
     out
 }

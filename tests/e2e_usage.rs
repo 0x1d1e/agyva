@@ -711,3 +711,53 @@ fn route_list_reports_real_activation_mode() {
         r.out
     );
 }
+
+#[test]
+fn usage_renders_burn_rate_eta_and_compact_table() {
+    let sb = Sandbox::new();
+    sb.with_account();
+    sb.fake.ok(0.60, 0.80);
+
+    // First refresh populates quota.json and quota-history.json.
+    let first = sb.run(&["usage", "--json"]);
+    assert_eq!(first.code, 0, "{}{}", first.out, first.err);
+    let acct_id = json(&first)["accounts"][0]["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+
+    // Seed an earlier higher sample in quota-history.json (2 hours earlier at 80%)
+    // so burn rate is ~10.0%/h and ETA is ~6h.
+    let hist_path = sb.p("cache/quota-history.json");
+    let mut hist: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&hist_path).expect("history")).expect("json");
+    let earlier = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+    hist["accounts"][&acct_id]["Gemini Pro"]["five_hour"]
+        .as_array_mut()
+        .expect("five_hour array")
+        .insert(
+            0,
+            serde_json::json!({
+                "observed_at": earlier,
+                "remaining_percent": 80.0,
+                "reset_at": null
+            }),
+        );
+    std::fs::write(&hist_path, serde_json::to_string_pretty(&hist).unwrap()).unwrap();
+
+    let normal = sb.run(&["usage", "--no-refresh"]);
+    assert_eq!(normal.code, 0, "{}{}", normal.out, normal.err);
+    assert!(
+        normal.out.contains("%/h") && normal.out.contains("ETA"),
+        "expected burn rate and ETA: {}",
+        normal.out
+    );
+
+    let compact = sb.run(&["usage", "--no-refresh", "--compact"]);
+    assert_eq!(compact.code, 0, "{}{}", compact.out, compact.err);
+    assert!(
+        compact.out.contains("alice") && compact.out.contains("%/h") && compact.out.contains("ETA"),
+        "expected compact table with burn rate and ETA: {}",
+        compact.out
+    );
+}

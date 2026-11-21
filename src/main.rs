@@ -47,20 +47,33 @@ fn update_check_enabled(env: &Env) -> bool {
 /// (stderr would corrupt the screen), not `update` (it checks itself), not
 /// machine output (json/completions must stay exactly parseable).
 fn notice_allowed(cli: &Cli) -> bool {
-    let json = match &cli.command {
-        Some(Command::List(f) | Command::Current(f) | Command::Status(f) | Command::Doctor(f)) => {
-            f.json
-        }
+    if cli.quiet {
+        return false;
+    }
+    let machine = match &cli.command {
+        Some(Command::List(f) | Command::Current(f) | Command::Status(f)) => f.json,
+        Some(Command::Doctor(a)) => a.json,
+        Some(Command::Use(a)) => a.json,
         Some(Command::Usage(a)) => a.json,
         Some(Command::Health(a)) => a.json,
         Some(Command::Models(a)) => a.json,
         Some(Command::Route(a)) => a.json,
+        Some(Command::Endpoint(a)) => a.json,
+        Some(Command::Profile(a)) => a.json,
+        Some(Command::Checkpoints(a)) => a.json,
+        Some(Command::Watch(a)) => a.json_stream,
+        Some(Command::Monitor(a)) => a.json || a.json_stream,
         _ => false,
     };
-    !json
+    !machine
         && !matches!(
             cli.command,
-            None | Some(Command::Completions { .. }) | Some(Command::Update { .. })
+            None | Some(Command::Completions { .. })
+                | Some(Command::Update { .. })
+                | Some(Command::Statusline(_))
+                | Some(Command::Env(_))
+                | Some(Command::Exec(_))
+                | Some(Command::Bridge(_))
         )
 }
 
@@ -169,5 +182,29 @@ mod tests {
 
         let route_plan_plain = Cli::try_parse_from(["agyva", "route", "plan", "work"]).unwrap();
         assert!(notice_allowed(&route_plan_plain));
+    }
+
+    #[test]
+    fn notice_allowed_skips_v013_machine_and_quiet_commands() {
+        for argv in [
+            vec!["agyva", "statusline"],
+            vec!["agyva", "env", "--endpoint", "ep1"],
+            vec!["agyva", "exec", "--", "echo", "hi"],
+            vec!["agyva", "bridge", "--endpoint", "ep1"],
+            vec!["agyva", "monitor", "--json"],
+            vec!["agyva", "monitor", "--json-stream"],
+            vec!["agyva", "watch", "--json-stream"],
+            vec!["agyva", "endpoint", "list", "--json"],
+            vec!["agyva", "profile", "list", "--json"],
+            vec!["agyva", "checkpoints", "list", "--json"],
+            vec!["agyva", "doctor", "--fix", "--json"],
+            vec!["agyva", "-q", "list"],
+        ] {
+            let cli = Cli::try_parse_from(&argv).unwrap();
+            assert!(
+                !notice_allowed(&cli),
+                "expected notice disallowed for {argv:?}"
+            );
+        }
     }
 }
