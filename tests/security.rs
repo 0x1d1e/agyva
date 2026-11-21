@@ -242,3 +242,250 @@ fn wrong_passphrase_is_rejected() {
         "{err:?}"
     );
 }
+
+#[test]
+fn rekey_passphrase_rotation_reencrypts_snapshots_and_checkpoints_and_scrubs_env() {
+    use agyva::agy::compatibility::{Compat, parse_version};
+    use agyva::agy::credentials::NativeAuth;
+    use agyva::config::Config;
+    use agyva::core::app::App;
+    use agyva::core::checkpoint::CheckpointStore;
+    use agyva::paths::{AgyPaths, Env};
+    use agyva::storage::vault_key::{ENV_NEW_PASSPHRASE, KdfParams, StaticPassphrase};
+    use std::sync::Arc;
+
+    let rig = Rig::new();
+    rig.keyring.set_failure(Some(StoreErrorKind::Unavailable));
+    rig.add_all(&[ALICE, BOB]);
+    rig.app().switch("alice", false).unwrap();
+    rig.app().switch("bob", false).unwrap();
+
+    let ckpts = CheckpointStore::new(rig.dirs().checkpoint_dir())
+        .list()
+        .unwrap();
+    assert!(!ckpts.is_empty(), "switches created checkpoints");
+
+    // Build via App::new with AGYVA_NEW_PASSPHRASE in Env to verify it is
+    // immediately scrubbed from `app.env` while still usable for rekey.
+    let mut env = Env::from_pairs([
+        ("AGYVA_PASSPHRASE", "synthetic-passphrase"),
+        (ENV_NEW_PASSPHRASE, "rotated-passphrase-2"),
+    ]);
+    let app = App::new(
+        rig.dirs(),
+        AgyPaths {
+            home: rig.agy_home(),
+        },
+        env.clone(),
+        Config::default(),
+    )
+    .with_secrets(Arc::new(rig.keyring.clone()))
+    .with_native(NativeAuth::new(Arc::new(rig.native.clone()), None))
+    .with_kdf(KdfParams::with_cost(8, 1, 1).unwrap())
+    .with_compat(Compat::Supported(parse_version("agy 1.5.9").unwrap()));
+    assert!(app.env.get(ENV_NEW_PASSPHRASE).is_none());
+    assert!(app.env.get("AGYVA_PASSPHRASE").is_none());
+    let _ = env.take(ENV_NEW_PASSPHRASE);
+
+    let outcome = app.rekey(None).unwrap();
+    assert_eq!(outcome.mode, "passphrase");
+    assert_eq!(outcome.snapshots, 2);
+    assert_eq!(outcome.checkpoints, ckpts.len());
+    assert!(outcome.warnings.is_empty());
+
+    // Old passphrase no longer unlocks.
+    let old_app = rig.app();
+    assert_eq!(old_app.vault().unwrap_err().kind(), ErrorKind::Vault);
+
+    // New passphrase unlocks snapshots AND checkpoints.
+    let new_app = rig
+        .app()
+        .with_passphrases(Arc::new(StaticPassphrase("rotated-passphrase-2".into())));
+    let new_vault = new_app.vault().unwrap();
+    assert!(
+        read_snapshot(
+            new_vault,
+            &rig.dirs().snapshot_file(&id_of(ALICE)),
+            &id_of(ALICE)
+        )
+        .is_ok()
+    );
+    assert!(
+        read_snapshot(
+            new_vault,
+            &rig.dirs().snapshot_file(&id_of(BOB)),
+            &id_of(BOB)
+        )
+        .is_ok()
+    );
+    let store = CheckpointStore::new(rig.dirs().checkpoint_dir());
+    for name in &ckpts {
+        let stem = name
+            .strip_suffix(".keep.ckpt")
+            .or_else(|| name.strip_suffix(".ckpt"))
+            .unwrap();
+        let txn_id = stem.rsplit_once('-').unwrap().1;
+        assert!(store.read(new_vault, name, txn_id).is_ok(), "{name}");
+    }
+    new_app.switch("alice", false).unwrap();
+}
+
+#[test]
+fn rekey_keyring_rotation_invalidates_old_key_and_preserves_vault() {
+    use agyva::core::checkpoint::CheckpointStore;
+
+    let rig = Rig::new();
+    rig.add_all(&[ALICE, BOB]);
+    rig.app().switch("alice", false).unwrap();
+
+    let old_raw = rig
+        .keyring
+        .get(KEY_SERVICE, KEY_USER)
+        .unwrap()
+        .expect("old keyring entry");
+    let old_vault = rig.app().vault().unwrap().clone();
+
+    let outcome = rig.app().rekey(None).unwrap();
+    assert_eq!(outcome.mode, "keyring");
+    assert_eq!(outcome.snapshots, 2);
+    assert!(outcome.checkpoints >= 1);
+
+    let new_raw = rig
+        .keyring
+        .get(KEY_SERVICE, KEY_USER)
+        .unwrap()
+        .expect("new keyring entry");
+    assert_ne!(old_raw.as_slice(), new_raw.as_slice());
+
+    // Old key fails on re-encrypted snapshots and checkpoints.
+    assert!(
+        read_snapshot(
+            &old_vault,
+            &rig.dirs().snapshot_file(&id_of(ALICE)),
+            &id_of(ALICE)
+        )
+        .is_err()
+    );
+    let store = CheckpointStore::new(rig.dirs().checkpoint_dir());
+    for name in store.list().unwrap() {
+        let txn_id = name
+            .strip_suffix(".ckpt")
+            .unwrap()
+            .rsplit_once('-')
+            .unwrap()
+            .1;
+        assert!(store.read(&old_vault, &name, txn_id).is_err());
+    }
+
+    // New key works seamlessly.
+    let fresh_app = rig.app();
+    fresh_app.switch("bob", false).unwrap();
+    assert_eq!(rig.live_id(), Some(id_of(BOB)));
+}
+
+#[test]
+fn rekey_migrates_between_passphrase_and_keyring() {
+    use agyva::storage::vault_key::StaticPassphrase;
+    use std::sync::Arc;
+
+    // 1. Passphrase -> Keyring
+    let rig = Rig::new();
+    rig.keyring.set_failure(Some(StoreErrorKind::Unavailable));
+    rig.add_all(&[ALICE, BOB]);
+    rig.app().switch("alice", false).unwrap();
+
+    // Re-enable keyring and migrate to keyring mode.
+    rig.keyring.set_failure(None);
+    let outcome = rig.app().rekey(Some(VaultKeyMode::Keyring)).unwrap();
+    assert_eq!(outcome.mode, "keyring");
+    assert!(rig.keyring.get(KEY_SERVICE, KEY_USER).unwrap().is_some());
+    let meta = std::fs::read_to_string(rig.dirs().vault_meta_file()).unwrap();
+    assert!(meta.contains("\"keyring\""));
+    assert!(!meta.contains("argon2id"));
+
+    // Unlock works without matching the old passphrase.
+    let no_pass = rig
+        .app()
+        .with_passphrases(Arc::new(StaticPassphrase("wrong".into())));
+    no_pass.switch("bob", false).unwrap();
+
+    // 2. Keyring -> Passphrase
+    let outcome2 = rig
+        .app()
+        .with_new_passphrases(Arc::new(StaticPassphrase("migrated-passphrase".into())))
+        .rekey(Some(VaultKeyMode::Passphrase))
+        .unwrap();
+    assert_eq!(outcome2.mode, "passphrase");
+    assert!(outcome2.warnings.is_empty());
+    assert!(
+        rig.keyring.get(KEY_SERVICE, KEY_USER).unwrap().is_none(),
+        "old keyring key removed after migration to passphrase"
+    );
+    let migrated_app = rig
+        .app()
+        .with_passphrases(Arc::new(StaticPassphrase("migrated-passphrase".into())));
+    migrated_app.switch("alice", false).unwrap();
+    assert_eq!(rig.live_id(), Some(id_of(ALICE)));
+}
+
+#[test]
+fn rekey_refuses_when_pending_recovery_or_bad_passphrase_and_rolls_back_on_error() {
+    use agyva::storage::vault_key::StaticPassphrase;
+    use std::sync::Arc;
+
+    // Pending recovery blocks rekey.
+    let rig = Rig::new();
+    rig.keyring.set_failure(Some(StoreErrorKind::Unavailable));
+    rig.add_all(&[ALICE, BOB]);
+    let _ = rig
+        .app_with(Failpoints::armed("after-native-write", Fault::Crash))
+        .switch("alice", false);
+    let err = rig
+        .app()
+        .with_new_passphrases(Arc::new(StaticPassphrase("new-valid-pass".into())))
+        .rekey(None)
+        .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::RecoveryRequired);
+    rig.app()
+        .recover(agyva::core::recover::RecoverMode::Auto)
+        .unwrap();
+
+    // Short new passphrase leaves vault untouched and old passphrase working.
+    let err = rig
+        .app()
+        .with_new_passphrases(Arc::new(StaticPassphrase("short".into())))
+        .rekey(None)
+        .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Vault);
+    rig.app().switch("bob", false).unwrap();
+
+    // Wrong current passphrase leaves vault untouched.
+    let err = rig
+        .app()
+        .with_passphrases(Arc::new(StaticPassphrase("wrong-current".into())))
+        .with_new_passphrases(Arc::new(StaticPassphrase("new-valid-pass".into())))
+        .rekey(None)
+        .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Vault);
+    rig.app().switch("alice", false).unwrap();
+
+    // Simulated error before vault.json commit rolls back snapshots, checkpoints,
+    // and keyring key cleanly.
+    let kr_rig = Rig::new();
+    kr_rig.add_all(&[ALICE, BOB]);
+    kr_rig.app().switch("alice", false).unwrap();
+    let before_key = kr_rig.keyring.get(KEY_SERVICE, KEY_USER).unwrap().unwrap();
+    let err = kr_rig
+        .app_with(Failpoints::armed("rekey-before-meta", Fault::Error))
+        .rekey(None)
+        .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Backend);
+    let after_key = kr_rig.keyring.get(KEY_SERVICE, KEY_USER).unwrap().unwrap();
+    assert_eq!(before_key.as_slice(), after_key.as_slice());
+    kr_rig.app().switch("bob", false).unwrap();
+
+    // No vault yet is refused cleanly.
+    let empty = Rig::new();
+    let err = empty.app().rekey(None).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Refused);
+}

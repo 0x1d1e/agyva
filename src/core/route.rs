@@ -7,7 +7,7 @@ use serde::Serialize;
 use crate::core::app::App;
 use crate::core::error::Result;
 use crate::core::health::AccountHealth;
-use crate::core::quota::{Freshness, FreshnessPolicy, UnavailableReason};
+use crate::core::quota::{Freshness, FreshnessPolicy, Unavailable, UnavailableReason};
 use crate::core::usage::AccountUsage;
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,14 +65,65 @@ fn tier(r: &RouteRow) -> u8 {
 /// The fullest counting window sets the share; weekly budgets decide renewal
 /// order before five-hour rate caps. Stable sorting preserves registry order.
 pub fn rank(accounts: &[AccountUsage], now: DateTime<Utc>, policy: FreshnessPolicy) -> RoutePlan {
+    rank_with_mode(accounts, now, RankMode::Strict { policy })
+}
+
+#[derive(Clone, Copy)]
+enum RankMode {
+    Strict {
+        policy: FreshnessPolicy,
+    },
+    AutoSwitch {
+        active_policy: FreshnessPolicy,
+        candidate_policy: FreshnessPolicy,
+    },
+}
+
+impl RankMode {
+    fn strict_policy(self) -> FreshnessPolicy {
+        match self {
+            Self::Strict { policy } => policy,
+            Self::AutoSwitch { active_policy, .. } => active_policy,
+        }
+    }
+
+    fn policy_for(self, active: bool) -> FreshnessPolicy {
+        match self {
+            Self::Strict { policy } => policy,
+            Self::AutoSwitch {
+                active_policy,
+                candidate_policy,
+            } => {
+                if active {
+                    active_policy
+                } else {
+                    candidate_policy
+                }
+            }
+        }
+    }
+
+    fn allow_standby_post_reset(self, active: bool) -> bool {
+        matches!(self, Self::AutoSwitch { .. }) && !active
+    }
+}
+
+fn rank_with_mode(accounts: &[AccountUsage], now: DateTime<Utc>, mode: RankMode) -> RoutePlan {
+    let strict_policy = mode.strict_policy();
     let mut rows: Vec<_> = accounts
         .iter()
         .map(|a| {
-            let freshness = policy.classify(a.observed_at, now);
+            let row_policy = mode.policy_for(a.active);
+            let standby = mode.allow_standby_post_reset(a.active);
+            let strict_freshness = strict_policy.classify(a.observed_at, now);
+            let freshness = row_policy.classify(a.observed_at, now);
             let mut remaining: Option<f64> = None;
             let mut rate: Option<f64> = None;
             let mut renewals = [None, None];
             let mut invalid_window = false;
+            let mut has_windows = false;
+            let mut any_post_reset = false;
+            let mut used_candidate_cache = false;
             for g in a.groups.iter().filter(|g| !g.disabled) {
                 invalid_window |= g.weekly.is_none() || g.five_hour.is_none();
                 for (i, w) in [g.weekly.as_ref(), g.five_hour.as_ref()]
@@ -80,17 +131,47 @@ pub fn rank(accounts: &[AccountUsage], now: DateTime<Utc>, policy: FreshnessPoli
                     .enumerate()
                 {
                     if let Some(w) = w {
-                        invalid_window |= !w.remaining_percent.is_finite()
-                            || !(0.0..=100.0).contains(&w.remaining_percent)
-                            || w.reset_at.is_none_or(|at| at <= now)
-                            || policy.classify(Some(w.observed_at), now) != Freshness::Fresh;
-                        remaining = Some(
-                            remaining.map_or(w.remaining_percent, |v| v.min(w.remaining_percent)),
-                        );
-                        if i == 1 {
-                            rate = Some(
-                                rate.map_or(w.remaining_percent, |v| v.min(w.remaining_percent)),
+                        has_windows = true;
+                        let window_fresh =
+                            row_policy.classify(Some(w.observed_at), now) == Freshness::Fresh;
+                        let reset_passed = w.reset_at.is_some_and(|at| at <= now);
+                        if standby {
+                            invalid_window |= !w.remaining_percent.is_finite()
+                                || !(0.0..=100.0).contains(&w.remaining_percent)
+                                || w.reset_at.is_none()
+                                || !window_fresh;
+                            if strict_policy.classify(Some(w.observed_at), now)
+                                != Freshness::Fresh
+                            {
+                                used_candidate_cache = true;
+                            }
+                            if reset_passed {
+                                any_post_reset = true;
+                            } else {
+                                remaining = Some(
+                                    remaining
+                                        .map_or(w.remaining_percent, |v| v.min(w.remaining_percent)),
+                                );
+                                if i == 1 {
+                                    rate = Some(rate.map_or(w.remaining_percent, |v| {
+                                        v.min(w.remaining_percent)
+                                    }));
+                                }
+                            }
+                        } else {
+                            invalid_window |= !w.remaining_percent.is_finite()
+                                || !(0.0..=100.0).contains(&w.remaining_percent)
+                                || w.reset_at.is_none_or(|at| at <= now)
+                                || !window_fresh;
+                            remaining = Some(
+                                remaining
+                                    .map_or(w.remaining_percent, |v| v.min(w.remaining_percent)),
                             );
+                            if i == 1 {
+                                rate = Some(
+                                    rate.map_or(w.remaining_percent, |v| v.min(w.remaining_percent)),
+                                );
+                            }
                         }
                         if let Some(reset) = w.reset_at {
                             renewals[i] =
@@ -113,21 +194,46 @@ pub fn rank(accounts: &[AccountUsage], now: DateTime<Utc>, policy: FreshnessPoli
                     UnavailableReason::NotRefreshable | UnavailableReason::TooSoon
                 )
             });
-            let eligible = !blocked_health
-                && !blocked_error
-                && freshness == Freshness::Fresh
-                && !invalid_window
-                && remaining.is_some_and(|v| v > 0.0);
+            let exhausted = remaining.is_some_and(|v| v <= 0.0);
+            let eligible = if standby {
+                !blocked_health
+                    && !blocked_error
+                    && freshness == Freshness::Fresh
+                    && !invalid_window
+                    && has_windows
+                    && !exhausted
+            } else {
+                !blocked_health
+                    && !blocked_error
+                    && freshness == Freshness::Fresh
+                    && !invalid_window
+                    && remaining.is_some_and(|v| v > 0.0)
+            };
             let why = if blocked_health {
                 a.health.state.label().to_owned()
             } else if blocked_error {
                 "unavailable reading".into()
-            } else if remaining.is_none() {
+            } else if !has_windows {
                 "quota unknown".into()
             } else if freshness != Freshness::Fresh || invalid_window {
                 "quota stale, incomplete, expired, or reset passed; refresh required".into()
-            } else if remaining.is_some_and(|v| v <= 0.0) {
+            } else if exhausted {
                 "quota exhausted".into()
+            } else if standby
+                && (strict_freshness != Freshness::Fresh || used_candidate_cache || any_post_reset)
+            {
+                match (any_post_reset, remaining) {
+                    (true, Some(rem)) => format!(
+                        "candidate cache (post-reset); {rem:.0}% remains in un-reset windows; weekly renewal before rate cap"
+                    ),
+                    (true, None) => {
+                        "candidate cache (post-reset); all windows reset since observation".into()
+                    }
+                    (false, Some(rem)) => format!(
+                        "candidate cache; {rem:.0}% remains in fullest window; weekly renewal before rate cap"
+                    ),
+                    (false, None) => "candidate cache; quota unknown".into(),
+                }
             } else {
                 format!(
                     "{} cache; {:.0}% remains in fullest window; weekly renewal before rate cap",
@@ -180,6 +286,101 @@ fn group_label(group: &str, model: Option<&str>) -> String {
     }
 }
 
+fn is_blocked_health(state: AccountHealth) -> bool {
+    matches!(
+        state,
+        AccountHealth::TermsSuspended
+            | AccountHealth::AccessRevoked
+            | AccountHealth::AuthenticationRequired
+            | AccountHealth::TokenExpired
+            | AccountHealth::NetworkUnavailable
+    )
+}
+
+fn is_blocked_error(unavailable: Option<&Unavailable>) -> bool {
+    unavailable.is_some_and(|u| {
+        !matches!(
+            u.reason,
+            UnavailableReason::NotRefreshable | UnavailableReason::TooSoon
+        )
+    })
+}
+
+pub(crate) struct MappedGroup {
+    pub group_name: String,
+    pub model: Option<String>,
+}
+
+pub(crate) fn resolve_mapped_group(
+    usage: &AccountUsage,
+    group_config: Option<&crate::core::route_config::RouteGroup>,
+    config: &crate::core::route_config::RoutingFile,
+    requested: &str,
+    models_cache: &crate::core::catalog::ModelsCache,
+    models_cache_secs: u64,
+    now: DateTime<Utc>,
+) -> std::result::Result<MappedGroup, String> {
+    // The catalog is consulted first, whatever the whole-account
+    // verdict was: an unrelated exhausted bucket must never answer
+    // a question about this family.
+    let state = models_cache.read_state(&usage.id, models_cache_secs, now);
+    let support = crate::core::catalog::offers_family(&state, requested);
+    if !support.eligible() {
+        let fix = match support {
+            crate::core::catalog::FamilySupport::UnknownCatalog => " (run `agyva models`)",
+            _ => "",
+        };
+        return Err(format!("{requested}: {}{fix}", support.reason()));
+    }
+    // An effort-suffixed id (`gemini-4-carbon-high`) is the same
+    // family as its base for mapping purposes. The catalog decides
+    // the base: `offers_family` only reports `Supported(family)`
+    // when this account's observation lists that exact id, so a
+    // standalone id that merely ends in an effort word resolves to
+    // itself and is never silently re-based.
+    let family = match &support {
+        crate::core::catalog::FamilySupport::Supported(f)
+            if !f.is_empty() && f.eq_ignore_ascii_case(requested) =>
+        {
+            requested
+        }
+        crate::core::catalog::FamilySupport::Supported(f) if !f.is_empty() => f.as_str(),
+        _ => requested,
+    };
+    let declared = match group_config {
+        Some(g) => g
+            .models
+            .get(family)
+            .or_else(|| g.models.get(requested))
+            .cloned(),
+        None => config
+            .groups
+            .values()
+            .find_map(|g| g.models.get(family).or_else(|| g.models.get(requested)))
+            .cloned(),
+    };
+    let views = usage
+        .groups
+        .iter()
+        .map(|g| crate::core::catalog::GroupView {
+            group: g.group.as_str(),
+            model: g.model.as_deref(),
+        });
+    let crate::core::catalog::FamilyGroups::Mapped((group_name, model)) =
+        crate::core::catalog::map_family_to_groups(family, declared.as_deref(), views)
+    else {
+        // No group reports this family and none is declared: the
+        // catalog listed it, but nothing local says which windows
+        // would pay for it, so the whole-account share is NOT
+        // evidence about this family. Excluded, with the fix spelled
+        // out — never silently promoted on unrelated quota.
+        return Err(format!(
+            "{requested}: no quota group reports this family; declare it in routing.toml [groups.<name>.models]"
+        ));
+    };
+    Ok(MappedGroup { group_name, model })
+}
+
 impl App {
     pub fn route_plan_at(&self, now: DateTime<Utc>) -> Result<RoutePlan> {
         Ok(rank(
@@ -190,6 +391,18 @@ impl App {
     }
 
     pub fn route_group_at(&self, group: Option<&str>, now: DateTime<Utc>) -> Result<RoutePlan> {
+        let mode = RankMode::Strict {
+            policy: FreshnessPolicy::new(self.config.quota_fresh_secs),
+        };
+        self.route_group_at_with_mode(group, now, mode)
+    }
+
+    fn route_group_at_with_mode(
+        &self,
+        group: Option<&str>,
+        now: DateTime<Utc>,
+        mode: RankMode,
+    ) -> Result<RoutePlan> {
         use crate::core::route_config::{DeclaredPlan, Ranking, RoutingFile};
         let config = RoutingFile::load(&self.dirs.config.join("routing.toml"))?;
         let group = config.group(group)?;
@@ -216,11 +429,7 @@ impl App {
                 )
             });
         }
-        let mut plan = rank(
-            &accounts,
-            now,
-            FreshnessPolicy::new(self.config.quota_fresh_secs),
-        );
+        let mut plan = rank_with_mode(&accounts, now, mode);
         if group.ranking == Ranking::Priority {
             plan.accounts
                 .sort_by_key(|row| (!row.eligible, accounts.iter().position(|a| a.id == row.id)));
@@ -282,8 +491,42 @@ impl App {
         for_model: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<RoutePlan> {
+        let mode = RankMode::Strict {
+            policy: FreshnessPolicy::new(self.config.quota_fresh_secs),
+        };
+        self.route_group_with_mode(group, for_model, now, mode)
+    }
+
+    /// Auto-switch candidate-aware plan: preserves strict `quota_fresh_secs`
+    /// and `reset_at > now` for the active account while allowing standby
+    /// candidates up to `auto_switch_candidate_max_age_secs` and passed
+    /// window resets.
+    pub fn auto_route_group_for(
+        &self,
+        group: Option<&str>,
+        for_model: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<RoutePlan> {
+        let candidate_max_age_secs = self
+            .config
+            .auto_switch_candidate_max_age_secs
+            .max(self.config.quota_fresh_secs);
+        let mode = RankMode::AutoSwitch {
+            active_policy: FreshnessPolicy::new(self.config.quota_fresh_secs),
+            candidate_policy: FreshnessPolicy::new(candidate_max_age_secs),
+        };
+        self.route_group_with_mode(group, for_model, now, mode)
+    }
+
+    fn route_group_with_mode(
+        &self,
+        group: Option<&str>,
+        for_model: Option<&str>,
+        now: DateTime<Utc>,
+        mode: RankMode,
+    ) -> Result<RoutePlan> {
         let Some(requested) = for_model.map(str::trim).filter(|w| !w.is_empty()) else {
-            return self.route_group_at(group, now);
+            return self.route_group_at_with_mode(group, now, mode);
         };
         let config =
             crate::core::route_config::RoutingFile::load(&self.dirs.config.join("routing.toml"))?;
@@ -291,122 +534,84 @@ impl App {
             Some(name) => Some(config.group(Some(name))?),
             None => None,
         };
-        let policy = FreshnessPolicy::new(self.config.quota_fresh_secs);
-        let mut plan = self.route_group_at(group, now)?;
+        let strict_policy = mode.strict_policy();
+        let mut plan = self.route_group_at_with_mode(group, now, mode)?;
         let usages = self.account_usages(None, now)?;
         let cache = self.models_cache();
         for row in &mut plan.accounts {
-            // The catalog is consulted first, whatever the whole-account
-            // verdict was: an unrelated exhausted bucket must never answer
-            // a question about this family.
-            let state = cache.read_state(&row.id, self.config.models_cache_secs, now);
-            let support = crate::core::catalog::offers_family(&state, requested);
-            if !support.eligible() {
-                row.eligible = false;
-                let fix = match support {
-                    crate::core::catalog::FamilySupport::UnknownCatalog => " (run `agyva models`)",
-                    _ => "",
-                };
-                row.why = format!("{requested}: {}{fix}", support.reason());
-                continue;
-            }
-            // An effort-suffixed id (`gemini-4-carbon-high`) is the same
-            // family as its base for mapping purposes. The catalog decides
-            // the base: `offers_family` only reports `Supported(family)`
-            // when this account's observation lists that exact id, so a
-            // standalone id that merely ends in an effort word resolves to
-            // itself and is never silently re-based.
-            let family = match &support {
-                crate::core::catalog::FamilySupport::Supported(f)
-                    if !f.is_empty() && f.eq_ignore_ascii_case(requested) =>
-                {
-                    requested
-                }
-                crate::core::catalog::FamilySupport::Supported(f) if !f.is_empty() => f.as_str(),
-                _ => requested,
-            };
-            let declared = match &group_config {
-                Some(g) => g
-                    .models
-                    .get(family)
-                    .or_else(|| g.models.get(requested))
-                    .cloned(),
-                None => config
-                    .groups
-                    .values()
-                    .find_map(|g| g.models.get(family).or_else(|| g.models.get(requested)))
-                    .cloned(),
-            };
             let Some(usage) = usages.iter().find(|a| a.id == row.id) else {
                 continue;
             };
-            let views = usage
-                .groups
-                .iter()
-                .map(|g| crate::core::catalog::GroupView {
-                    group: g.group.as_str(),
-                    model: g.model.as_deref(),
-                });
-            let crate::core::catalog::FamilyGroups::Mapped((group_name, model)) =
-                crate::core::catalog::map_family_to_groups(family, declared.as_deref(), views)
-            else {
-                // No group reports this family and none is declared: the
-                // catalog listed it, but nothing local says which windows
-                // would pay for it, so the whole-account share is NOT
-                // evidence about this family. Excluded, with the fix spelled
-                // out — never silently promoted on unrelated quota.
-                row.eligible = false;
-                row.why = format!(
-                    "{requested}: no quota group reports this family; declare it in routing.toml [groups.<name>.models]"
-                );
-                continue;
+            let mapped = match resolve_mapped_group(
+                usage,
+                group_config.as_ref(),
+                &config,
+                requested,
+                &cache,
+                self.config.models_cache_secs,
+                now,
+            ) {
+                Ok(m) => m,
+                Err(why) => {
+                    row.eligible = false;
+                    row.why = why;
+                    continue;
+                }
             };
-            let windows: Vec<&crate::core::usage::WindowView> = usage
+            let matching_groups: Vec<_> = usage
                 .groups
                 .iter()
                 .filter(|g| {
-                    !g.disabled && g.group == group_name && g.model.as_deref() == model.as_deref()
+                    !g.disabled
+                        && g.group == mapped.group_name
+                        && g.model.as_deref() == mapped.model.as_deref()
                 })
+                .collect();
+            let windows: Vec<&crate::core::usage::WindowView> = matching_groups
+                .iter()
                 .flat_map(|g| g.five_hour.iter().chain(g.weekly.iter()))
                 .collect();
             if windows.is_empty() {
                 row.eligible = false;
                 row.why = format!(
                     "{requested}: mapped quota group {} reports no windows; refresh required",
-                    group_label(&group_name, model.as_deref())
+                    group_label(&mapped.group_name, mapped.model.as_deref())
                 );
                 continue;
             }
-            // Re-derive the headline numbers from the mapped group only.
-            let remaining = windows.iter().map(|w| w.remaining_percent).reduce(f64::min);
-            let rate = usage
-                .groups
+            let standby = mode.allow_standby_post_reset(row.active);
+            let row_policy = mode.policy_for(row.active);
+            let strict_freshness = strict_policy.classify(usage.observed_at, now);
+            let any_post_reset = windows
                 .iter()
-                .filter(|g| {
-                    !g.disabled && g.group == group_name && g.model.as_deref() == model.as_deref()
-                })
+                .any(|w| w.reset_at.is_some_and(|at| at <= now));
+            let used_candidate_cache = windows
+                .iter()
+                .any(|w| strict_policy.classify(Some(w.observed_at), now) != Freshness::Fresh);
+
+            // Re-derive the headline numbers from the mapped group only.
+            let remaining = if standby {
+                windows
+                    .iter()
+                    .filter(|w| w.reset_at.is_some_and(|at| at > now))
+                    .map(|w| w.remaining_percent)
+                    .reduce(f64::min)
+            } else {
+                windows.iter().map(|w| w.remaining_percent).reduce(f64::min)
+            };
+            let rate = matching_groups
+                .iter()
                 .filter_map(|g| g.five_hour.as_ref())
+                .filter(|w| !standby || w.reset_at.is_some_and(|at| at > now))
                 .map(|w| w.remaining_percent)
                 .reduce(f64::min);
             let renewals = [
-                usage
-                    .groups
+                matching_groups
                     .iter()
-                    .filter(|g| {
-                        !g.disabled
-                            && g.group == group_name
-                            && g.model.as_deref() == model.as_deref()
-                    })
                     .filter_map(|g| g.weekly.as_ref().and_then(|w| w.reset_at))
                     .min(),
-                usage
-                    .groups
+                matching_groups
                     .iter()
-                    .filter(|g| {
-                        !g.disabled
-                            && g.group == group_name
-                            && g.model.as_deref() == model.as_deref()
-                    })
                     .filter_map(|g| g.five_hour.as_ref().and_then(|w| w.reset_at))
                     .min(),
             ];
@@ -418,30 +623,22 @@ impl App {
             let window_ok = windows.iter().all(|w| {
                 w.remaining_percent.is_finite()
                     && (0.0..=100.0).contains(&w.remaining_percent)
-                    && w.reset_at.is_some_and(|at| at > now)
-                    && policy.classify(Some(w.observed_at), now) == Freshness::Fresh
-            }) && usage
-                .groups
+                    && if standby {
+                        w.reset_at.is_some()
+                    } else {
+                        w.reset_at.is_some_and(|at| at > now)
+                    }
+                    && row_policy.classify(Some(w.observed_at), now) == Freshness::Fresh
+            }) && matching_groups
                 .iter()
-                .filter(|g| {
-                    !g.disabled && g.group == group_name && g.model.as_deref() == model.as_deref()
-                })
                 .all(|g| g.five_hour.is_some() && g.weekly.is_some());
-            let health_ok = !matches!(
-                usage.health.state,
-                AccountHealth::TermsSuspended
-                    | AccountHealth::AccessRevoked
-                    | AccountHealth::AuthenticationRequired
-                    | AccountHealth::TokenExpired
-                    | AccountHealth::NetworkUnavailable
-            );
-            let error_ok = usage.unavailable.as_ref().is_none_or(|u| {
-                matches!(
-                    u.reason,
-                    UnavailableReason::NotRefreshable | UnavailableReason::TooSoon
-                )
-            });
-            let enough = remaining.is_some_and(|v| v > 0.0);
+            let health_ok = !is_blocked_health(usage.health.state);
+            let error_ok = !is_blocked_error(usage.unavailable.as_ref());
+            let enough = if standby {
+                remaining.is_none_or(|v| v > 0.0)
+            } else {
+                remaining.is_some_and(|v| v > 0.0)
+            };
             if !health_ok {
                 row.eligible = false;
                 row.why = usage.health.state.label().to_owned();
@@ -460,12 +657,33 @@ impl App {
                 row.why = format!("{requested}: mapped quota exhausted");
             } else {
                 row.eligible = true;
-                row.why = format!(
-                    "{requested}: {} cache; {:.0}% remains in {}",
-                    row.freshness.label(),
-                    remaining.unwrap_or_default(),
-                    group_label(&group_name, model.as_deref())
-                );
+                let label = group_label(&mapped.group_name, mapped.model.as_deref());
+                if standby
+                    && (strict_freshness != Freshness::Fresh
+                        || used_candidate_cache
+                        || any_post_reset)
+                {
+                    row.why = match (any_post_reset, remaining) {
+                        (true, Some(rem)) => format!(
+                            "{requested}: candidate cache (post-reset); {rem:.0}% remains in {label}"
+                        ),
+                        (true, None) => format!(
+                            "{requested}: candidate cache (post-reset); all windows reset in {label}"
+                        ),
+                        (false, Some(rem)) => {
+                            format!("{requested}: candidate cache; {rem:.0}% remains in {label}")
+                        }
+                        (false, None) => {
+                            format!("{requested}: candidate cache; quota unknown in {label}")
+                        }
+                    };
+                } else {
+                    row.why = format!(
+                        "{requested}: {} cache; {:.0}% remains in {label}",
+                        row.freshness.label(),
+                        remaining.unwrap_or_default(),
+                    );
+                }
             }
         }
         // The re-scope above changes every row's evidence, so the order

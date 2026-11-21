@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use std::io::IsTerminal;
 use std::io::Write as _;
 use std::process::ExitCode;
@@ -51,6 +53,8 @@ fn notice_allowed(cli: &Cli) -> bool {
         }
         Some(Command::Usage(a)) => a.json,
         Some(Command::Health(a)) => a.json,
+        Some(Command::Models(a)) => a.json,
+        Some(Command::Route(a)) => a.json,
         _ => false,
     };
     !json
@@ -72,9 +76,18 @@ fn main() -> ExitCode {
             // stderr with code 2. Only the informational exits check.
             let informational = !e.use_stderr();
             let _ = e.print();
+            let env = Env::from_process();
             if informational
-                && update_check_enabled(&Env::from_process())
-                && let Some(notice) = agyva::updater::startup_check(true).and_then(|c| c.notice())
+                && update_check_enabled(&env)
+                && let Some(notice) = agyva::updater::startup_check_cached(
+                    true,
+                    agyva::paths::Dirs::resolve(&env)
+                        .ok()
+                        .map(|d| d.update_check_cache_file())
+                        .as_deref(),
+                    chrono::Utc::now(),
+                )
+                .and_then(|c| c.notice())
             {
                 eprintln!("note: {notice}");
             }
@@ -100,13 +113,21 @@ fn main() -> ExitCode {
     };
     // The interactive view gets its notice on the dashboard (delivered by
     // the TUI worker, never stderr in the alternate screen). Every other
-    // enabled startup checks here; `agyva update` performs its own single
-    // metadata request instead.
+    // enabled startup with human-readable output checks here; `agyva update`
+    // performs its own single metadata request instead, and `--json` /
+    // `completions` never trigger an update check.
     if !tui
-        && !matches!(cli.command, Some(Command::Update { .. }))
-        && let Some(notice) =
-            agyva::updater::startup_check(update_check_enabled(&env)).and_then(|c| c.notice())
         && notice_allowed(&cli)
+        && update_check_enabled(&env)
+        && let Some(notice) = agyva::updater::startup_check_cached(
+            true,
+            agyva::paths::Dirs::resolve(&env)
+                .ok()
+                .map(|d| d.update_check_cache_file())
+                .as_deref(),
+            chrono::Utc::now(),
+        )
+        .and_then(|c| c.notice())
     {
         let _ = writeln!(io.err, "note: {notice}");
     }
@@ -128,4 +149,25 @@ fn main() -> ExitCode {
         }
     };
     ExitCode::from(u8::try_from(code).unwrap_or(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notice_allowed_skips_models_and_route_json() {
+        let models_json = Cli::try_parse_from(["agyva", "models", "--json"]).unwrap();
+        assert!(!notice_allowed(&models_json));
+
+        let route_plan_json =
+            Cli::try_parse_from(["agyva", "route", "plan", "work", "--json"]).unwrap();
+        assert!(!notice_allowed(&route_plan_json));
+
+        let models_plain = Cli::try_parse_from(["agyva", "models"]).unwrap();
+        assert!(notice_allowed(&models_plain));
+
+        let route_plan_plain = Cli::try_parse_from(["agyva", "route", "plan", "work"]).unwrap();
+        assert!(notice_allowed(&route_plan_plain));
+    }
 }

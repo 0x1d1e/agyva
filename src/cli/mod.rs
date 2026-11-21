@@ -28,11 +28,12 @@ Selectors (for use, rename, remove): an alias, a list number, an exact email,
 an account id or unique id prefix, or `-` for the previous account.
 
 Environment (development and tests): AGYVA_CONFIG_DIR, AGYVA_STATE_DIR,
-AGYVA_CACHE_DIR, AGYVA_AGY_HOME, AGYVA_AGY_BIN, AGYVA_PASSPHRASE, AGYVA_LOG,
-AGYVA_VAULT_KEY. AGYVA_BACKEND=memory|file (never touches the OS keyring)
-needs AGYVA_CONFIG_DIR, AGYVA_STATE_DIR and AGYVA_AGY_HOME as well.
-AGYVA_ARCHIVE_PASSPHRASE protects export/import archives (separate from the
-vault passphrase). AGYVA_FAILPOINT works only with AGYVA_TEST_MODE=1.";
+AGYVA_CACHE_DIR, AGYVA_AGY_HOME, AGYVA_AGY_BIN, AGYVA_PASSPHRASE,
+AGYVA_NEW_PASSPHRASE, AGYVA_LOG, AGYVA_VAULT_KEY. AGYVA_BACKEND=memory|file
+(never touches the OS keyring) needs AGYVA_CONFIG_DIR, AGYVA_STATE_DIR and
+AGYVA_AGY_HOME as well. AGYVA_ARCHIVE_PASSPHRASE protects export/import
+archives (separate from the vault passphrase). AGYVA_FAILPOINT works only
+with AGYVA_TEST_MODE=1.";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -43,7 +44,7 @@ vault passphrase). AGYVA_FAILPOINT works only with AGYVA_TEST_MODE=1.";
                   Switching is manual unless a route group opts in to automation\n\
                   (auto_switch = true plus `config set auto_switch_ack true`).",
     after_help = EXIT_CODES,
-    help_template = "{name} {version}\n{about-with-newline}\n{usage-heading} {usage}\n\nAccounts:\n  add          Save the current agy login\n  list         List saved accounts\n  use          Switch manually, then restart agy\n  current      Inspect agy's login\n  rename       Change an alias\n  remove       Forget a saved account\n\nQuota and health:\n  usage        Remaining quota by group and window\n  health       Account health and evidence\n  models       Cached model catalog (--refresh to update)\n  watch        Read-only foreground monitor\n  monitor      Route-aware cache-only monitor (--interval)\n\nRouting:\n  route        Rank saved accounts from cached quota (--for-model, apply)\n\nDiagnostics and recovery:\n  status       State and pending recovery\n  doctor       Read-only checks\n  recover      Finish or undo an interrupted switch\n\nTransfer and updates:\n  export       Save accounts to a portable encrypted archive\n  import       Add accounts from an archive (skips existing)\n  update       Check GitHub for a newer release; install on request\n\nSetup:\n  config       View or change settings\n  completions  Fish, Bash or Zsh completion\n  version      agyva and agy versions\n  help         Help for a command\n\nOptions:\n{options}\n{after-help}",
+    help_template = "{name} {version}\n{about-with-newline}\n{usage-heading} {usage}\n\nAccounts:\n  add          Save the current agy login\n  list         List saved accounts\n  use          Switch manually, then restart agy\n  current      Inspect agy's login\n  rename       Change an alias\n  remove       Forget a saved account\n\nQuota and health:\n  usage        Remaining quota by group and window\n  health       Account health and evidence\n  models       Cached model catalog (--refresh to update)\n  watch        Read-only foreground monitor\n  monitor      Route-aware cache-only monitor (--interval)\n\nRouting:\n  route        Rank saved accounts from cached quota (--for-model, apply)\n\nDiagnostics and recovery:\n  status       State and pending recovery\n  doctor       Read-only checks\n  recover      Finish or undo an interrupted switch\n\nTransfer and updates:\n  export       Save accounts to a portable encrypted archive\n  import       Add accounts from an archive (skips existing)\n  update       Check GitHub for a newer release; install on request\n\nSetup:\n  config       View or change settings\n  rekey        Rotate the vault key or passphrase\n  completions  Fish, Bash or Zsh completion\n  version      agyva and agy versions\n  help         Help for a command\n\nOptions:\n{options}\n{after-help}",
     propagate_version = true
 )]
 pub struct Cli {
@@ -91,6 +92,8 @@ pub enum Command {
     /// View or change settings.
     #[command(subcommand)]
     Config(ConfigCommand),
+    /// Rotate the vault key or passphrase, or migrate between keyring and passphrase.
+    Rekey(RekeyArgs),
     /// Print a shell completion script.
     Completions {
         #[arg(value_enum)]
@@ -303,6 +306,30 @@ pub enum ConfigCommand {
     Set { key: String, value: String },
     /// Print the config file path.
     Path,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum VaultKeyModeArg {
+    Auto,
+    Keyring,
+    Passphrase,
+}
+
+impl From<VaultKeyModeArg> for crate::config::VaultKeyMode {
+    fn from(arg: VaultKeyModeArg) -> Self {
+        match arg {
+            VaultKeyModeArg::Auto => Self::Auto,
+            VaultKeyModeArg::Keyring => Self::Keyring,
+            VaultKeyModeArg::Passphrase => Self::Passphrase,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct RekeyArgs {
+    /// Target vault key mode (defaults to rotating the current mode).
+    #[arg(long, value_enum)]
+    pub mode: Option<VaultKeyModeArg>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

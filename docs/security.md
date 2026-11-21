@@ -50,8 +50,11 @@ are written defensively:
 - **Vault key.** It lives in the OS keyring (`agyva`/`vault-key`). If no keyring
   is reachable, or `vault_key = passphrase`, the key is derived with Argon2id
   (19 MiB, t=2, p=1 by default) from a passphrase of at least 8 characters
-  taken from a TTY prompt or `AGYVA_PASSPHRASE`; never from argv. The mode is
-  fixed at vault creation. KDF parameters read back from `vault.json` are
+  taken from a TTY prompt or `AGYVA_PASSPHRASE`; never from argv. `agyva rekey`
+  rotates the key or passphrase, or migrates between keyring and passphrase
+  modes, re-encrypting all snapshots and checkpoints atomically before
+  committing `vault.json` (using `AGYVA_NEW_PASSPHRASE` or a prompt for the new
+  passphrase). KDF parameters read back from `vault.json` are
   bounds-checked (memory 8 KiB to 1 GiB, t and p 1 to 16, salt 8 to 64 bytes);
   anything outside is treated as a corrupt vault, so a tampered file cannot
   demand absurd memory or time.
@@ -59,11 +62,12 @@ are written defensively:
   copies, no `.bak` files.
 - **Filesystem discipline.** Files are created 0600 and directories 0700; writes
   are atomic (temp file, fsync, rename, directory fsync).
-- **Passphrase hygiene.** `AGYVA_PASSPHRASE` is moved out of the environment map
-  into a zeroizing holder at startup and is never passed to child processes
-  (`agy` runs with all `AGYVA_*` variables removed). It cannot be removed from
-  the process's own environment without `unsafe` code, which the project does
-  not use; prefer the interactive prompt.
+- **Passphrase hygiene.** `AGYVA_PASSPHRASE`, `AGYVA_NEW_PASSPHRASE` and
+  `AGYVA_ARCHIVE_PASSPHRASE` are moved out of the environment map into
+  zeroizing holders at startup and are never passed to child processes
+  (`agy` runs with all `AGYVA_*` variables removed). They cannot be removed
+  from the process's own environment without `unsafe` code, which the project
+  does not use; prefer the interactive prompt.
 - **Ids from disk.** Account ids and checkpoint names read from disk (registry,
   journal) are validated (10 lowercase hex characters; a fixed name shape)
   before any file path is built from them.
@@ -86,7 +90,7 @@ exception.
 | Quota | Runs agy's own `/usage` for the active login: no stdin, all `AGYVA_*` variables removed, bounded output, time-limited. | Make a network request of its own, use an OAuth client of its own, or pass a credential to agy. |
 | Quota cache (`<cache>/quota.json`, 0600) | Holds percentages, reset times, health state and a one-line rule description. | Hold tokens, email or raw agy output. The TUI and JSON show the same data, and tests assert none of the synthetic secrets appear in the cache or output. |
 | Self-update | See [below](#self-update): HTTPS GETs to GitHub Releases, verified and staged atomically. | Touch any other host, or treat a malformed digest as absent. |
-| Export archives (`core::transfer`) | Sealed with AES-256-GCM under the dedicated `archive:1` context, keyed from a **separate** archive passphrase via the production Argon2id profile. | Export the vault key, or modify existing identities on import (they are skipped bit-for-bit untouched). |
+| Export archives (`core::transfer`) | Sealed with AES-256-GCM under the dedicated `archive:1` context, keyed from a **separate** archive passphrase via Argon2id (64 MiB, `t=3`, `p=1` on export; import accepts down to the 19 MiB, `t=2`, `p=1` floor). | Export the vault key, or modify existing identities on import (they are skipped bit-for-bit untouched). |
 | Suspension state | Detects a Terms-of-Service suspension only from an explicit agy message, marks the account `TermsSuspended`, and shows it prominently (CLI and TUI banner) with a pointer to the Antigravity FAQ and Google support. | Retry it automatically — refresh, watch, the TUI and the monitor's `agy models` catalog tick all skip it unless you explicitly force a check (`--force-refresh`, or `agyva models --refresh`) — or auto-switch away from it (route automation ranks it ineligible). |
 | `watch`, `monitor`, TUI | Observe; a switch from the TUI needs explicit confirmation and uses the same journaled path as `agyva use`. | Switch accounts on their own, warm up quota windows, or retry on quota errors. |
 | TUI secrets and logging | Logging is off in TUI mode, and the terminal is restored on exit, panic and Ctrl+C. | Prompt for or display secrets. In passphrase mode it refuses to switch unless `AGYVA_PASSPHRASE` is set, because it will not read a passphrase while the screen is in raw mode. |
@@ -110,11 +114,15 @@ and imports only ever add.
 - Every tar member is screened (no traversal, no links, plain directories
   tolerated, exactly one executable), and the binary is staged and renamed
   atomically.
-- The startup check is passive: one metadata request, silent failure. It runs at
-  the start of every invocation whose config allows it — including JSON output,
-  completions and the TUI, which makes it once per process and shows the result
-  on the dashboard. What those modes suppress is only the notice on stderr,
-  never the request.
+- Only supported release targets (`x86_64-unknown-linux-gnu` and
+  `aarch64-unknown-linux-gnu`) query or install releases; unsupported targets
+  skip the startup check and refuse `agyva update`.
+- The startup check is passive: one metadata request, silent failure, cached in
+  `<cache>/update-check.json` (mode 0600) for 24 hours on success and 1 hour on
+  failure. It runs at the start of every invocation whose config allows it —
+  including JSON output, completions and the TUI, which makes it once per
+  process and shows the result on the dashboard. What those modes suppress is
+  only the notice on stderr, never the request.
 - `check_updates = false` or `AGYVA_UPDATE_CHECK=0` disables the request itself,
   and the check never runs for the `update` command, which makes its own single
   metadata request.
@@ -133,8 +141,12 @@ The one exception to "never switches", and it is fenced:
 - It never picks a `TermsSuspended` or otherwise ineligible account.
 - It defers whenever agy sessions are detected (or detection is uncertain), or
   while a switch journal is pending recovery.
-- It waits at least 900 seconds between any two switches; a manual `agyva use`
-  also re-arms this cooldown.
+- It waits at least `auto_switch_cooldown_secs` (default 900 seconds; overridable
+  per group via `cooldown_secs`) between any two switches; a manual `agyva use`
+  also re-arms this cooldown. Standby candidates use cache readings up to
+  `auto_switch_candidate_max_age_secs` (default 21600 seconds) and must clear
+  `five_hour_threshold_percent` / `weekly_threshold_percent` and
+  `hysteresis_percent` (defaults 10%).
 - It re-validates everything under the login lock and then uses the same
   journaled switch path as `agyva use`.
 - Every automatic decision — including holds and defers — is recorded in

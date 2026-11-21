@@ -22,6 +22,7 @@ pub mod quota_cache;
 pub mod recover;
 pub mod refresh;
 pub mod registry;
+pub mod rekey;
 pub mod route;
 pub mod route_apply;
 pub mod route_config;

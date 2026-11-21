@@ -7,7 +7,7 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -17,10 +17,12 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  linux-x86_64:
+  build:
     # The workflow is inert on forks; releases are only built from the main repo.
     if: github.repository == '0x1d1e/agyva'
     name: release (linux x86_64)
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -43,6 +45,22 @@ jobs:
           path: |
             dist/*.tar.gz
             dist/SHA256SUMS
+
+  publish:
+    if: github.repository == '0x1d1e/agyva'
+    name: publish draft release
+    needs: build
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: agyva-linux-x86_64
+          path: dist
+      - name: Verify checksums
+        run: cd dist && sha256sum -c SHA256SUMS
       - name: Draft release
         uses: softprops/action-gh-release@v3
         with:

@@ -62,6 +62,14 @@ pub const KEYS: &[(&str, &str)] = &[
         "auto_switch_ack",
         "explicit acknowledgement that opt-in route automation may switch accounts: true | false",
     ),
+    (
+        "auto_switch_cooldown_secs",
+        "seconds to wait between switches before auto-switch may run again (30-86400)",
+    ),
+    (
+        "auto_switch_candidate_max_age_secs",
+        "maximum age in seconds for standby auto-switch candidate cache (60-604800)",
+    ),
 ];
 
 macro_rules! string_enum {
@@ -118,6 +126,8 @@ pub struct Config {
     /// Explicit re-acknowledgment for opt-in auto-switching (routing.toml
     /// `auto_switch = true` additionally requires this).
     pub auto_switch_ack: bool,
+    pub auto_switch_cooldown_secs: u64,
+    pub auto_switch_candidate_max_age_secs: u64,
 }
 
 impl Default for Config {
@@ -137,6 +147,8 @@ impl Default for Config {
             watch_interval_secs: 300,
             desktop_notifications: false,
             auto_switch_ack: false,
+            auto_switch_cooldown_secs: 900,
+            auto_switch_candidate_max_age_secs: 21_600,
         }
     }
 }
@@ -203,6 +215,16 @@ impl Config {
                 "watch_interval_secs must be between 60 and 86400",
             ));
         }
+        if !(30..=86_400).contains(&self.auto_switch_cooldown_secs) {
+            return Err(Error::usage(
+                "auto_switch_cooldown_secs must be between 30 and 86400",
+            ));
+        }
+        if !(60..=604_800).contains(&self.auto_switch_candidate_max_age_secs) {
+            return Err(Error::usage(
+                "auto_switch_candidate_max_age_secs must be between 60 and 604800",
+            ));
+        }
         Ok(())
     }
 
@@ -223,6 +245,10 @@ impl Config {
             "watch_interval_secs" => self.watch_interval_secs.to_string(),
             "desktop_notifications" => self.desktop_notifications.to_string(),
             "auto_switch_ack" => self.auto_switch_ack.to_string(),
+            "auto_switch_cooldown_secs" => self.auto_switch_cooldown_secs.to_string(),
+            "auto_switch_candidate_max_age_secs" => {
+                self.auto_switch_candidate_max_age_secs.to_string()
+            }
             _ => return None,
         })
     }
@@ -275,6 +301,14 @@ impl Config {
             }
             "lock_timeout_secs" => {
                 next.lock_timeout_secs =
+                    value.parse().map_err(|_| bad("expected a number".into()))?;
+            }
+            "auto_switch_cooldown_secs" => {
+                next.auto_switch_cooldown_secs =
+                    value.parse().map_err(|_| bad("expected a number".into()))?;
+            }
+            "auto_switch_candidate_max_age_secs" => {
+                next.auto_switch_candidate_max_age_secs =
                     value.parse().map_err(|_| bad("expected a number".into()))?;
             }
             _ => {
@@ -338,5 +372,18 @@ mod tests {
         assert_eq!(c.get("policy_acknowledged").as_deref(), Some("true"));
         assert_eq!(c.checkpoints_keep, 7);
         assert!(c.policy_acknowledged);
+
+        c.set("auto_switch_cooldown_secs", "30").unwrap();
+        assert_eq!(c.auto_switch_cooldown_secs, 30);
+        assert!(c.set("auto_switch_cooldown_secs", "29").is_err());
+        assert!(c.set("auto_switch_cooldown_secs", "86401").is_err());
+
+        c.set("auto_switch_candidate_max_age_secs", "60").unwrap();
+        assert_eq!(c.auto_switch_candidate_max_age_secs, 60);
+        assert!(c.set("auto_switch_candidate_max_age_secs", "59").is_err());
+        assert!(
+            c.set("auto_switch_candidate_max_age_secs", "604801")
+                .is_err()
+        );
     }
 }

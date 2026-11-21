@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the release binary and package it, with checksums, into dist/.
 #
-#   scripts/release.sh
+#   scripts/release.sh [--target <triple>]
 #
 # Output (dist/):
 #   agyva-<version>-<target>.tar.gz   binary + README + LICENSE + docs
@@ -22,17 +22,55 @@ set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+explicit_target=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --target)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        echo "usage: $0 [--target <triple>]" >&2
+        exit 2
+      fi
+      explicit_target="$2"
+      shift 2
+      ;;
+    --target=*)
+      explicit_target="${1#--target=}"
+      if [ -z "$explicit_target" ]; then
+        echo "usage: $0 [--target <triple>]" >&2
+        exit 2
+      fi
+      shift
+      ;;
+    -h|--help)
+      echo "usage: $0 [--target <triple>]"
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      echo "usage: $0 [--target <triple>]" >&2
+      exit 2
+      ;;
+  esac
+done
+
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
-target=$(rustc -vV | sed -n 's/^host: //p')
+host_target=$(rustc -vV | sed -n 's/^host: //p')
+target=${explicit_target:-$host_target}
 name="agyva-$version-$target"
 epoch=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct 2>/dev/null || echo 1700000000)}
 
-cargo build --release --locked
+if [ -n "$explicit_target" ]; then
+  cargo build --release --locked --target "$explicit_target"
+  bin_path="target/$explicit_target/release/agyva"
+else
+  cargo build --release --locked
+  bin_path="target/release/agyva"
+fi
 
 rm -rf dist
 stage="dist/$name"
 mkdir -p "$stage/docs"
-install -m755 target/release/agyva "$stage/agyva"
+install -m755 "$bin_path" "$stage/agyva"
 install -m644 README.md LICENSE "$stage/"
 install -m644 docs/*.md "$stage/docs/"
 for extra in docs/tui-capture.txt docs/tui.svg docs/tui-usage.svg; do

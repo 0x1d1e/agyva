@@ -104,7 +104,17 @@ impl Backend for AppBackend {
         if update_check_enabled(&app.env) {
             let notice = self
                 .update_check
-                .get_or_init(|| crate::updater::startup_check(true).and_then(|c| c.notice()))
+                .get_or_init(|| {
+                    crate::updater::startup_check_cached(
+                        true,
+                        crate::paths::Dirs::resolve(&app.env)
+                            .ok()
+                            .map(|d| d.update_check_cache_file())
+                            .as_deref(),
+                        chrono::Utc::now(),
+                    )
+                    .and_then(|c| c.notice())
+                })
                 .clone();
             d.update_notice = notice;
         }

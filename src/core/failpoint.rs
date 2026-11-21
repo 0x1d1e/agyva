@@ -36,6 +36,7 @@ pub const NAMES: &[&str] = &[
     "post-commit-cleanup",
     "rollback-after-native",
     "recover-after-native",
+    "rekey-before-meta",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

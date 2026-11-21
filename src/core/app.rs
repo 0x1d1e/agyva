@@ -21,7 +21,8 @@ use crate::storage::keyring::{MemoryKeyring, SecretStore, StoreErrorKind, System
 use crate::storage::lock::StateLock;
 use crate::storage::vault::Vault;
 use crate::storage::vault_key::{
-    ENV_ARCHIVE_PASSPHRASE, ENV_PASSPHRASE, EnvOrTty, KdfParams, KeyProvider, PassphraseSource,
+    ENV_ARCHIVE_PASSPHRASE, ENV_NEW_PASSPHRASE, ENV_PASSPHRASE, EnvOrTty, KdfParams, KeyProvider,
+    PassphraseSource,
 };
 use secrecy::SecretString;
 
@@ -44,6 +45,7 @@ pub struct App {
     pub config: Config,
     pub(crate) secrets: Arc<dyn SecretStore>,
     pub(crate) passphrases: Arc<dyn PassphraseSource>,
+    pub(crate) new_passphrases: Arc<dyn PassphraseSource>,
     pub(crate) failpoints: Failpoints,
     pub(crate) kdf: Option<KdfParams>,
     pub(crate) compat_override: Option<Compat>,
@@ -77,10 +79,13 @@ impl App {
         // zeroizing holder, so it is not cloned around or passed to children.
         let env_passphrase = env.take(ENV_PASSPHRASE).map(SecretString::from);
         let had_env_passphrase = env_passphrase.is_some();
+        let new_passphrase = env.take(ENV_NEW_PASSPHRASE).map(SecretString::from);
         // Likewise the archive passphrase for import/export: taken out of
         // the environment map immediately, separate from the vault one.
         let archive_passphrase = env.take(ENV_ARCHIVE_PASSPHRASE).map(SecretString::from);
         let passphrases: Arc<dyn PassphraseSource> = Arc::new(EnvOrTty::new(env_passphrase));
+        let new_passphrases: Arc<dyn PassphraseSource> =
+            Arc::new(EnvOrTty::for_new_passphrase(new_passphrase));
         let archive_passphrases: Arc<dyn PassphraseSource> =
             Arc::new(EnvOrTty::for_archives(archive_passphrase));
         Self {
@@ -95,6 +100,7 @@ impl App {
             config,
             secrets: Arc::new(SystemKeyring::new()),
             passphrases,
+            new_passphrases,
             archive_passphrases,
             failpoints: Failpoints::none(),
             had_env_passphrase,
@@ -147,6 +153,13 @@ impl App {
     #[must_use]
     pub fn with_passphrases(mut self, p: Arc<dyn PassphraseSource>) -> Self {
         self.passphrases = p;
+        self
+    }
+
+    /// Replace the new-passphrase source used by `rekey` (tests).
+    #[must_use]
+    pub fn with_new_passphrases(mut self, p: Arc<dyn PassphraseSource>) -> Self {
+        self.new_passphrases = p;
         self
     }
 

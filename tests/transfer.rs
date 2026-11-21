@@ -350,30 +350,76 @@ fn wrong_passphrase_or_tampering_leaves_the_destination_untouched() {
 }
 
 #[test]
-fn an_archive_with_unsupported_kdf_settings_is_refused() {
+fn export_uses_archive_production_kdf_and_import_accepts_legacy_19mib() {
+    let source = source_rig();
+    let file = temp("kdf-64mib");
+    export_source(&source, &file);
+
+    let env: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&file).expect("read archive")).expect("json");
+    assert_eq!(env["kdf"]["alg"], "argon2id");
+    assert_eq!(env["kdf"]["m_kib"], 64 * 1024);
+    assert_eq!(env["kdf"]["t"], 3);
+    assert_eq!(env["kdf"]["p"], 1);
+    let _ = fs::remove_file(&file);
+
+    // Backwards compatibility: a v1 archive sealed with the 19 MiB profile
+    // still imports cleanly.
     let dest = Rig::new();
-    let file = temp("cheapkdf");
-    // Craft with a cheap KDF; import refuses the downgrade regardless of
-    // the passphrase being right.
+    let legacy_file = temp("kdf-19mib");
     craft_archive(
-        &file,
-        &KdfParams::with_cost(8, 1, 1).expect("kdf"),
+        &legacy_file,
+        &KdfParams::production().expect("kdf"),
         ARCHIVE,
         &[(
             id_of(ALICE).as_str(),
             &credential(ALICE.0, ALICE.1, ALICE.2),
         )],
     );
-    let err = archive_app(&dest, Failpoints::none())
-        .import_archive(&file)
-        .expect_err("cheap kdf");
-    assert!(
-        err.message().contains("unsupported KDF settings"),
-        "{}",
-        err.message()
-    );
-    assert_eq!(tree_state(&dest), Vec::new());
-    let _ = fs::remove_file(&file);
+    let imp = archive_app(&dest, Failpoints::none())
+        .import_archive(&legacy_file)
+        .expect("19 MiB archive should still import");
+    assert_eq!(imp.added, vec![id_of(ALICE)]);
+    let _ = fs::remove_file(&legacy_file);
+}
+
+#[test]
+fn an_archive_with_unsupported_kdf_settings_is_refused() {
+    let dest = Rig::new();
+    for (label, kdf) in [
+        ("cheap", KdfParams::with_cost(8, 1, 1).expect("kdf")),
+        (
+            "below-mem-floor",
+            KdfParams::with_cost(19 * 1024 - 1, 2, 1).expect("kdf"),
+        ),
+        (
+            "below-t-floor",
+            KdfParams::with_cost(64 * 1024, 1, 1).expect("kdf"),
+        ),
+    ] {
+        let file = temp(&format!("cheapkdf-{label}"));
+        // Craft with a cheap KDF; import refuses the downgrade regardless of
+        // the passphrase being right.
+        craft_archive(
+            &file,
+            &kdf,
+            ARCHIVE,
+            &[(
+                id_of(ALICE).as_str(),
+                &credential(ALICE.0, ALICE.1, ALICE.2),
+            )],
+        );
+        let err = archive_app(&dest, Failpoints::none())
+            .import_archive(&file)
+            .expect_err("cheap kdf");
+        assert!(
+            err.message().contains("unsupported KDF settings"),
+            "{label}: {}",
+            err.message()
+        );
+        assert_eq!(tree_state(&dest), Vec::new());
+        let _ = fs::remove_file(&file);
+    }
 }
 
 #[test]

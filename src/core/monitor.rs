@@ -50,6 +50,10 @@ pub struct MonitorProbe<'a> {
     /// What automation did on this cycle (an error, or the applied alias);
     /// `None` when automation is off or had nothing to say.
     last_auto: Option<String>,
+    /// Exponential backoff deadline after an `auto_switch_for` error.
+    auto_backoff_until: Option<DateTime<Utc>>,
+    /// Consecutive `auto_switch_for` errors for backoff scaling.
+    auto_failures: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,6 +82,8 @@ impl<'a> MonitorProbe<'a> {
             last_plan: None,
             last_pick: None,
             last_auto: None,
+            auto_backoff_until: None,
+            auto_failures: 0,
         }
     }
 
@@ -105,13 +111,26 @@ impl Probe for MonitorProbe<'_> {
         // `refreshed` is the freshness proof automation requires: only a run
         // that actually got a live reading this cycle may authorize a switch.
         let mut refreshed = false;
+        let mut refresh_failure: Option<String> = None;
         if self.last_refresh.is_none_or(|at| {
             now - at >= chrono::Duration::from_std(self.refresh_interval).unwrap_or_default()
         }) {
-            refreshed = self
-                .app
-                .refresh_active_at(false, now)
-                .is_ok_and(|o| matches!(o.status, crate::core::refresh::RefreshStatus::Refreshed));
+            let mut transient_failure = false;
+            match self.app.refresh_active_at(false, now) {
+                Ok(outcome) => {
+                    refreshed = matches!(
+                        outcome.status,
+                        crate::core::refresh::RefreshStatus::Refreshed
+                    );
+                    if outcome.is_transient_failure() {
+                        transient_failure = true;
+                        refresh_failure = outcome.unavailable().map(|u| u.detail.clone());
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("active refresh failed: {}", e.message());
+                }
+            }
             // Keep the active account's model catalog current on the same
             // tick so `--for-model` works without a manual `agyva models`.
             // The call self-throttles on `models_cache_secs` and shares the
@@ -119,7 +138,9 @@ impl Probe for MonitorProbe<'_> {
             if let Err(e) = self.app.refresh_models_at(false, now) {
                 tracing::warn!("catalog refresh skipped: {}", e.message());
             }
-            self.last_refresh = Some(now);
+            if !transient_failure {
+                self.last_refresh = Some(now);
+            }
         }
         let plan = self
             .app
@@ -172,6 +193,7 @@ impl Probe for MonitorProbe<'_> {
         };
         let mut report = crate::core::watch::CycleReport {
             accounts: self.app.account_usages(None, now).unwrap_or_default(),
+            failure: refresh_failure,
             ..Default::default()
         };
         report.note = Some(match &picked {
@@ -189,26 +211,48 @@ impl Probe for MonitorProbe<'_> {
         // hold/defer/applied outcome lands in the route history.
         self.last_auto = None;
         if let Some(group) = self.group.clone() {
-            let history = RouteHistory::new(&self.app.dirs);
-            match self.app.auto_switch_for(
-                &group,
-                &plan,
-                self.for_model.as_deref(),
-                refreshed,
-                &history,
-                now,
-            ) {
-                Ok(Some(outcome)) => {
-                    self.last_auto = Some(format!("auto-switch applied: {}", outcome.alias));
-                    report.note = Some(format!(
-                        "{}; {}",
-                        report.note.unwrap_or_default(),
-                        self.last_auto.clone().unwrap_or_default()
-                    ));
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    self.last_auto = Some(format!("auto-switch error: {}", e.message()));
+            if self.auto_backoff_until.is_some_and(|until| now < until) {
+                self.last_auto = Some("auto-switch backed off after prior failure".into());
+            } else {
+                let history = RouteHistory::new(&self.app.dirs);
+                let result = self
+                    .app
+                    .auto_route_group_for(Some(&group), self.for_model.as_deref(), now)
+                    .and_then(|auto_plan| {
+                        self.app.auto_switch_for(
+                            &group,
+                            &auto_plan,
+                            self.for_model.as_deref(),
+                            refreshed,
+                            &history,
+                            now,
+                        )
+                    });
+                match result {
+                    Ok(Some(outcome)) => {
+                        self.auto_failures = 0;
+                        self.auto_backoff_until = None;
+                        self.last_auto = Some(format!("auto-switch applied: {}", outcome.alias));
+                        report.note = Some(format!(
+                            "{}; {}",
+                            report.note.unwrap_or_default(),
+                            self.last_auto.clone().unwrap_or_default()
+                        ));
+                    }
+                    Ok(None) => {
+                        if refreshed {
+                            self.auto_failures = 0;
+                            self.auto_backoff_until = None;
+                        }
+                    }
+                    Err(e) => {
+                        let shift = self.auto_failures.min(5);
+                        let secs = 60u64.saturating_mul(1u64 << shift).min(1800);
+                        self.auto_failures = self.auto_failures.saturating_add(1);
+                        self.auto_backoff_until =
+                            Some(now + chrono::Duration::seconds(secs as i64));
+                        self.last_auto = Some(format!("auto-switch error: {}", e.message()));
+                    }
                 }
             }
         }

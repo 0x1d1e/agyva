@@ -151,11 +151,11 @@ fn cooldown_holds_and_manual_switch_resets_it() {
     let rig = Rig::new();
     rig.add_all(&[ALICE, BOB]);
     let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
-    fake.ok(0.5, 0.5);
+    fake.ok(0.05, 0.5);
     let mut app = rig.app_with_agy(&fake);
     let now = Utc::now();
     seed(&app, ALICE, now, 90.0, AccountHealth::Healthy);
-    seed(&app, BOB, now, 50.0, AccountHealth::Healthy);
+    seed(&app, BOB, now, 5.0, AccountHealth::Healthy);
     enable_auto(&mut app, true);
 
     // Mark a switch 901s ago: past the 900s window, no hold.
@@ -194,7 +194,15 @@ fn detected_sessions_defer() {
 
     // A presence lock simulates a running agy session.
     std::fs::create_dir_all(app.agy.presence_dir()).unwrap();
-    std::fs::write(app.agy.presence_dir().join("abc.lock"), "").unwrap();
+    let lock_path = app.agy.presence_dir().join("abc.lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .unwrap();
+    fs4::FileExt::lock(&lock_file).unwrap();
     let plan = fresh_plan(&app, now);
     assert!(matches!(
         decide(&app, "work", &plan, true, now),
@@ -206,6 +214,7 @@ fn detected_sessions_defer() {
         .unwrap();
     assert!(out.is_none());
     assert_eq!(rig.live_id(), Some(id_of(BOB)));
+    drop(lock_file);
 }
 
 #[test]
@@ -231,7 +240,7 @@ fn suspended_candidate_and_active_are_never_chosen() {
     // holds; alice is never chosen.
     let d = decide(&app, "work", &plan, true, now);
     assert!(
-        matches!(&d, AutoDecision::Hold(r) if r.contains("already active")),
+        matches!(&d, AutoDecision::Hold(r) if r.contains("no eligible candidate")),
         "got {d:?}"
     );
     let history = RouteHistory::new(&app.dirs);
@@ -249,7 +258,7 @@ fn pending_recovery_blocks_auto_switch() {
     let mut app = rig.app();
     let now = Utc::now();
     seed(&app, ALICE, now, 90.0, AccountHealth::Healthy);
-    seed(&app, BOB, now, 50.0, AccountHealth::Healthy);
+    seed(&app, BOB, now, 5.0, AccountHealth::Healthy);
     enable_auto(&mut app, true);
     // Interrupted switch (crash after the native write) leaves a pending journal.
     let _ = rig
@@ -272,12 +281,12 @@ fn concurrent_manual_switch_wins_and_cools_automation_down() {
     let rig = Rig::new();
     rig.add_all(&[ALICE, BOB, CAROL]);
     let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
-    fake.ok(0.5, 0.5);
+    fake.ok(0.05, 0.5);
     let mut app = rig.app_with_agy(&fake);
     let now = Utc::now();
     seed(&app, ALICE, now, 90.0, AccountHealth::Healthy);
     seed(&app, BOB, now, 50.0, AccountHealth::Healthy);
-    seed(&app, CAROL, now, 10.0, AccountHealth::Healthy);
+    seed(&app, CAROL, now, 5.0, AccountHealth::Healthy);
     enable_auto(&mut app, true);
 
     // Automation decides to switch (alice is the fresh eligible top).
@@ -310,11 +319,11 @@ fn auto_switch_applies_through_the_journaled_path() {
     let rig = Rig::new();
     rig.add_all(&[ALICE, BOB]);
     let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
-    fake.ok(0.9, 0.9);
+    fake.ok(0.05, 0.5);
     let mut app = rig.app_with_agy(&fake);
     let now = Utc::now();
     seed(&app, ALICE, now, 90.0, AccountHealth::Healthy);
-    seed(&app, BOB, now, 50.0, AccountHealth::Healthy);
+    seed(&app, BOB, now, 5.0, AccountHealth::Healthy);
     enable_auto(&mut app, true);
 
     let plan = fresh_plan(&app, now);
@@ -361,13 +370,13 @@ fn the_monitor_cycle_is_the_driver_that_actually_switches() {
     let rig = Rig::new();
     rig.add_all(&[ALICE, BOB]);
     let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
-    fake.ok(0.9, 0.9);
+    fake.ok(0.05, 0.5);
     let mut app = rig.app_with_agy(&fake);
     let now = Utc::now();
     seed(&app, ALICE, now, 90.0, AccountHealth::Healthy);
-    seed(&app, BOB, now, 50.0, AccountHealth::Healthy);
+    seed(&app, BOB, now, 5.0, AccountHealth::Healthy);
     enable_auto(&mut app, true);
-    // bob is active; alice is the strictly better pick.
+    // bob is active and below threshold; alice is the strictly better pick.
     let mut probe = MonitorProbe::new(&app, Some("work".into()), None, std::time::Duration::ZERO);
     probe.cycle(now);
     assert_eq!(rig.live_id(), Some(id_of(ALICE)), "the cycle switched");
@@ -387,10 +396,10 @@ fn the_monitor_cycle_is_the_driver_that_actually_switches() {
     let rig = Rig::new();
     rig.add_all(&[ALICE, BOB]);
     let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy2"));
-    fake.ok(0.9, 0.9);
+    fake.ok(0.05, 0.5);
     let mut app = rig.app_with_agy(&fake);
     seed(&app, ALICE, now, 90.0, AccountHealth::Healthy);
-    seed(&app, BOB, now, 50.0, AccountHealth::Healthy);
+    seed(&app, BOB, now, 5.0, AccountHealth::Healthy);
     app.config.auto_switch_ack = true;
     let mut probe = MonitorProbe::new(&app, None, None, std::time::Duration::ZERO);
     probe.cycle(now);
@@ -401,10 +410,10 @@ fn the_monitor_cycle_is_the_driver_that_actually_switches() {
     let rig = Rig::new();
     rig.add_all(&[ALICE, BOB]);
     let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy3"));
-    fake.ok(0.9, 0.9);
+    fake.ok(0.05, 0.5);
     let mut app = rig.app_with_agy(&fake);
     seed(&app, ALICE, now, 90.0, AccountHealth::Healthy);
-    seed(&app, BOB, now, 50.0, AccountHealth::Healthy);
+    seed(&app, BOB, now, 5.0, AccountHealth::Healthy);
     // Enabled but cooling down: every tick holds for the same reason.
     enable_auto(&mut app, true);
     note_switch(&app.dirs, now, false).unwrap();
@@ -428,18 +437,18 @@ fn the_monitor_cycle_is_the_driver_that_actually_switches() {
 }
 
 /// Gate order is part of the contract: enabled/ack -> fresh proof ->
-/// cooldown -> sessions -> eligibility. With several gates failing at once,
-/// the earliest one is the one reported, so a test can pin the order.
+/// cooldown -> sessions -> trigger/eligibility. With several gates failing
+/// at once, the earliest one is the one reported, so a test can pin the order.
 #[test]
 fn gates_are_evaluated_in_the_documented_order() {
     let rig = Rig::new();
     rig.add_all(&[ALICE, BOB]);
     let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
-    fake.ok(0.9, 0.9);
+    fake.ok(0.05, 0.5);
     let mut app = rig.app_with_agy(&fake);
     let now = Utc::now();
     seed(&app, ALICE, now, 90.0, AccountHealth::Healthy);
-    seed(&app, BOB, now, 50.0, AccountHealth::Healthy);
+    seed(&app, BOB, now, 5.0, AccountHealth::Healthy);
 
     // Nothing enabled: disabled/unacknowledged wins over everything.
     std::fs::write(
@@ -473,7 +482,15 @@ fn gates_are_evaluated_in_the_documented_order() {
     // Cooldown clear, sessions detected: the session gate precedes
     // eligibility, even though a good candidate exists.
     std::fs::create_dir_all(app.agy.presence_dir()).unwrap();
-    std::fs::write(app.agy.presence_dir().join("s.lock"), "").unwrap();
+    let s_lock_path = app.agy.presence_dir().join("s.lock");
+    let s_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&s_lock_path)
+        .unwrap();
+    fs4::FileExt::lock(&s_lock).unwrap();
     let d = decide(&app, "work", &plan, true, now + Duration::seconds(1000));
     assert!(
         matches!(&d, AutoDecision::Defer(r) if r.contains("sessions detected")),
@@ -481,7 +498,8 @@ fn gates_are_evaluated_in_the_documented_order() {
     );
 
     // Everything clear: the eligible top row is the switch target.
-    std::fs::remove_file(app.agy.presence_dir().join("s.lock")).unwrap();
+    drop(s_lock);
+    std::fs::remove_file(&s_lock_path).unwrap();
     match decide(&app, "work", &plan, true, now + Duration::seconds(1000)) {
         AutoDecision::Switch { alias, .. } => assert_eq!(alias, "alice"),
         other => panic!("expected a switch, got {other:?}"),
@@ -624,7 +642,7 @@ fn auto_switch_activates_the_family_capable_account_not_the_overall_best() {
     // the active account, weakest and slowest to renew.
     let alice = entry(95.0, 0.0, 3, 2);
     let bob = entry(60.0, 60.0, 5, 72);
-    let carol = entry(30.0, 30.0, 4, 96);
+    let carol = entry(5.0, 30.0, 4, 96);
     app.quota_cache()
         .update(|c| {
             c.accounts.insert(id_of(ALICE), alice);
@@ -665,7 +683,7 @@ fn auto_switch_activates_the_family_capable_account_not_the_overall_best() {
         .unwrap();
     assert_eq!(plan.recommendation, Some(id_of(ALICE)));
     assert_eq!(
-        decide(&app, "work", &plan, true, now),
+        agyva::core::auto::decide_for(&app, "work", &plan, Some("gemini-4-carbon"), true, now),
         AutoDecision::Switch {
             id: id_of(ALICE),
             alias: "alice".to_owned()
@@ -702,10 +720,10 @@ fn hold_survives_history_lock_contention() {
     // bob is added last, so bob is ACTIVE; alice is the healthy candidate.
     rig.add_all(&[ALICE, BOB]);
     let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
-    fake.ok(0.5, 0.5);
+    fake.ok(0.05, 0.5);
     let mut app = rig.app_with_agy(&fake);
     let now = Utc::now();
-    seed(&app, BOB, now, 20.0, AccountHealth::Healthy);
+    seed(&app, BOB, now, 5.0, AccountHealth::Healthy);
     seed(&app, ALICE, now, 90.0, AccountHealth::Healthy);
     enable_auto(&mut app, true);
     let plan = fresh_plan(&app, now);
@@ -739,5 +757,329 @@ fn hold_survives_history_lock_contention() {
     assert!(
         waited >= std::time::Duration::from_secs(2),
         "the test really did contend for the history lock (waited {waited:?})"
+    );
+}
+
+#[test]
+fn healthy_active_above_thresholds_holds_even_when_candidate_renews_sooner() {
+    let rig = Rig::new();
+    rig.add_all(&[ALICE, BOB]);
+    let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
+    fake.ok(0.5, 0.9);
+    let mut app = rig.app_with_agy(&fake);
+    let now = Utc::now();
+    // alice has higher quota (95%) and earlier renewal than bob's 2099 fake renewal,
+    // but bob (active) is healthy at 50% / 90% — strictly above default 10% thresholds.
+    seed(&app, ALICE, now, 95.0, AccountHealth::Healthy);
+    seed(&app, BOB, now, 50.0, AccountHealth::Healthy);
+    enable_auto(&mut app, true);
+
+    let plan = fresh_plan(&app, now);
+    assert_eq!(plan.recommendation, Some(id_of(ALICE)));
+    let d = decide(&app, "work", &plan, true, now);
+    assert!(
+        matches!(&d, AutoDecision::Hold(r) if r.contains("above switch thresholds")),
+        "healthy active must hold, got {d:?}"
+    );
+    let history = RouteHistory::new(&app.dirs);
+    let out = app
+        .auto_switch_for("work", &plan, None, true, &history, now)
+        .unwrap();
+    assert!(out.is_none());
+    assert_eq!(rig.live_id(), Some(id_of(BOB)));
+}
+
+#[test]
+fn two_account_automation_uses_standby_candidate_cache_past_quota_fresh_and_past_reset() {
+    use agyva::core::monitor::MonitorProbe;
+    use agyva::core::watch::Probe;
+
+    let rig = Rig::new();
+    rig.add_all(&[ALICE, BOB]);
+    let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
+    fake.ok(0.05, 0.5);
+    let mut app = rig.app_with_agy(&fake);
+    let now = Utc::now();
+    let standby_at = now - Duration::minutes(25);
+    // alice (standby) was observed 25m ago (> quota_fresh_secs=300s, < candidate_max_age=21600s),
+    // and her 5h window had 0% with reset_at already passed (now - 5m), while weekly is 80%.
+    app.quota_cache()
+        .update(|c| {
+            c.accounts.insert(
+                id_of(ALICE),
+                CacheEntry {
+                    quota: Some(CachedQuota {
+                        observed_at: standby_at,
+                        groups: vec![ModelQuota {
+                            group: "Gemini".into(),
+                            model: None,
+                            disabled: false,
+                            five_hour: Some(QuotaWindow {
+                                remaining_percent: 0.0,
+                                reset_at: Some(now - Duration::minutes(5)),
+                                observed_at: standby_at,
+                                source: QuotaSource::AgyUsageCommand,
+                            }),
+                            weekly: Some(QuotaWindow {
+                                remaining_percent: 80.0,
+                                reset_at: Some(now + Duration::days(3)),
+                                observed_at: standby_at,
+                                source: QuotaSource::AgyUsageCommand,
+                            }),
+                        }],
+                    }),
+                    health: Some(HealthRecord {
+                        state: AccountHealth::Healthy,
+                        observed_at: Some(standby_at),
+                        source: HealthSource::AgyUsageCommand,
+                        evidence: "synthetic".into(),
+                    }),
+                    ..Default::default()
+                },
+            );
+        })
+        .unwrap();
+    seed(&app, BOB, now, 5.0, AccountHealth::Healthy);
+    enable_auto(&mut app, true);
+
+    // Strict route_group_for rejects alice because she is >300s old and 5h reset passed.
+    let strict = app.route_group_for(Some("work"), None, now).unwrap();
+    let alice_strict = strict.accounts.iter().find(|r| r.alias == "alice").unwrap();
+    assert!(!alice_strict.eligible);
+
+    // Candidate-aware auto_route_group_for keeps alice eligible with candidate cache note.
+    let auto_plan = app.auto_route_group_for(Some("work"), None, now).unwrap();
+    let alice_auto = auto_plan
+        .accounts
+        .iter()
+        .find(|r| r.alias == "alice")
+        .unwrap();
+    assert!(
+        alice_auto.eligible,
+        "standby candidate should be eligible: {alice_auto:?}"
+    );
+    assert!(
+        alice_auto.why.contains("candidate cache"),
+        "expected candidate cache reason, got: {}",
+        alice_auto.why
+    );
+
+    // MonitorProbe switches automatically without any manual switch to refresh alice!
+    let mut probe = MonitorProbe::new(&app, Some("work".into()), None, std::time::Duration::ZERO);
+    probe.cycle(now);
+    assert_eq!(rig.live_id(), Some(id_of(ALICE)));
+}
+
+#[test]
+fn hysteresis_blocks_marginal_candidate_and_allows_strong_candidate() {
+    let rig = Rig::new();
+    rig.add_all(&[ALICE, BOB, CAROL]);
+    let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
+    fake.ok(0.08, 0.5);
+    let mut app = rig.app_with_agy(&fake);
+    let now = Utc::now();
+    // carol is active at 8% 5h / 50% weekly (below 10% threshold).
+    seed(&app, CAROL, now, 8.0, AccountHealth::Healthy);
+    // bob is only at 12% (above 10% threshold, but below 8% + 10% = 18% hysteresis).
+    seed(&app, BOB, now, 12.0, AccountHealth::Healthy);
+    // Exclude alice first so bob is the only candidate -> must hold on hysteresis.
+    std::fs::write(
+        app.dirs.config.join("routing.toml"),
+        "[groups.work]\nranking = 'smart'\nauto_switch = true\naccounts = ['bob', 'carol']\n",
+    )
+    .unwrap();
+    app.config.auto_switch_ack = true;
+
+    let plan = app.auto_route_group_for(Some("work"), None, now).unwrap();
+    let d_hold = decide(&app, "work", &plan, true, now);
+    assert!(
+        matches!(&d_hold, AutoDecision::Hold(r) if r.contains("hysteresis")),
+        "expected hysteresis hold, got {d_hold:?}"
+    );
+
+    // Now add alice at 50% (well above 18% hysteresis) -> switches to alice.
+    seed(&app, ALICE, now, 50.0, AccountHealth::Healthy);
+    std::fs::write(
+        app.dirs.config.join("routing.toml"),
+        "[groups.work]\nranking = 'smart'\nauto_switch = true\naccounts = ['alice', 'bob', 'carol']\n",
+    )
+    .unwrap();
+    let plan2 = app.auto_route_group_for(Some("work"), None, now).unwrap();
+    match decide(&app, "work", &plan2, true, now) {
+        AutoDecision::Switch { alias, .. } => assert_eq!(alias, "alice"),
+        other => panic!("expected switch to alice, got {other:?}"),
+    }
+}
+
+#[test]
+fn corrupt_auto_state_fails_closed() {
+    let rig = Rig::new();
+    rig.add_all(&[ALICE, BOB]);
+    let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
+    fake.ok(0.05, 0.5);
+    let mut app = rig.app_with_agy(&fake);
+    let now = Utc::now();
+    seed(&app, ALICE, now, 90.0, AccountHealth::Healthy);
+    seed(&app, BOB, now, 5.0, AccountHealth::Healthy);
+    enable_auto(&mut app, true);
+
+    std::fs::create_dir_all(&app.dirs.state).unwrap();
+    std::fs::write(app.dirs.state.join("auto-switch.json"), b"{corrupt json").unwrap();
+
+    let plan = app.auto_route_group_for(Some("work"), None, now).unwrap();
+    let d = decide(&app, "work", &plan, true, now);
+    assert!(
+        matches!(&d, AutoDecision::Defer(r) if r.contains("unreadable or corrupt")),
+        "corrupt auto-switch.json must defer, got {d:?}"
+    );
+    let history = RouteHistory::new(&app.dirs);
+    let out = app
+        .auto_switch_for("work", &plan, None, true, &history, now)
+        .unwrap();
+    assert!(out.is_none());
+    assert_eq!(rig.live_id(), Some(id_of(BOB)));
+}
+
+#[test]
+fn alternating_refreshed_and_unfresh_holds_dedupe_across_streak() {
+    let rig = Rig::new();
+    rig.add_all(&[ALICE, BOB]);
+    let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
+    fake.ok(0.05, 0.5);
+    let mut app = rig.app_with_agy(&fake);
+    let now = Utc::now();
+    seed(&app, ALICE, now, 90.0, AccountHealth::Healthy);
+    seed(&app, BOB, now, 5.0, AccountHealth::Healthy);
+    enable_auto(&mut app, true);
+    note_switch(&app.dirs, now, false).unwrap();
+
+    let plan = app.auto_route_group_for(Some("work"), None, now).unwrap();
+    let history = RouteHistory::new(&app.dirs);
+    for i in 0..10 {
+        let refreshed = i % 2 == 0;
+        let out = app
+            .auto_switch_for(
+                "work",
+                &plan,
+                None,
+                refreshed,
+                &history,
+                now + Duration::seconds(i),
+            )
+            .unwrap();
+        assert!(out.is_none());
+    }
+    let entries = history.load().entries;
+    assert_eq!(
+        entries.len(),
+        2,
+        "alternating cooling-down / fresh-live-reading holds must stay deduplicated: {entries:?}"
+    );
+}
+
+#[test]
+fn monitor_transient_refresh_failure_sets_failure_and_auto_error_backs_off() {
+    use agyva::core::monitor::MonitorProbe;
+    use agyva::core::watch::Probe;
+
+    // 1. Transient refresh failure reports failure and does not advance last_refresh.
+    let rig = Rig::new();
+    rig.add_all(&[ALICE, BOB]);
+    let fake = common::fake_agy::FakeAgy::install(&rig.tmp.path().join("fakeagy"));
+    fake.fail("dial tcp: lookup example.invalid: no such host", 1);
+    let mut app = rig.app_with_agy(&fake);
+    let now = Utc::now();
+    seed(&app, ALICE, now, 90.0, AccountHealth::Healthy);
+    seed(&app, BOB, now, 5.0, AccountHealth::Healthy);
+    enable_auto(&mut app, true);
+
+    let mut probe = MonitorProbe::new(
+        &app,
+        Some("work".into()),
+        None,
+        std::time::Duration::from_secs(300),
+    );
+    let r1 = probe.cycle(now);
+    assert!(
+        r1.failure.is_some(),
+        "transient network error must populate report.failure"
+    );
+    let calls_after_fail = fake.calls();
+    // Next cycle 65s later (> quota_min_refresh_secs=60s, < 300s) MUST retry refresh
+    // because last_refresh was not advanced on the transient failure.
+    fake.ok(0.5, 0.5);
+    let r2 = probe.cycle(now + Duration::seconds(65));
+    assert!(r2.failure.is_none());
+    assert!(
+        fake.calls() > calls_after_fail,
+        "refresh must retry after transient failure without waiting 300s"
+    );
+
+    // 2. Failing auto_switch_for (missing target snapshot during switch) backs off instead of retrying every cycle.
+    let rig2 = Rig::new();
+    rig2.add_all(&[ALICE, BOB]);
+    let fake2 = common::fake_agy::FakeAgy::install(&rig2.tmp.path().join("fakeagy2"));
+    fake2.ok(0.05, 0.5);
+    let mut app2 = rig2.app_with_agy(&fake2);
+    seed(&app2, ALICE, now, 90.0, AccountHealth::Healthy);
+    seed(&app2, BOB, now, 5.0, AccountHealth::Healthy);
+    enable_auto(&mut app2, true);
+    std::fs::remove_file(app2.dirs.snapshot_file(&id_of(ALICE))).unwrap();
+
+    let mut probe2 = MonitorProbe::new(&app2, Some("work".into()), None, std::time::Duration::ZERO);
+    probe2.cycle(now);
+    assert!(
+        probe2
+            .last_auto()
+            .is_some_and(|s| s.contains("auto-switch error:")),
+        "expected error on first failure, got {:?}",
+        probe2.last_auto()
+    );
+    // 15s later (< 60s backoff): backed off without retrying auto_switch_for.
+    probe2.cycle(now + Duration::seconds(15));
+    assert!(
+        probe2.last_auto().is_some_and(|s| s.contains("backed off")),
+        "expected backoff on immediate retry, got {:?}",
+        probe2.last_auto()
+    );
+}
+
+#[test]
+fn route_apply_committed_switch_warns_instead_of_failing_when_history_locked() {
+    use agyva::storage::lock::StateLock;
+
+    let rig = Rig::new();
+    rig.add_all(&[ALICE, BOB]);
+    let app = rig.app();
+    let now = Utc::now();
+    seed(&app, ALICE, now, 90.0, AccountHealth::Healthy);
+    seed(&app, BOB, now, 5.0, AccountHealth::Healthy);
+    std::fs::write(
+        app.dirs.config.join("routing.toml"),
+        "[groups.work]\naccounts = ['alice', 'bob']\n",
+    )
+    .unwrap();
+
+    let history = RouteHistory::new(&app.dirs);
+    let lock_path = app.dirs.state.join("route-history.lock");
+    let held = std::thread::spawn(move || {
+        let guard = StateLock::acquire(&lock_path, std::time::Duration::from_millis(500)).ok();
+        std::thread::sleep(std::time::Duration::from_millis(3500));
+        drop(guard);
+    });
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    let out = app
+        .route_apply("work", None, false, true, &history, now)
+        .expect("committed switch must return Ok even if history write fails");
+    let _ = held.join();
+    assert_eq!(out.alias, "alice");
+    assert_eq!(rig.live_id(), Some(id_of(ALICE)));
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.contains("route history could not be updated")),
+        "expected history warning in {:?}",
+        out.warnings
     );
 }

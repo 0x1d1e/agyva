@@ -139,6 +139,9 @@ impl Dirs {
     pub fn quota_cache_file(&self) -> PathBuf {
         self.cache.join("quota.json")
     }
+    pub fn update_check_cache_file(&self) -> PathBuf {
+        self.cache.join("update-check.json")
+    }
 }
 
 /// Locations of agy's native companion files.

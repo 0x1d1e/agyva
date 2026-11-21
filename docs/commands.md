@@ -152,6 +152,10 @@ work = "pro"                     # declared plan for least-used ranking
 | `plans` | Per-account `free` / `pro` / `ultra`; agy never reports a plan, so this is the only source. |
 | `models` | Model family → quota group, so `--for-model` knows which bucket pays. |
 | `auto_switch` | Opt-in automation for this group; see [Opt-in auto-switch](#opt-in-auto-switch). |
+| `five_hour_threshold_percent` | Active five-hour share at or below which auto-switch may trigger (0–100, default `10.0`). |
+| `weekly_threshold_percent` | Active weekly share at or below which auto-switch may trigger (0–100, default `10.0`). |
+| `hysteresis_percent` | Minimum margin a healthy candidate must lead the active account by (0–100, default `10.0`). |
+| `cooldown_secs` | Optional per-group switch cooldown override in seconds (30–86400; defaults to `auto_switch_cooldown_secs`). |
 
 `route list` names each group’s ranking and its real activation mode: `manual activation`, the opt-in still
 missing its acknowledgement (it prints the `config set auto_switch_ack true` hint), or `auto-switch enabled
@@ -241,8 +245,12 @@ auto-confirms, so automation can only happen through the monitor’s cycle.
 It still refuses to act on stale evidence (the cycle must have won a live active
 reading, never a cached reset time), never picks a suspended or otherwise
 ineligible account, defers while agy sessions are detected (or detection is
-uncertain) or a switch journal awaits recovery, and waits at least 900 seconds
-between switches — a manual `agyva use` re-arms that cooldown too. Holds and
+uncertain) or a switch journal awaits recovery, and waits at least
+`cooldown_secs` / `auto_switch_cooldown_secs` (default 900 seconds) between
+switches — a manual `agyva use` re-arms that cooldown too. Standby candidates
+use cache readings up to `auto_switch_candidate_max_age_secs` (default
+21600 seconds) and must clear `five_hour_threshold_percent` /
+`weekly_threshold_percent` and `hysteresis_percent` (defaults 10%). Holds and
 defers are recorded in `agyva route history`, and the cooldown bookkeeping lives
 in `<state dir>/auto-switch.json` (mode 0600, schema 1). Set `auto_switch_ack`
 back to `false` (or `auto_switch` to `false`) to stop it.
@@ -288,9 +296,11 @@ agyva import /home/you/agyva-export.agy
 `export` writes a passphrase-encrypted archive (always a fresh file; an existing
 destination is never overwritten) and requires an absolute path. The archive
 passphrase is separate from your vault passphrase and is asked for
-interactively, or supply `AGYVA_ARCHIVE_PASSPHRASE` (minimum 8 characters). It
-uses the production Argon2id profile regardless of your local vault settings, and
-the vault key is never exported.
+interactively, or supply `AGYVA_ARCHIVE_PASSPHRASE` (minimum 8 characters).
+Exports use a 64 MiB Argon2id profile (`t=3`, `p=1`) regardless of your local
+vault settings, while `import` accepts archives down to the 19 MiB (`t=2`,
+`p=1`) floor for compatibility with existing archives; the vault key is never
+exported.
 
 `import` adds accounts that are missing and skips ones already saved — an import
 never modifies or removes anything in the destination. All entries are validated
@@ -310,12 +320,32 @@ agyva update --install            # same, spelled out
 agyva update --check              # report only; installs nothing
 ```
 
-Updates come from this project’s GitHub Releases: the release tarball and its
-`SHA256SUMS` are verified before the running binary is replaced atomically.
-Every invocation also checks for a newer stable release once at startup (2 s
-timeout, silent on failure) and prints a one-line notice on stderr; disable that
-with `check_updates = false` in the config or `AGYVA_UPDATE_CHECK=0` in the
-environment. [Self-update internals](architecture.md#self-update).
+Updates come from this project’s GitHub Releases on supported targets
+(`x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`): the release
+tarball and its `SHA256SUMS` are verified before the running binary is replaced
+atomically. Every invocation also checks for a newer stable release once at
+startup (2 s timeout, silent on failure, cached in `<cache>/update-check.json`
+for 24 hours on success and 1 hour on failure, skipped on unsupported targets)
+and prints a one-line notice on stderr; disable that with `check_updates = false`
+in the config or `AGYVA_UPDATE_CHECK=0` in the environment.
+[Self-update internals](architecture.md#self-update).
+
+## Rekey the vault
+
+Rotate the vault key or passphrase, or migrate between keyring and passphrase
+storage.
+
+```sh
+agyva rekey                      # rotate key or passphrase in the current mode
+agyva rekey --mode passphrase    # migrate to a passphrase-protected vault
+agyva rekey --mode keyring       # migrate to the OS keyring
+```
+
+`rekey` unlocks the existing vault (using the keyring or `AGYVA_PASSPHRASE`),
+decrypts all saved snapshots and checkpoints in memory, re-encrypts them under
+the new key, and commits `vault.json` atomically. In passphrase mode, supply the
+new passphrase interactively or via `AGYVA_NEW_PASSPHRASE` (minimum 8
+characters). Pending switch recovery blocks `rekey` with exit 3.
 
 ## Settings
 
@@ -326,6 +356,8 @@ the file path; `agyva config set <key> <value>` validates before saving.
 | --- | --- |
 | `allow_untested_agy` | `false`; accept agy versions outside the known-good range? |
 | `auto_switch_ack` | `false`; explicit acknowledgement that opt-in route automation may switch accounts. |
+| `auto_switch_candidate_max_age_secs` | `21600`; maximum cache age in seconds for standby auto-switch candidates, 60–604800. |
+| `auto_switch_cooldown_secs` | `900`; minimum seconds between switches before auto-switch may run again, 30–86400. |
 | `backend` | `auto`; `secret-service` or `file` chooses agy’s native store. |
 | `check_updates` | `true`; check GitHub Releases for newer agyva at startup. |
 | `checkpoints_keep` | `5`; ordinary checkpoints retained, 1–20. Pinned copies are never pruned. |
@@ -336,7 +368,7 @@ the file path; `agyva config set <key> <value>` validates before saving.
 | `policy_acknowledged` | `false`; whether the one-time policy notice was shown. |
 | `quota_fresh_secs` | `300`; how long a quota reading counts as fresh, 10–86400. |
 | `quota_min_refresh_secs` | `60`; minimum seconds between quota refreshes, 10–3600. |
-| `vault_key` | `auto`; `keyring` or `passphrase`. The mode is fixed when the vault is created. |
+| `vault_key` | `auto`; `keyring` or `passphrase`. Sets initial vault mode; use `agyva rekey` to rotate or migrate an existing vault. |
 | `watch_interval_secs` | `300`; seconds between `agyva watch` checks, 60–86400. |
 
 State and cache use XDG directories. `AGYVA_LOG=debug` sends logs to stderr;

@@ -292,6 +292,7 @@ fn dispatch(app: &App, command: Command, io: &mut Io<'_>, st: Style) -> Result<i
                         return Ok(exit::OK);
                     }
                 }
+                let now = chrono::Utc::now();
                 let outcome = app.route_apply(group, None, *force, true, &history, now)?;
                 if a.json {
                     #[derive(Serialize)]
@@ -478,6 +479,18 @@ fn dispatch(app: &App, command: Command, io: &mut Io<'_>, st: Style) -> Result<i
             writeln!(io.out, "{msg}").map_err(w)?;
         }
         Command::Config(c) => config(app, c, io)?,
+        Command::Rekey(a) => {
+            let r = app.rekey(a.mode.map(Into::into))?;
+            writeln!(
+                io.out,
+                "Rekeyed vault (mode: {}, {} snapshot(s), {} checkpoint(s)).",
+                r.mode, r.snapshots, r.checkpoints
+            )
+            .map_err(w)?;
+            for warning in &r.warnings {
+                writeln!(io.err, "note: {warning}").map_err(w)?;
+            }
+        }
         Command::Export(a) => {
             let r = app.export_archive(&a.file, a.account.as_deref())?;
             writeln!(

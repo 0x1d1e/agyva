@@ -29,6 +29,8 @@ use crate::paths::Dirs;
 pub const KEY_SERVICE: &str = "agyva";
 pub const KEY_USER: &str = "vault-key";
 pub const ENV_PASSPHRASE: &str = "AGYVA_PASSPHRASE";
+/// New passphrase used when rotating or migrating the vault key (`rekey`).
+pub const ENV_NEW_PASSPHRASE: &str = "AGYVA_NEW_PASSPHRASE";
 /// Passphrase for import/export archives. Separate from the vault
 /// passphrase: an archive must never unlock the vault or vice versa.
 pub const ENV_ARCHIVE_PASSPHRASE: &str = "AGYVA_ARCHIVE_PASSPHRASE";
@@ -96,6 +98,12 @@ impl KdfParams {
         Self::with_cost(19 * 1024, 2, 1)
     }
 
+    /// Stronger Argon2id profile for portable export archives (64 MiB, t=3, p=1)
+    /// with a fresh 16-byte salt.
+    pub fn archive_production() -> Result<Self> {
+        Self::with_cost(64 * 1024, 3, 1)
+    }
+
     pub fn with_cost(m_kib: u32, t: u32, p: u32) -> Result<Self> {
         let mut salt = [0u8; 16];
         getrandom::fill(&mut salt)
@@ -132,6 +140,7 @@ pub struct EnvOrTty {
     /// Prompt label; also names the environment variable in errors.
     env_name: &'static str,
     label: &'static str,
+    repeat_label: &'static str,
 }
 
 impl EnvOrTty {
@@ -142,6 +151,17 @@ impl EnvOrTty {
             env_passphrase,
             env_name: ENV_PASSPHRASE,
             label: "Vault passphrase: ",
+            repeat_label: "Repeat passphrase: ",
+        }
+    }
+
+    /// Like [`EnvOrTty::new`] with the new-passphrase prompt and variable name.
+    pub fn for_new_passphrase(env_passphrase: Option<SecretString>) -> Self {
+        Self {
+            env_passphrase,
+            env_name: ENV_NEW_PASSPHRASE,
+            label: "New vault passphrase: ",
+            repeat_label: "Repeat new passphrase: ",
         }
     }
 
@@ -151,6 +171,7 @@ impl EnvOrTty {
             env_passphrase,
             env_name: ENV_ARCHIVE_PASSPHRASE,
             label: "Archive passphrase: ",
+            repeat_label: "Repeat passphrase: ",
         }
     }
 }
@@ -175,7 +196,7 @@ impl PassphraseSource for EnvOrTty {
         }
         if confirm {
             let again = SecretString::from(
-                rpassword::prompt_password("Repeat passphrase: ")
+                rpassword::prompt_password(self.repeat_label)
                     .map_err(|e| Error::io("reading passphrase", e))?,
             );
             if again.expose_secret() != first.expose_secret() {
@@ -350,15 +371,40 @@ impl KeyProvider {
         Ok(VaultKey::from_bytes(arr))
     }
 
-    fn write_meta(&self, meta: &VaultMeta) -> Result<()> {
+    pub fn write_meta(&self, meta: &VaultMeta) -> Result<()> {
         let json = serde_json::to_vec_pretty(meta).map_err(|e| Error::format(e.to_string()))?;
         let path = self.dirs.vault_meta_file();
         fsutil::atomic_write(&path, &json)
             .map_err(|e| Error::io(format!("writing {}", path.display()), e))
     }
 
-    fn create_keyring(&self) -> Result<VaultKey> {
-        let key = VaultKey::generate()?;
+    /// Generate or derive a new `(VaultKey, VaultMeta)` in memory without
+    /// modifying the keyring or `vault.json`.
+    pub fn provision_new_key(
+        &self,
+        mode: VaultKeyMode,
+        new_passphrases: &dyn PassphraseSource,
+    ) -> Result<(VaultKey, VaultMeta)> {
+        match mode {
+            VaultKeyMode::Keyring => self.prepare_keyring_meta(),
+            VaultKeyMode::Passphrase => self.prepare_passphrase_meta(new_passphrases),
+            VaultKeyMode::Auto => match self.store.get(KEY_SERVICE, KEY_USER) {
+                Ok(_) => self.prepare_keyring_meta(),
+                Err(e) => {
+                    let err: Error = e.into();
+                    tracing::info!(reason = %err.message(), "keyring unavailable, using passphrase vault");
+                    eprintln!(
+                        "note: OS keyring unavailable ({}); using a passphrase-protected vault",
+                        err.message()
+                    );
+                    self.prepare_passphrase_meta(new_passphrases)
+                }
+            },
+        }
+    }
+
+    /// Store `key` in the OS keyring and verify by reading it back.
+    pub fn commit_keyring_key(&self, key: &VaultKey) -> Result<()> {
         let encoded = Zeroizing::new(B64.encode(key.as_bytes()));
         self.store.set(
             KEY_SERVICE,
@@ -375,22 +421,35 @@ impl KeyProvider {
                 "keyring read-back mismatch while creating the vault key",
             ));
         }
+        Ok(())
+    }
+
+    /// Remove the vault key entry from the OS keyring.
+    pub fn delete_keyring_key(&self) -> Result<bool> {
+        Ok(self.store.delete(KEY_SERVICE, KEY_USER)?)
+    }
+
+    fn prepare_keyring_meta(&self) -> Result<(VaultKey, VaultMeta)> {
+        let key = VaultKey::generate()?;
         let verifier = B64.encode(seal(&key, VERIFIER_CONTEXT, VERIFIER_PLAINTEXT)?);
-        self.write_meta(&VaultMeta {
+        let meta = VaultMeta {
             schema_version: META_VERSION,
             mode: "keyring".into(),
             kdf: None,
             verifier,
-        })?;
-        Ok(key)
+        };
+        Ok((key, meta))
     }
 
-    fn create_passphrase(&self) -> Result<VaultKey> {
+    fn prepare_passphrase_meta(
+        &self,
+        passphrases: &dyn PassphraseSource,
+    ) -> Result<(VaultKey, VaultMeta)> {
         let kdf = match &self.kdf {
-            Some(k) => k.clone(),
+            Some(k) => KdfParams::with_cost(k.m_kib, k.t, k.p)?,
             None => KdfParams::production()?,
         };
-        let passphrase = self.passphrases.passphrase(true)?;
+        let passphrase = passphrases.passphrase(true)?;
         if passphrase.expose_secret().chars().count() < MIN_PASSPHRASE_CHARS {
             return Err(Error::vault(format!(
                 "the passphrase is too short (minimum {MIN_PASSPHRASE_CHARS} characters)"
@@ -399,12 +458,25 @@ impl KeyProvider {
         }
         let key = derive_key(&passphrase, &kdf)?;
         let verifier = B64.encode(seal(&key, VERIFIER_CONTEXT, VERIFIER_PLAINTEXT)?);
-        self.write_meta(&VaultMeta {
+        let meta = VaultMeta {
             schema_version: META_VERSION,
             mode: "passphrase".into(),
             kdf: Some(kdf),
             verifier,
-        })?;
+        };
+        Ok((key, meta))
+    }
+
+    fn create_keyring(&self) -> Result<VaultKey> {
+        let (key, meta) = self.prepare_keyring_meta()?;
+        self.commit_keyring_key(&key)?;
+        self.write_meta(&meta)?;
+        Ok(key)
+    }
+
+    fn create_passphrase(&self) -> Result<VaultKey> {
+        let (key, meta) = self.prepare_passphrase_meta(&*self.passphrases)?;
+        self.write_meta(&meta)?;
         Ok(key)
     }
 }

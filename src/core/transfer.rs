@@ -154,7 +154,7 @@ impl App {
         }
 
         let passphrase = self.archive_passphrase(true)?;
-        let kdf = KdfParams::production()?;
+        let kdf = KdfParams::archive_production()?;
         let key = derive_key(&passphrase, &kdf)?;
         let plain = Zeroizing::new(
             serde_json::to_vec(&Payload {
@@ -769,19 +769,20 @@ fn validate_entries(entries: &mut [Entry]) -> Result<()> {
     Ok(())
 }
 
-/// `true` when the KDF is exactly the production profile (19 MiB, t=2, p=1,
-/// Argon2id, 16-byte salt).
+/// `None` when the KDF meets the minimum production floor (>= 19 MiB, t >= 2,
+/// p >= 1, Argon2id, 16-byte salt) and stays within [`KdfParams::validate`]
+/// upper bounds.
 fn production_profile_error(kdf: &KdfParams) -> Option<&'static str> {
     if kdf.alg != "argon2id" {
         return Some("algorithm");
     }
-    if kdf.m_kib != 19 * 1024 {
+    if kdf.m_kib < 19 * 1024 {
         return Some("memory cost");
     }
-    if kdf.t != 2 {
+    if kdf.t < 2 {
         return Some("time cost");
     }
-    if kdf.p != 1 {
+    if kdf.p < 1 {
         return Some("parallelism");
     }
     let Ok(salt) = B64.decode(&kdf.salt) else {
@@ -789,6 +790,9 @@ fn production_profile_error(kdf: &KdfParams) -> Option<&'static str> {
     };
     if salt.len() != 16 {
         return Some("salt length");
+    }
+    if kdf.validate().is_err() {
+        return Some("bounds");
     }
     None
 }
@@ -814,10 +818,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn production_profile_is_strict() {
+    fn production_profile_enforces_floor_and_upper_bounds() {
         assert!(production_profile_error(&KdfParams::production().unwrap()).is_none());
+        assert!(production_profile_error(&KdfParams::archive_production().unwrap()).is_none());
+
+        let cheap_mem = KdfParams::with_cost(19 * 1024 - 1, 2, 1).unwrap();
+        assert_eq!(production_profile_error(&cheap_mem), Some("memory cost"));
+
+        let cheap_t = KdfParams::with_cost(19 * 1024, 1, 1).unwrap();
+        assert_eq!(production_profile_error(&cheap_t), Some("time cost"));
+
         let cheap = KdfParams::with_cost(8, 1, 1).unwrap();
         assert!(production_profile_error(&cheap).is_some());
+
+        let excessive = KdfParams::with_cost(1_048_576, 5, 1).unwrap();
+        assert_eq!(production_profile_error(&excessive), Some("bounds"));
     }
 
     #[test]

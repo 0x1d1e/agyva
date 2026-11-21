@@ -23,13 +23,13 @@
 //! A crash leaves the journal behind and `agyva recover` finishes or undoes
 //! the work.
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 use crate::agy::companion::{self, Mode};
 use crate::agy::credentials::{CredentialInfo, RawCredential, parse_credential};
 use crate::agy::sessions;
 use crate::core::account::{Snapshot, read_snapshot, write_snapshot};
-use crate::core::app::App;
+use crate::core::app::{App, LoginLock};
 use crate::core::checkpoint::Checkpoint;
 use crate::core::error::{Error, ErrorKind, OUTCOME_UNKNOWN_HINT, Result};
 use crate::core::policy::RESTART_NOTICE;
@@ -68,18 +68,38 @@ impl Live {
 
 impl App {
     pub fn switch(&self, selector: &str, force: bool) -> Result<SwitchOutcome> {
-        let out = self.switch_inner(selector, force);
+        let lock = self.lock_login()?;
+        self.switch_under_lock(&lock, selector, force, Utc::now(), false, true)
+    }
+
+    pub(crate) fn switch_under_lock(
+        &self,
+        _lock: &LoginLock,
+        selector: &str,
+        force: bool,
+        now: DateTime<Utc>,
+        automatic: bool,
+        record_cooldown: bool,
+    ) -> Result<SwitchOutcome> {
+        let mut outcome = self.switch_inner_locked(selector, force)?;
         // A successful switch of any kind resets the auto-switch cooldown
         // (a manual `use` must win over pending automation); failures and
         // refusals leave the bookkeeping alone.
-        if out.is_ok() {
-            let _ = crate::core::auto::note_switch(&self.dirs, Utc::now(), false);
+        if record_cooldown
+            && let Err(e) = crate::core::auto::note_switch(&self.dirs, now, automatic)
+        {
+            tracing::warn!(error = %e.message(), "could not update auto-switch cooldown state");
+            if automatic {
+                outcome.warnings.push(format!(
+                    "the switch completed, but auto-switch cooldown state could not be updated ({})",
+                    e.message()
+                ));
+            }
         }
-        out
+        Ok(outcome)
     }
 
-    fn switch_inner(&self, selector: &str, force: bool) -> Result<SwitchOutcome> {
-        let _lock = self.lock_login()?;
+    fn switch_inner_locked(&self, selector: &str, force: bool) -> Result<SwitchOutcome> {
         self.require_no_pending()?;
         self.require_compat()?;
 

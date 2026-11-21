@@ -24,8 +24,9 @@ use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use semver::Version;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -33,10 +34,30 @@ use crate::core::error::{Error, Result};
 
 /// The one endpoint agyva ever contacts (GitHub API, HTTPS only).
 pub const UPDATE_REPO_API: &str = "https://api.github.com/repos/0x1d1e/agyva/releases/latest";
-/// Release asset platform this build installs from (release scripts' name).
-const ASSET_TARGET: &str = "x86_64-unknown-linux-gnu";
 const EXECUTABLE_NAME: &str = "agyva";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const CACHE_SCHEMA_VERSION: u32 = 1;
+const CACHE_OK_TTL_SECS: i64 = 86_400;
+const CACHE_ERR_TTL_SECS: i64 = 3_600;
+
+/// Release target triple supported by self-update on this build, if any.
+pub const fn supported_target() -> Option<&'static str> {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    {
+        Some("x86_64-unknown-linux-gnu")
+    }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64", target_env = "gnu"))]
+    {
+        Some("aarch64-unknown-linux-gnu")
+    }
+    #[cfg(not(any(
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "linux", target_arch = "aarch64", target_env = "gnu"),
+    )))]
+    {
+        None
+    }
+}
 /// Aggregate decompressed ceiling for the whole release archive.
 const MAX_ARCHIVE_UNCOMPRESSED: u64 = 128 * 1024 * 1024;
 /// Passive startup checks must never hold a command back for long; the
@@ -212,17 +233,114 @@ fn update_request_error(e: ureq::Error) -> Error {
 
 // ------------------------------------------------------------- check + run
 
+#[derive(Debug, Serialize, Deserialize)]
+struct UpdateCheckCache {
+    schema_version: u32,
+    checked_at: DateTime<Utc>,
+    latest: Option<String>,
+    ok: bool,
+}
+
+fn read_cached_check(path: &Path, now: DateTime<Utc>) -> Option<Option<UpdateCheck>> {
+    let bytes = fs::read(path).ok()?;
+    let entry: UpdateCheckCache = serde_json::from_slice(&bytes).ok()?;
+    if entry.schema_version != CACHE_SCHEMA_VERSION {
+        return None;
+    }
+    let ttl = if entry.ok {
+        ChronoDuration::seconds(CACHE_OK_TTL_SECS)
+    } else {
+        ChronoDuration::seconds(CACHE_ERR_TTL_SECS)
+    };
+    let age = now.signed_duration_since(entry.checked_at);
+    if age < ChronoDuration::zero() || age >= ttl {
+        return None;
+    }
+    if !entry.ok {
+        return Some(None);
+    }
+    let latest = entry
+        .latest
+        .as_deref()
+        .and_then(|tag| newer_version(tag, CURRENT_VERSION));
+    Some(Some(UpdateCheck::now(latest)))
+}
+
+fn write_cached_check(path: &Path, entry: &UpdateCheckCache) {
+    let Ok(bytes) = serde_json::to_vec(entry) else {
+        return;
+    };
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+        && crate::storage::fsutil::create_private_dir(parent).is_err()
+    {
+        return;
+    }
+    let _ = crate::storage::fsutil::atomic_write(path, &bytes);
+}
+
 /// The startup check over the real network: one metadata request, every
 /// failure silent. `enabled` is the resolved config/env gate.
 pub fn startup_check(enabled: bool) -> Option<UpdateCheck> {
-    if !enabled {
+    startup_check_cached(enabled, None, Utc::now())
+}
+
+/// Cached startup check: reuses a fresh on-disk decision (24h on success,
+/// 1h on failure) when `cache_file` is supplied.
+pub fn startup_check_cached(
+    enabled: bool,
+    cache_file: Option<&Path>,
+    now: DateTime<Utc>,
+) -> Option<UpdateCheck> {
+    startup_check_with(enabled, cache_file, &HttpTransport, now)
+}
+
+/// Testable startup check with an explicit cache path, transport and clock.
+pub fn startup_check_with(
+    enabled: bool,
+    cache_file: Option<&Path>,
+    transport: &dyn Transport,
+    now: DateTime<Utc>,
+) -> Option<UpdateCheck> {
+    if !enabled || supported_target().is_none() {
         return None;
     }
-    let release = fetch_release(&HttpTransport, CHECK_TIMEOUT).ok()?;
-    Some(UpdateCheck::now(newer_version(
-        &release.tag_name,
-        CURRENT_VERSION,
-    )))
+    if let Some(path) = cache_file
+        && let Some(cached) = read_cached_check(path, now)
+    {
+        return cached;
+    }
+    match fetch_release(transport, CHECK_TIMEOUT) {
+        Ok(release) => {
+            let check = UpdateCheck::now(newer_version(&release.tag_name, CURRENT_VERSION));
+            if let Some(path) = cache_file {
+                write_cached_check(
+                    path,
+                    &UpdateCheckCache {
+                        schema_version: CACHE_SCHEMA_VERSION,
+                        checked_at: now,
+                        latest: check.latest.clone(),
+                        ok: true,
+                    },
+                );
+            }
+            Some(check)
+        }
+        Err(_) => {
+            if let Some(path) = cache_file {
+                write_cached_check(
+                    path,
+                    &UpdateCheckCache {
+                        schema_version: CACHE_SCHEMA_VERSION,
+                        checked_at: now,
+                        latest: None,
+                        ok: false,
+                    },
+                );
+            }
+            None
+        }
+    }
 }
 
 /// Explicit update with an injectable transport (tests) and optional
@@ -232,16 +350,28 @@ pub fn install_update(
     transport: Box<dyn Transport>,
     target_exe: Option<&Path>,
 ) -> Result<UpdateCheck> {
-    run_update(check_only, transport.as_ref(), target_exe)
+    run_update_for_target(
+        check_only,
+        transport.as_ref(),
+        target_exe,
+        supported_target(),
+    )
 }
 
 /// Shared engine so tests can redirect the install target away from the
-/// running test binary.
-fn run_update(
+/// running test binary and exercise target gating.
+pub fn run_update_for_target(
     check_only: bool,
     transport: &dyn Transport,
     target_exe: Option<&Path>,
+    target: Option<&str>,
 ) -> Result<UpdateCheck> {
+    let Some(target) = target else {
+        return Err(
+            Error::refused("self-update is not supported on this platform/architecture")
+                .hint("download a release archive for your platform manually from GitHub Releases"),
+        );
+    };
     let release = fetch_release(transport, UPDATE_TIMEOUT)?;
     let check = UpdateCheck::now(newer_version(&release.tag_name, CURRENT_VERSION));
     if check_only {
@@ -256,8 +386,8 @@ fn run_update(
             "agyva {CURRENT_VERSION} is already the newest stable release"
         )));
     };
-    let plan = plan_from_release(&release, &latest)?;
-    let archive_name = format!("agyva-{latest}-{ASSET_TARGET}.tar.gz");
+    let plan = plan_from_release(&release, &latest, target)?;
+    let archive_name = format!("agyva-{latest}-{target}.tar.gz");
     let archive = transport.get(&plan.archive_url, UPDATE_TIMEOUT)?;
     if archive.len() as u64 > MAX_DOWNLOAD_BYTES {
         return Err(Error::refused("the release archive is too large"));
@@ -280,7 +410,7 @@ fn run_update(
             "the downloaded archive does not match the release digest; nothing was installed",
         ));
     }
-    let bytes = extract_binary(&archive, &latest.to_string())?;
+    let bytes = extract_binary(&archive, &latest.to_string(), target)?;
     let exe: PathBuf = match target_exe {
         Some(p) => p.to_path_buf(),
         None => std::env::current_exe()
@@ -326,9 +456,9 @@ struct UpdatePlan {
     api_digest: Option<String>,
 }
 
-fn plan_from_release(release: &Release, latest: &Version) -> Result<UpdatePlan> {
+fn plan_from_release(release: &Release, latest: &Version, target: &str) -> Result<UpdatePlan> {
     // Exact names, no ambiguous duplicates.
-    let archive_name = format!("agyva-{latest}-{ASSET_TARGET}.tar.gz");
+    let archive_name = format!("agyva-{latest}-{target}.tar.gz");
     let pick = |name: &str| -> Result<&Asset> {
         let found: Vec<&Asset> = release.assets.iter().filter(|a| a.name == name).collect();
         let [only] = found.as_slice() else {
@@ -421,8 +551,8 @@ impl<R: std::io::Read> std::io::Read for BoundedReader<R> {
         Ok(n)
     }
 }
-fn extract_binary(archive: &[u8], version: &str) -> Result<Zeroizing<Vec<u8>>> {
-    let stem = format!("agyva-{version}-{ASSET_TARGET}");
+fn extract_binary(archive: &[u8], version: &str, target: &str) -> Result<Zeroizing<Vec<u8>>> {
+    let stem = format!("agyva-{version}-{target}");
     let wanted = Path::new(&stem).join(EXECUTABLE_NAME);
     let gz = flate2::read::GzDecoder::new(archive);
     let mut tar = tar::Archive::new(BoundedReader {
@@ -588,25 +718,77 @@ mod tests {
         );
     }
 
+    const TEST_TARGET: &str = "x86_64-unknown-linux-gnu";
+
+    struct CountingTransport {
+        calls: std::sync::atomic::AtomicUsize,
+        result: Result<Vec<u8>>,
+    }
+
+    impl CountingTransport {
+        fn ok(body: Vec<u8>) -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                result: Ok(body),
+            }
+        }
+        fn err(msg: &str) -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                result: Err(Error::backend(msg)),
+            }
+        }
+        fn count(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Transport for CountingTransport {
+        fn get(&self, _url: &str, _t: Duration) -> Result<Vec<u8>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match &self.result {
+                Ok(b) => Ok(b.clone()),
+                Err(e) => Err(Error::backend(e.message())),
+            }
+        }
+    }
+
     #[test]
     fn release_with_no_stable_assets_cannot_plan() {
         let body = release_json("v9.9.9", serde_json::json!([]));
         let transport = Mapping(vec![(UPDATE_REPO_API, body)]);
-        let err = run_update(false, &transport, None).unwrap_err();
+        let err = run_update_for_target(false, &transport, None, Some(TEST_TARGET)).unwrap_err();
         assert!(err.message().contains("unambiguous"));
     }
 
     #[test]
     fn offline_update_fails_with_backend_error() {
-        let err = run_update(true, &Offline, None).unwrap_err();
+        let err = run_update_for_target(true, &Offline, None, Some(TEST_TARGET)).unwrap_err();
         assert_eq!(err.message(), "offline");
+    }
+
+    #[test]
+    fn unsupported_target_is_refused_without_touching_transport_or_exe() {
+        let transport = CountingTransport::ok(release_json("v9.9.9", serde_json::json!([])));
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("agyva");
+        fs::write(&exe, b"keep").unwrap();
+
+        let err_install = run_update_for_target(false, &transport, Some(&exe), None).unwrap_err();
+        assert!(err_install.message().contains("not supported"));
+
+        let err_check = run_update_for_target(true, &transport, None, None).unwrap_err();
+        assert!(err_check.message().contains("not supported"));
+
+        assert_eq!(transport.count(), 0);
+        assert_eq!(fs::read(&exe).unwrap(), b"keep");
     }
 
     #[test]
     fn check_only_never_downloads() {
         let body = release_json("v9.9.9", serde_json::json!([]));
         let transport = Mapping(vec![(UPDATE_REPO_API, body)]);
-        let check = run_update(true, &transport, None).unwrap();
+        let check = run_update_for_target(true, &transport, None, Some(TEST_TARGET)).unwrap();
         assert_eq!(check.latest.as_deref(), Some("9.9.9"));
         assert!(check.notice().is_some());
     }
@@ -615,8 +797,88 @@ mod tests {
     fn up_to_date_install_is_refused_not_forced() {
         let body = release_json("v0.0.1", serde_json::json!([]));
         let transport = Mapping(vec![(UPDATE_REPO_API, body)]);
-        let err = run_update(false, &transport, None).unwrap_err();
+        let err = run_update_for_target(false, &transport, None, Some(TEST_TARGET)).unwrap_err();
         assert!(err.message().contains("newest stable release"));
+    }
+
+    #[test]
+    fn startup_check_cache_hits_expires_and_invalidates_older_versions() {
+        if supported_target().is_none() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("cache").join("update-check.json");
+        let t0 = Utc::now();
+
+        // 1. First call fetches and populates cache; second call within 24h hits cache.
+        let transport = CountingTransport::ok(release_json("v9.9.9", serde_json::json!([])));
+        let first = startup_check_with(true, Some(&cache), &transport, t0).unwrap();
+        assert_eq!(first.latest.as_deref(), Some("9.9.9"));
+        let second = startup_check_with(
+            true,
+            Some(&cache),
+            &transport,
+            t0 + ChronoDuration::hours(23),
+        )
+        .unwrap();
+        assert_eq!(second.latest.as_deref(), Some("9.9.9"));
+        assert_eq!(transport.count(), 1);
+
+        // 2. Expired after 24h: hits transport again.
+        let third = startup_check_with(
+            true,
+            Some(&cache),
+            &transport,
+            t0 + ChronoDuration::hours(24),
+        )
+        .unwrap();
+        assert_eq!(third.latest.as_deref(), Some("9.9.9"));
+        assert_eq!(transport.count(), 2);
+
+        // 3. Cached version no longer newer than CURRENT_VERSION yields latest: None.
+        write_cached_check(
+            &cache,
+            &UpdateCheckCache {
+                schema_version: CACHE_SCHEMA_VERSION,
+                checked_at: t0,
+                latest: Some(CURRENT_VERSION.to_owned()),
+                ok: true,
+            },
+        );
+        let stale_notice = startup_check_with(
+            true,
+            Some(&cache),
+            &transport,
+            t0 + ChronoDuration::minutes(5),
+        )
+        .unwrap();
+        assert_eq!(stale_notice.latest, None);
+        assert_eq!(transport.count(), 2);
+
+        // 4. Offline failure is cached for 1h.
+        let err_cache = tmp.path().join("cache").join("err-check.json");
+        let offline = CountingTransport::err("offline");
+        assert!(startup_check_with(true, Some(&err_cache), &offline, t0).is_none());
+        assert!(
+            startup_check_with(
+                true,
+                Some(&err_cache),
+                &offline,
+                t0 + ChronoDuration::minutes(59),
+            )
+            .is_none()
+        );
+        assert_eq!(offline.count(), 1);
+        assert!(
+            startup_check_with(
+                true,
+                Some(&err_cache),
+                &offline,
+                t0 + ChronoDuration::hours(1),
+            )
+            .is_none()
+        );
+        assert_eq!(offline.count(), 2);
     }
 
     #[test]
@@ -665,7 +927,7 @@ mod tests {
             b.finish().unwrap();
         }
         let archive = gz(&buf);
-        let got = extract_binary(&archive, "0.2.0").unwrap();
+        let got = extract_binary(&archive, "0.2.0", TEST_TARGET).unwrap();
         assert_eq!(&**got, b"hello");
 
         // Build a one- or two-member archive of regular files.
@@ -686,12 +948,20 @@ mod tests {
         }
 
         // Wrong stem: the wanted member is absent.
-        assert!(extract_binary(&regular_archive(&[("other-stem/agyva", 0o755)]), "0.2.0").is_err());
+        assert!(
+            extract_binary(
+                &regular_archive(&[("other-stem/agyva", 0o755)]),
+                "0.2.0",
+                TEST_TARGET
+            )
+            .is_err()
+        );
         // Non-executable mode.
         assert!(
             extract_binary(
                 &regular_archive(&[("agyva-0.2.0-x86_64-unknown-linux-gnu/agyva", 0o644)]),
-                "0.2.0"
+                "0.2.0",
+                TEST_TARGET
             )
             .is_err()
         );
@@ -702,7 +972,8 @@ mod tests {
                     ("agyva-0.2.0-x86_64-unknown-linux-gnu/agyva", 0o755),
                     ("agyva-0.2.0-x86_64-unknown-linux-gnu/agyva", 0o755),
                 ]),
-                "0.2.0"
+                "0.2.0",
+                TEST_TARGET
             )
             .is_err()
         );
@@ -735,7 +1006,7 @@ mod tests {
             .unwrap();
             b.finish().unwrap();
         }
-        assert!(extract_binary(&gz(&buf), "0.2.0").is_err());
+        assert!(extract_binary(&gz(&buf), "0.2.0", TEST_TARGET).is_err());
     }
 
     #[test]
@@ -794,7 +1065,8 @@ mod tests {
             }
             b.finish().unwrap();
         }
-        let got = extract_binary(&gz(&buf), "0.2.0").expect("directory entries tolerated");
+        let got =
+            extract_binary(&gz(&buf), "0.2.0", TEST_TARGET).expect("directory entries tolerated");
         assert_eq!(&**got, b"binary");
     }
 
@@ -815,13 +1087,13 @@ mod tests {
         for digest in ["md5:", "sha256:abc", "sha512:0000"] {
             let r = release(Some(serde_json::json!(digest)));
             assert!(
-                plan_from_release(&r, &version).is_err(),
+                plan_from_release(&r, &version, TEST_TARGET).is_err(),
                 "digest {digest} must not be silently ignored"
             );
         }
         // Absent stays absent (GitHub does not always expose it yet).
         assert!(
-            plan_from_release(&release(None), &version)
+            plan_from_release(&release(None), &version, TEST_TARGET)
                 .unwrap()
                 .api_digest
                 .is_none()
@@ -838,6 +1110,6 @@ mod tests {
         }
         let archive = e.finish().unwrap();
         assert!(archive.len() < 32 * 1024 * 1024, "the bomb stays small");
-        assert!(extract_binary(&archive, "0.2.0").is_err());
+        assert!(extract_binary(&archive, "0.2.0", TEST_TARGET).is_err());
     }
 }

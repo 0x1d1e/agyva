@@ -7,7 +7,14 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use agyva::updater::{Transport, UPDATE_REPO_API, install_update};
+use agyva::updater::{
+    Transport, UPDATE_REPO_API, install_update, run_update_for_target, startup_check_with,
+    supported_target,
+};
+
+fn test_target() -> &'static str {
+    supported_target().unwrap_or("x86_64-unknown-linux-gnu")
+}
 
 /// URL-keyed in-memory transport.
 struct Mapping(Vec<(String, Vec<u8>)>);
@@ -51,7 +58,8 @@ fn release_json(tag: &str, assets: serde_json::Value) -> Vec<u8> {
 /// A valid release body for `version`: tarball asset + SHA256SUMS whose
 /// entries match the real bytes, plus the GitHub-style `sha256:` digest.
 fn release_with(version: &str, archive: &[u8]) -> Vec<u8> {
-    let archive_name = format!("agyva-{version}-x86_64-unknown-linux-gnu.tar.gz");
+    let target = test_target();
+    let archive_name = format!("agyva-{version}-{target}.tar.gz");
     let digest = format!("sha256:{}", hex_digest(archive));
     release_json(
         &format!("v{version}"),
@@ -70,7 +78,8 @@ fn release_with(version: &str, archive: &[u8]) -> Vec<u8> {
 }
 
 fn sums_body(version: &str, archive: &[u8]) -> String {
-    let archive_name = format!("agyva-{version}-x86_64-unknown-linux-gnu.tar.gz");
+    let target = test_target();
+    let archive_name = format!("agyva-{version}-{target}.tar.gz");
     format!("{}  {archive_name}\n", hex_digest(archive))
 }
 
@@ -85,7 +94,8 @@ fn archive_with(
     bytes: &[u8],
     extra: Option<(&str, tar::EntryType, u32)>,
 ) -> Vec<u8> {
-    let stem = format!("agyva-{version}-x86_64-unknown-linux-gnu");
+    let target = test_target();
+    let stem = format!("agyva-{version}-{target}");
     let mut buf = Vec::new();
     let raw_member = extra
         .filter(|(n, _, _)| n.contains(".."))
@@ -193,10 +203,11 @@ fn a_full_install_replaces_a_temp_target() {
     let payload = b"new-binary-bytes";
     let archive = archive_with(version, payload, None);
     let sums = sums_body(version, &archive);
+    let target = test_target();
     let t = Mapping(vec![])
         .with(UPDATE_REPO_API.into(), release_with(version, &archive))
         .with(
-            format!("https://example.invalid/agyva-{version}-x86_64-unknown-linux-gnu.tar.gz"),
+            format!("https://example.invalid/agyva-{version}-{target}.tar.gz"),
             archive.clone(),
         )
         .with(
@@ -229,15 +240,12 @@ fn a_full_install_replaces_a_temp_target() {
 fn a_checksum_mismatch_installs_nothing() {
     let version = "9.9.8";
     let archive = archive_with(version, b"evil", None);
-    // SUMS names a different digest than the archive actually has.
-    let wrong_sums = format!(
-        "{}  agyva-{version}-x86_64-unknown-linux-gnu.tar.gz\n",
-        "0".repeat(64)
-    );
+    let target = test_target();
+    let wrong_sums = format!("{}  agyva-{version}-{target}.tar.gz\n", "0".repeat(64));
     let t = Mapping(vec![])
         .with(UPDATE_REPO_API.into(), release_with(version, &archive))
         .with(
-            format!("https://example.invalid/agyva-{version}-x86_64-unknown-linux-gnu.tar.gz"),
+            format!("https://example.invalid/agyva-{version}-{target}.tar.gz"),
             archive,
         )
         .with(
@@ -263,15 +271,16 @@ fn a_checksum_mismatch_installs_nothing() {
 fn an_api_digest_mismatch_installs_nothing() {
     let version = "9.9.7";
     let archive = archive_with(version, b"bytes", None);
+    let target = test_target();
     // SUMS match the archive but the GitHub digest claims something else.
     let body = release_json(
         &format!("v{version}"),
         serde_json::json!([
             {
-                "name": format!("agyva-{version}-x86_64-unknown-linux-gnu.tar.gz"),
+                "name": format!("agyva-{version}-{target}.tar.gz"),
                 "digest": format!("sha256:{}", "f".repeat(64)),
                 "browser_download_url":
-                    format!("https://example.invalid/agyva-{version}-x86_64-unknown-linux-gnu.tar.gz")
+                    format!("https://example.invalid/agyva-{version}-{target}.tar.gz")
             },
             { "name": "SHA256SUMS", "browser_download_url": "https://example.invalid/SHA256SUMS" }
         ]),
@@ -280,7 +289,7 @@ fn an_api_digest_mismatch_installs_nothing() {
     let t = Mapping(vec![])
         .with(UPDATE_REPO_API.into(), body)
         .with(
-            format!("https://example.invalid/agyva-{version}-x86_64-unknown-linux-gnu.tar.gz"),
+            format!("https://example.invalid/agyva-{version}-{target}.tar.gz"),
             archive,
         )
         .with(
@@ -312,10 +321,11 @@ fn unsafe_archive_members_are_refused() {
         Some(("extra", tar::EntryType::Symlink, 0o777)),
     );
     let sums = sums_body(version, &symlinked);
+    let target = test_target();
     let t = Mapping(vec![])
         .with(UPDATE_REPO_API.into(), release_with(version, &symlinked))
         .with(
-            format!("https://example.invalid/agyva-{version}-x86_64-unknown-linux-gnu.tar.gz"),
+            format!("https://example.invalid/agyva-{version}-{target}.tar.gz"),
             symlinked.clone(),
         )
         .with(
@@ -343,7 +353,7 @@ fn unsafe_archive_members_are_refused() {
     let t = Mapping(vec![])
         .with(UPDATE_REPO_API.into(), release_with(version, &traversal))
         .with(
-            format!("https://example.invalid/agyva-{version}-x86_64-unknown-linux-gnu.tar.gz"),
+            format!("https://example.invalid/agyva-{version}-{target}.tar.gz"),
             traversal.clone(),
         )
         .with(
@@ -368,5 +378,122 @@ fn unsafe_archive_members_are_refused() {
         "{}",
         err.message()
     );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+struct CountingTransport {
+    calls: std::sync::atomic::AtomicUsize,
+    body: Option<Vec<u8>>,
+}
+
+impl CountingTransport {
+    fn ok(body: Vec<u8>) -> Self {
+        Self {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            body: Some(body),
+        }
+    }
+
+    fn offline() -> Self {
+        Self {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            body: None,
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Transport for CountingTransport {
+    fn get(&self, _url: &str, _t: Duration) -> Result<Vec<u8>, agyva::core::error::Error> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.body
+            .clone()
+            .ok_or_else(|| agyva::core::error::Error::backend("offline"))
+    }
+}
+
+#[test]
+fn unsupported_target_is_refused_without_touching_transport_or_exe() {
+    let t = CountingTransport::ok(release_json("v9.9.9", serde_json::json!([])));
+    let dir = install_dir("unsupported");
+    let exe = dir.join("agyva");
+    std::fs::write(&exe, b"keep-me").expect("old exe");
+
+    let err = run_update_for_target(false, &t, Some(&exe), None).expect_err("unsupported install");
+    assert_eq!(err.kind(), agyva::core::error::ErrorKind::Refused);
+    assert!(err.message().contains("not supported"), "{}", err.message());
+
+    let err_check = run_update_for_target(true, &t, None, None).expect_err("unsupported check");
+    assert_eq!(err_check.kind(), agyva::core::error::ErrorKind::Refused);
+    assert_eq!(t.count(), 0, "transport must not be contacted");
+    assert_eq!(std::fs::read(&exe).unwrap(), b"keep-me");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn startup_check_disk_cache_respects_ttls_and_version_invalidation() {
+    if supported_target().is_none() {
+        return;
+    }
+    let dir = install_dir("cache");
+    let cache = dir.join("cache").join("update-check.json");
+    let t0 = chrono::Utc::now();
+
+    // Cache hit within 24h calls transport only once.
+    let t = CountingTransport::ok(release_json("v9.9.9", serde_json::json!([])));
+    let c1 = startup_check_with(true, Some(&cache), &t, t0).expect("first check");
+    assert_eq!(c1.latest.as_deref(), Some("9.9.9"));
+    let c2 = startup_check_with(true, Some(&cache), &t, t0 + chrono::Duration::hours(23))
+        .expect("cached check");
+    assert_eq!(c2.latest.as_deref(), Some("9.9.9"));
+    assert_eq!(t.count(), 1);
+
+    // After 24h, TTL expires and transport is called again.
+    let c3 = startup_check_with(true, Some(&cache), &t, t0 + chrono::Duration::hours(24))
+        .expect("expired check");
+    assert_eq!(c3.latest.as_deref(), Some("9.9.9"));
+    assert_eq!(t.count(), 2);
+
+    // Cached version no longer newer than CURRENT_VERSION yields latest: None without hitting transport.
+    let current_cached = serde_json::json!({
+        "schema_version": 1,
+        "checked_at": t0,
+        "latest": env!("CARGO_PKG_VERSION"),
+        "ok": true
+    });
+    std::fs::write(&cache, current_cached.to_string()).unwrap();
+    let invalidated = startup_check_with(true, Some(&cache), &t, t0 + chrono::Duration::minutes(1))
+        .expect("invalidated cache returns UpdateCheck with latest: None");
+    assert_eq!(invalidated.latest, None);
+    assert_eq!(t.count(), 2);
+
+    // Offline failure caches for 1h.
+    let err_cache = dir.join("cache").join("offline-check.json");
+    let offline = CountingTransport::offline();
+    assert!(startup_check_with(true, Some(&err_cache), &offline, t0).is_none());
+    assert!(
+        startup_check_with(
+            true,
+            Some(&err_cache),
+            &offline,
+            t0 + chrono::Duration::minutes(59)
+        )
+        .is_none()
+    );
+    assert_eq!(offline.count(), 1);
+    assert!(
+        startup_check_with(
+            true,
+            Some(&err_cache),
+            &offline,
+            t0 + chrono::Duration::hours(1)
+        )
+        .is_none()
+    );
+    assert_eq!(offline.count(), 2);
+
     std::fs::remove_dir_all(&dir).unwrap();
 }

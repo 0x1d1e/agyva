@@ -96,6 +96,17 @@ impl RouteHistory {
     /// `route apply` and monitor automation may record concurrently, and an
     /// unlocked read-modify-write would drop one side's entry.
     pub fn record(&self, entry: HistoryEntry) -> Result<()> {
+        self.record_inner(entry, false)
+    }
+
+    /// Record a non-applied outcome unless an identical `(group, target,
+    /// outcome, reason)` entry already appears in the trailing uninterrupted
+    /// non-`Applied` streak.
+    pub(crate) fn record_once(&self, entry: HistoryEntry) -> Result<()> {
+        self.record_inner(entry, true)
+    }
+
+    fn record_inner(&self, entry: HistoryEntry, dedupe_streak: bool) -> Result<()> {
         if let Some(dir) = self.file.parent() {
             fsutil::create_private_dir(dir).map_err(|e| Error::io("creating state dir", e))?;
         }
@@ -104,6 +115,22 @@ impl RouteHistory {
             std::time::Duration::from_secs(3),
         )?;
         let mut file = self.load();
+        if dedupe_streak
+            && entry.outcome != HistoryOutcome::Applied
+            && file
+                .entries
+                .iter()
+                .rev()
+                .take_while(|prev| prev.outcome != HistoryOutcome::Applied)
+                .any(|prev| {
+                    prev.group == entry.group
+                        && prev.target == entry.target
+                        && prev.outcome == entry.outcome
+                        && prev.reason == entry.reason
+                })
+        {
+            return Ok(());
+        }
         file.schema_version = HISTORY_SCHEMA;
         file.entries.push(entry);
         // Keep the most recent entries only.
@@ -137,6 +164,14 @@ pub struct ApplyOutcome {
     pub alias: String,
     pub already_active: bool,
     pub warnings: Vec<String>,
+}
+
+pub(crate) struct ApplyTarget<'a> {
+    pub group: &'a str,
+    pub target_id: &'a str,
+    pub reason: &'a str,
+    pub automatic: bool,
+    pub record_cooldown: bool,
 }
 
 impl App {
@@ -194,8 +229,9 @@ impl App {
     }
 
     /// Validate the plan under the login lock, then perform exactly one
-    /// journaled switch through the existing path. Refuses on pending
-    /// recovery, evidence drift, or a changed group definition.
+    /// journaled switch through the existing path while holding the lock.
+    /// Refuses on pending recovery, evidence drift, or a changed group
+    /// definition.
     pub fn route_apply(
         &self,
         group: &str,
@@ -206,82 +242,112 @@ impl App {
         now: DateTime<Utc>,
     ) -> Result<ApplyOutcome> {
         let plan = self.route_apply_plan(group, for_model, now)?;
-        // Revalidation pass under the login lock: the group file, cache or
-        // registry may have changed between planning and locking. The lock
-        // is RELEASED before the switch: `switch` takes the same locks for
-        // the mutation itself and re-checks recovery there (holding them
-        // here would self-deadlock).
-        {
-            let _lock = self.lock_login()?;
-            let fresh = self.route_apply_plan(group, for_model, now)?;
-            if fresh.target_id != plan.target_id {
-                record_refusal_while_locked(
-                    history,
-                    refused_entry(
-                        group,
-                        &plan.target_id,
-                        "recommendation changed while preparing the switch",
-                        now,
-                    ),
-                );
-                return Err(Error::refused(format!(
-                    "the recommendation for `{group}` changed while preparing the switch (now {}); re-run `agyva route plan {group}`",
-                    fresh.target_alias
-                )));
-            }
-            if let Some(pending) = self.pending_journal()? {
-                record_refusal_while_locked(
-                    history,
-                    refused_entry(
-                        group,
-                        &plan.target_id,
-                        "an interrupted switch awaits recovery",
-                        now,
-                    ),
-                );
-                return Err(Error::recovery_required(format!(
-                    "an interrupted switch to account {} ({}) must be recovered first",
-                    pending.target,
-                    pending.phase.as_str()
-                )));
-            }
-            if !confirmed {
-                // Nothing happened; record nothing and refuse so the CLI
-                // can prompt.
-                return Err(Error::new(
-                    ErrorKind::Usage,
-                    "confirmation required (pass --yes non-interactively)",
-                ));
-            }
-            // The target must still be the recommendation in the evidence
-            // as seen under the lock.
-            let check = self.route_group_for(Some(group), for_model, now)?;
-            if check.recommendation.as_deref() != Some(plan.target_id.as_str()) && !force {
-                record_refusal_while_locked(
-                    history,
-                    refused_entry(
-                        group,
-                        &plan.target_id,
-                        "cached evidence no longer supports the recommendation",
-                        now,
-                    ),
-                );
-                return Err(Error::refused(format!(
-                    "cached evidence no longer supports `{}` as the recommendation for `{group}`; refresh and re-plan, or pass --force",
-                    plan.target_alias
-                )));
-            }
+        let lock = self.lock_login()?;
+        let fresh = self.route_apply_plan(group, for_model, now)?;
+        if fresh.target_id != plan.target_id {
+            record_refusal_while_locked(
+                history,
+                refused_entry(
+                    group,
+                    &plan.target_id,
+                    "recommendation changed while preparing the switch",
+                    now,
+                ),
+            );
+            return Err(Error::refused(format!(
+                "the recommendation for `{group}` changed while preparing the switch (now {}); re-run `agyva route plan {group}`",
+                fresh.target_alias
+            )));
         }
-        let outcome = self.switch(&plan.target_alias, false);
+        if let Some(pending) = self.pending_journal()? {
+            record_refusal_while_locked(
+                history,
+                refused_entry(
+                    group,
+                    &plan.target_id,
+                    "an interrupted switch awaits recovery",
+                    now,
+                ),
+            );
+            return Err(Error::recovery_required(format!(
+                "an interrupted switch to account {} ({}) must be recovered first",
+                pending.target,
+                pending.phase.as_str()
+            )));
+        }
+        if !confirmed {
+            // Nothing happened; record nothing and refuse so the CLI
+            // can prompt.
+            return Err(Error::new(
+                ErrorKind::Usage,
+                "confirmation required (pass --yes non-interactively)",
+            ));
+        }
+        // The target must still be the recommendation in the evidence
+        // as seen under the lock.
+        let check = self.route_group_for(Some(group), for_model, now)?;
+        if check.recommendation.as_deref() != Some(plan.target_id.as_str()) && !force {
+            record_refusal_while_locked(
+                history,
+                refused_entry(
+                    group,
+                    &plan.target_id,
+                    "cached evidence no longer supports the recommendation",
+                    now,
+                ),
+            );
+            return Err(Error::refused(format!(
+                "cached evidence no longer supports `{}` as the recommendation for `{group}`; refresh and re-plan, or pass --force",
+                fresh.target_alias
+            )));
+        }
+        self.route_apply_target_under_lock(
+            &lock,
+            ApplyTarget {
+                group,
+                target_id: &plan.target_id,
+                reason: &fresh.reason,
+                automatic: false,
+                record_cooldown: true,
+            },
+            history,
+            now,
+        )
+    }
+
+    pub(crate) fn route_apply_target_under_lock(
+        &self,
+        lock: &crate::core::app::LoginLock,
+        target: ApplyTarget<'_>,
+        history: &RouteHistory,
+        now: DateTime<Utc>,
+    ) -> Result<ApplyOutcome> {
+        let outcome = self.switch_under_lock(
+            lock,
+            target.target_id,
+            false,
+            now,
+            target.automatic,
+            target.record_cooldown,
+        );
         match outcome {
-            Ok(sw) => {
-                history.record(HistoryEntry {
+            Ok(mut sw) => {
+                if let Err(e) = history.record(HistoryEntry {
                     at: now,
-                    group: Some(group.to_owned()),
-                    target: plan.target_id.clone(),
+                    group: Some(target.group.to_owned()),
+                    target: target.target_id.to_owned(),
                     outcome: HistoryOutcome::Applied,
-                    reason: plan.reason.clone(),
-                })?;
+                    reason: target.reason.to_owned(),
+                }) {
+                    tracing::warn!(
+                        "could not record applied switch in route history: {}",
+                        e.message()
+                    );
+                    sw.warnings.push(format!(
+                        "switch succeeded, but route history could not be updated ({})",
+                        e.message()
+                    ));
+                }
                 Ok(ApplyOutcome {
                     alias: sw.account.alias,
                     already_active: sw.already_active,
@@ -289,13 +355,18 @@ impl App {
                 })
             }
             Err(e) => {
-                history.record(HistoryEntry {
+                if let Err(he) = history.record_once(HistoryEntry {
                     at: now,
-                    group: Some(group.to_owned()),
-                    target: plan.target_id.clone(),
+                    group: Some(target.group.to_owned()),
+                    target: target.target_id.to_owned(),
                     outcome: HistoryOutcome::Failed,
                     reason: bounded_reason(e.message()),
-                })?;
+                }) {
+                    tracing::warn!(
+                        "could not record failed switch in route history: {}",
+                        he.message()
+                    );
+                }
                 Err(e)
             }
         }
