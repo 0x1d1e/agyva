@@ -1,44 +1,25 @@
 # Antigravity setup and quota
 
-[README](../README.md) · [Commands](commands.md) · [Compatibility matrix](compatibility.md)
+[README](../README.md) · [Commands](commands.md) · [Compatibility](compatibility.md)
 
-Agyva manages existing Antigravity CLI (`agy`) logins. Install `agy` separately
-and sign in using its normal flow before saving each account with `agyva add`.
-It moves the stored credential as opaque bytes; it does not patch the binary,
-create an OAuth client or call a private Google endpoint.
+`agyva` manages logins `agy` already holds. Install `agy` separately and sign in via its normal flow before running `agyva add`. `agyva` copies stored credentials as opaque bytes; it does not patch `agy`, create an OAuth client, or call private Google endpoints.
 
 ## Choose a credential store
 
-Linux (Secret Service or file) is the locally verified target. macOS (Apple
-Keychain) and Windows (Windows Credential Manager) keyring backends are
-implemented and tested in CI, though unverified locally on macOS or Windows
-hardware. The default `backend = auto` discovers agy’s credential store, using
-the platform OS keyring (freedesktop Secret Service over D-Bus on Linux,
-Apple Keychain on macOS, Windows Credential Manager on Windows) or the native
-token file. Common Linux Secret Service providers include GNOME Keyring,
-KeePassXC and KWallet with its Secret Service bridge. Agyva’s byte compatibility
-when writing agy’s keyring item remains **unverified against real agy**; read
-the [compatibility matrix](compatibility.md#matrix).
+Linux (Secret Service or file) is verified locally. macOS (Apple Keychain) and Windows (Credential Manager) backends are implemented and CI-configured, unverified locally on hardware.
 
-For agy installations that keep their login in
-`~/.gemini/antigravity-cli/antigravity-oauth-token`:
+Default `backend = auto` detects `agy`'s store: OS keyring (Linux Secret Service over D-Bus, macOS Keychain, Windows Credential Manager) or the native token file. Common Linux Secret Service providers are GNOME Keyring, KeePassXC, and KWallet. **Keyring write compatibility with real `agy` remains unverified**; see [compatibility](compatibility.md#matrix).
+
+If your `agy` stores credentials in `~/.gemini/antigravity-cli/antigravity-oauth-token`:
 
 ```sh
 agyva config set backend file
 agyva doctor
 ```
 
-On a headless or no-D-Bus system, Agyva’s vault can use a passphrase
-(`vault_key = passphrase`, or automatically with `auto` when no keyring answers).
-Agy’s own login must still be in a store Agyva can reach. If it exists only in
-an unreachable keyring, switching cannot work. The file backend only helps
-when your agy reads that token file.
+On headless systems without D-Bus, `agyva`'s vault falls back to a passphrase (`vault_key = auto` or `passphrase`), while `agy`'s own login must use `backend = file`.
 
-The version gate accepts 1.5.x. Consumer credential and quota shapes were
-observed on `agy 1.5.9`; enterprise/GCP credentials and native keyring writes
-have narrower evidence. `agyva version` and `doctor` explain the detected
-setup. `--allow-untested` or `allow_untested_agy = true` bypasses the gate,
-without making the unknown version compatible.
+The version gate accepts `agy` `1.5.x` (consumer credential and quota shapes observed on `1.5.9`; enterprise/GCP shapes are unverified). Run `agyva version` and `agyva doctor` to inspect your setup. Use `--allow-untested` or `agyva config set allow_untested_agy true` to bypass the version gate at your own risk.
 
 ## Read quota and health
 
@@ -48,50 +29,15 @@ agyva usage --all --no-refresh
 agyva health --no-refresh
 ```
 
-The [official usage guide](https://antigravity.google/docs/cli/commands/usage/)
-describes quota groups and weekly/five-hour windows. Agyva obtains its data
-only from `agy -p "/usage" --output-format json`. The exact JSON envelope,
-including `command.data.groups[].buckets[]`, is a **locally observed,
-undocumented schema**. Official documentation of the command does not make
-that envelope a public API contract. Unrecognized responses become
-unavailable; Agyva never fills in a missing number.
+Quota comes only from `agy -p "/usage" --output-format json` ([official usage guide](https://antigravity.google/docs/cli/commands/usage/)). The JSON envelope (`command.data.groups[].buckets[]`) is a locally observed, undocumented schema. Unrecognized responses become unavailable; missing values are never guessed.
 
-Only the active account can refresh. Other accounts show their last cached
-reading, or no data, with an explanation. Switch manually and restart agy to
-refresh another account. Missing five-hour or weekly windows say `not reported`;
-this does not imply a full or exhausted allowance. Disabled groups are not
-entitled, distinct from exhausted enabled groups. Plans are not reported.
-
-Normal refreshes are at least 60 seconds apart (`quota_min_refresh_secs`).
-Readings are fresh for 300 seconds (`quota_fresh_secs`), then stale, and expired
-after 24 hours or the configured freshness interval if longer. Failed or
-throttled refreshes retain the prior numbers and observation timestamp.
-The dashboard continues aging freshness while it is open; a cache observation
-never verifies a live login.
-
-The documentation’s [sanitized real-cache example](capture-data/accounts.json)
-has two accounts. Personal Gemini weekly remaining is `98.9199995994568%`;
-work is `100%`. Both have an exhausted Claude and GPT group with `0%` weekly
-remaining. No five-hour window or plan was reported. Both health readings
-are cached `quota_limited`, with observation times on November 15, 2026.
-The [Usage capture](tui-usage.svg) displays these group values separately.
-
-`healthy` requires quota returned in the current run; health read from cache
-is not shown as healthy. A Terms of Service suspension requires an explicit
-message from agy; a bare HTTP 403 or `PERMISSION_DENIED` is ambiguous and maps
-to `unknown`. Suspended, revoked, expired and login-required states survive
-transient failures. Normal refresh, `watch` and the dashboard never retry a
-suspended account. `--force-refresh` requests one explicit check.
+- **Active account only:** Only the active account refreshes live. Other accounts show cached readings (or no data). Switch and restart `agy` to refresh another account.
+- **Missing windows and disabled groups:** Unreported five-hour or weekly windows show `not reported`. Disabled groups show as not entitled rather than exhausted. Plans are not reported by `agy`.
+- **Freshness and history:** Refreshes are throttled to `quota_min_refresh_secs` (60s). Readings are fresh for `quota_fresh_secs` (300s), stale afterward, and expired after 24h (or `quota_fresh_secs` if longer). Failed or throttled refreshes keep prior cache data. Observations accumulate in `<cache>/quota-history.json` (up to 64 samples per series) to compute burn rate (`%/h`) and exhaustion ETA.
+- **Health and suspension:** `healthy` requires quota returned in the current run; cached health is never labeled `healthy`. Terms-of-Service suspension (`TermsSuspended`) requires an explicit message from `agy` (a bare HTTP 403 or `PERMISSION_DENIED` maps to `unknown`). Sticky states survive transient errors. Normal refresh, `watch`, `monitor`, and the TUI skip suspended accounts; `--force-refresh` checks once.
 
 ## Policy and restarts
 
-Google’s [Antigravity FAQ](https://antigravity.google/docs/faq/) says third-party
-tools and account rotation are not supported on consumer plans. Agyva is
-unofficial and manual. You are responsible for complying with Google’s terms;
-it cannot prevent suspension or work around one. The first `add` or `use`
-prints a policy notice.
+Google's [Antigravity FAQ](https://antigravity.google/docs/faq/) states third-party tools and account rotation are unsupported on consumer plans. `agyva` is unofficial and manual by default; it cannot prevent or bypass suspensions. The first `add` or `use` prints this notice once.
 
-After a switch, **restart agy**. Running sessions keep the login they started
-with. Agyva only reports detected sessions; it never signals or kills them.
-The [security guide](security.md) explains encryption and the limits of local
-switch verification.
+**Restart `agy` after every switch.** Running `agy` sessions keep the login they started with. `agyva` reports detected sessions and never kills them. See [security](security.md) for encryption and verification limits.
