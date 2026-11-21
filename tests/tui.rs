@@ -8,12 +8,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use agyva::core::dashboard::Dashboard;
+use agyva::core::app_integrations::EndpointView;
+use agyva::core::dashboard::{Dashboard, RouteGroupSnapshot};
+use agyva::core::doctor::{Check, Level};
 use agyva::core::health::{APPEAL_NOTICE, AccountHealth};
+use agyva::core::profile::{ProfileSource, ProfileSpec, ProfileSummary, ResolvedProfile};
+use agyva::core::protocol::{EndpointProtocol, FetchedModel, ProbeResult, RateLimitInfo};
+use agyva::core::quota_history::BurnRateView;
+use agyva::core::route::{RoutePlan, RouteRow};
+use agyva::core::route_config::Ranking;
 use agyva::core::usage::RefreshMode;
 use agyva::storage::keyring::StoreErrorKind;
-use agyva::tui::app::{AppState, Overlay, View};
-use agyva::tui::backend::{AppBackend, Backend, Job, Msg, Reply, SwitchSummary, spawn_worker};
+use agyva::tui::app::{AppState, Overlay, SortOrder, View};
+use agyva::tui::backend::{
+    AppBackend, Backend, EndpointProbeSummary, EndpointSwitchSummary, Job, Msg,
+    ProfileSwitchSummary, Reply, SwitchSummary, spawn_worker,
+};
 use agyva::tui::event::{Event, startup, update};
 use agyva::tui::views::{self, column_plan};
 use chrono::Utc;
@@ -112,6 +122,11 @@ struct Fake {
     data: Mutex<Reply<Dashboard>>,
     loads: Mutex<Vec<RefreshMode>>,
     switches: Mutex<Vec<String>>,
+    endpoint_switches: Mutex<Vec<String>>,
+    endpoint_tests: Mutex<Vec<String>>,
+    endpoint_fetches: Mutex<Vec<String>>,
+    route_applies: Mutex<Vec<String>>,
+    profile_activates: Mutex<Vec<String>>,
 }
 
 impl Fake {
@@ -120,6 +135,11 @@ impl Fake {
             data: Mutex::new(d),
             loads: Mutex::default(),
             switches: Mutex::default(),
+            endpoint_switches: Mutex::default(),
+            endpoint_tests: Mutex::default(),
+            endpoint_fetches: Mutex::default(),
+            route_applies: Mutex::default(),
+            profile_activates: Mutex::default(),
         })
     }
 }
@@ -134,6 +154,77 @@ impl Backend for Fake {
         Ok(SwitchSummary {
             alias: id.to_owned(),
             already_active: false,
+            warnings: vec![],
+        })
+    }
+    fn switch_endpoint(&self, id: &str) -> Reply<EndpointSwitchSummary> {
+        self.endpoint_switches
+            .lock()
+            .expect("lock")
+            .push(id.to_owned());
+        Ok(EndpointSwitchSummary {
+            alias: id.to_owned(),
+            default_model: Some("gpt-4o".to_owned()),
+        })
+    }
+    fn test_endpoint(&self, id: &str) -> Reply<EndpointProbeSummary> {
+        self.endpoint_tests
+            .lock()
+            .expect("lock")
+            .push(id.to_owned());
+        Ok(EndpointProbeSummary {
+            id: id.to_owned(),
+            alias: id.to_owned(),
+            probe: Box::new(ProbeResult {
+                reachable: true,
+                detected_protocol: Some(EndpointProtocol::OpenAi),
+                latency_ms: Some(42),
+                model_count: 2,
+                models: vec![],
+                rate_limits: None,
+                error: None,
+            }),
+        })
+    }
+    fn fetch_endpoint_models(&self, id: &str) -> Reply<EndpointProbeSummary> {
+        self.endpoint_fetches
+            .lock()
+            .expect("lock")
+            .push(id.to_owned());
+        Ok(EndpointProbeSummary {
+            id: id.to_owned(),
+            alias: id.to_owned(),
+            probe: Box::new(ProbeResult {
+                reachable: true,
+                detected_protocol: Some(EndpointProtocol::OpenAi),
+                latency_ms: Some(55),
+                model_count: 3,
+                models: vec![],
+                rate_limits: None,
+                error: None,
+            }),
+        })
+    }
+    fn apply_route(&self, group: &str) -> Reply<SwitchSummary> {
+        self.route_applies
+            .lock()
+            .expect("lock")
+            .push(group.to_owned());
+        Ok(SwitchSummary {
+            alias: "bob".to_owned(),
+            already_active: false,
+            warnings: vec![],
+        })
+    }
+    fn activate_profile(&self, name: &str) -> Reply<ProfileSwitchSummary> {
+        self.profile_activates
+            .lock()
+            .expect("lock")
+            .push(name.to_owned());
+        Ok(ProfileSwitchSummary {
+            name: name.to_owned(),
+            switched_account: Some("alice".to_owned()),
+            active_endpoint: None,
             warnings: vec![],
         })
     }
@@ -169,12 +260,22 @@ fn every_view_and_overlay_renders_at_any_size_without_panicking() {
             id: s.accounts()[0].id.clone(),
             alias: s.accounts()[0].alias.clone(),
         }),
+        Some(Overlay::ConfirmEndpoint {
+            id: "ep01".into(),
+            alias: "openai-main".into(),
+        }),
+        Some(Overlay::ConfirmRoute {
+            group: "work".into(),
+            target: Some("bob".into()),
+        }),
+        Some(Overlay::ConfirmProfile { name: "dev".into() }),
     ];
     for view in View::ALL {
         for overlay in &overlays {
             s.view = view;
             s.overlay = overlay.clone();
             for (w, h) in [
+                (200, 40),
                 (120, 40),
                 (80, 24),
                 (40, 20),
@@ -212,7 +313,7 @@ fn accounts_view_shows_marker_alias_quota_status_and_dashes_when_unknown() {
     );
     let active = out
         .lines()
-        .find(|l| l.contains("carol"))
+        .find(|l| l.contains("carol") && l.contains(" 3 "))
         .expect("carol row");
     assert!(active.contains('\u{25cf}'), "active marker: {active}");
     assert!(active.contains("72%") && active.contains("40%"), "{active}");
@@ -335,6 +436,10 @@ fn views_switch_with_tab_backtab_and_function_keys() {
     press(&mut s, key(KeyCode::Tab));
     assert_eq!(s.view, View::Usage);
     press(&mut s, key(KeyCode::Tab));
+    assert_eq!(s.view, View::Endpoints);
+    press(&mut s, key(KeyCode::Tab));
+    assert_eq!(s.view, View::Routes);
+    press(&mut s, key(KeyCode::Tab));
     assert_eq!(s.view, View::Diagnostics);
     press(&mut s, key(KeyCode::Tab));
     assert_eq!(s.view, View::Accounts);
@@ -342,10 +447,14 @@ fn views_switch_with_tab_backtab_and_function_keys() {
     assert_eq!(s.view, View::Diagnostics);
     press(&mut s, key(KeyCode::F(2)));
     assert_eq!(s.view, View::Usage);
+    press(&mut s, key(KeyCode::F(3)));
+    assert_eq!(s.view, View::Endpoints);
+    press(&mut s, key(KeyCode::F(4)));
+    assert_eq!(s.view, View::Routes);
+    press(&mut s, key(KeyCode::F(5)));
+    assert_eq!(s.view, View::Diagnostics);
     press(&mut s, key(KeyCode::F(1)));
     assert_eq!(s.view, View::Accounts);
-    press(&mut s, key(KeyCode::F(3)));
-    assert_eq!(s.view, View::Diagnostics);
 }
 
 #[test]
@@ -640,10 +749,15 @@ fn the_view_code_never_builds_quota_numbers() {
         &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tui"),
         &mut files,
     );
-    assert!(files.len() >= 8);
+    assert!(files.len() >= 10);
     for f in files {
         let src = std::fs::read_to_string(&f).expect("read");
-        for bad in ["WindowView {", "remaining_percent:", "QuotaWindow {"] {
+        for bad in [
+            "WindowView {",
+            "remaining_percent:",
+            "QuotaWindow {",
+            "BurnRateView {",
+        ] {
             assert!(
                 !src.contains(bad),
                 "{} constructs quota ({bad})",
@@ -824,6 +938,21 @@ impl Backend for Crashing {
     }
     fn switch(&self, _id: &str) -> Reply<SwitchSummary> {
         panic!("synthetic crash in a switch job");
+    }
+    fn switch_endpoint(&self, _id: &str) -> Reply<EndpointSwitchSummary> {
+        panic!("synthetic crash in an endpoint switch job");
+    }
+    fn test_endpoint(&self, _id: &str) -> Reply<EndpointProbeSummary> {
+        panic!("synthetic crash in an endpoint test job");
+    }
+    fn fetch_endpoint_models(&self, _id: &str) -> Reply<EndpointProbeSummary> {
+        panic!("synthetic crash in an endpoint fetch job");
+    }
+    fn apply_route(&self, _group: &str) -> Reply<SwitchSummary> {
+        panic!("synthetic crash in a route apply job");
+    }
+    fn activate_profile(&self, _name: &str) -> Reply<ProfileSwitchSummary> {
+        panic!("synthetic crash in a profile activate job");
     }
 }
 
@@ -1022,4 +1151,560 @@ fn monochrome_keeps_selection_and_text_status_and_freshness_ages() {
     s.view = View::Usage;
     let out = text(&s, 100, 24);
     assert!(out.contains("stale") && !out.contains("just now"), "{out}");
+}
+
+// ------------------------------------------------ 5-tab dashboard features
+
+fn sample_endpoints(now: chrono::DateTime<Utc>) -> Vec<EndpointView> {
+    vec![
+        EndpointView {
+            id: "0123456789".into(),
+            alias: "openai-main".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            protocol: EndpointProtocol::OpenAi,
+            detected_protocol: Some(EndpointProtocol::OpenAi),
+            default_model: Some("gpt-4o".into()),
+            active: true,
+            enabled: true,
+            model_count: 2,
+            models: vec![
+                FetchedModel {
+                    id: "gpt-4o".into(),
+                    display_name: Some("GPT-4o".into()),
+                    context_window: Some(128_000),
+                    max_output_tokens: None,
+                    owned_by: Some("openai".into()),
+                    capabilities: vec![],
+                },
+                FetchedModel {
+                    id: "gpt-4o-mini".into(),
+                    display_name: None,
+                    context_window: None,
+                    max_output_tokens: None,
+                    owned_by: None,
+                    capabilities: vec![],
+                },
+            ],
+            fetched_at: Some(now - chrono::Duration::minutes(2)),
+            latency_ms: Some(42),
+            rate_limits: Some(RateLimitInfo {
+                requests_remaining: Some(95),
+                requests_limit: Some(100),
+                ..RateLimitInfo::default()
+            }),
+            last_error: None,
+        },
+        EndpointView {
+            id: "abcdef0123".into(),
+            alias: "anthropic-alt".into(),
+            base_url: "https://api.anthropic.com".into(),
+            protocol: EndpointProtocol::Anthropic,
+            detected_protocol: None,
+            default_model: Some("claude-sonnet-4".into()),
+            active: false,
+            enabled: true,
+            model_count: 0,
+            models: vec![],
+            fetched_at: None,
+            latency_ms: None,
+            rate_limits: None,
+            last_error: Some("connection timed out".into()),
+        },
+        EndpointView {
+            id: "fedcba9876".into(),
+            alias: "local-ollama".into(),
+            base_url: "http://localhost:11434".into(),
+            protocol: EndpointProtocol::Ollama,
+            detected_protocol: Some(EndpointProtocol::Ollama),
+            default_model: Some("qwen2.5-coder".into()),
+            active: false,
+            enabled: true,
+            model_count: 1,
+            models: vec![],
+            fetched_at: Some(now - chrono::Duration::minutes(5)),
+            latency_ms: Some(8),
+            rate_limits: None,
+            last_error: None,
+        },
+    ]
+}
+
+fn enrich_routes(d: &mut Dashboard, now: chrono::DateTime<Utc>) {
+    d.active_profile = Some(ResolvedProfile {
+        name: Some("dev".into()),
+        source: ProfileSource::Local,
+        path: Some(std::path::PathBuf::from("/workspace/.agyva.toml")),
+        spec: ProfileSpec {
+            name: Some("dev".into()),
+            description: Some("Local project profile".into()),
+            account: Some("carol".into()),
+            endpoint: Some("openai-main".into()),
+            group: Some("work".into()),
+            model: Some("gpt-4o".into()),
+            ..ProfileSpec::default()
+        },
+    });
+    d.profiles = vec![
+        ProfileSummary {
+            name: "dev".into(),
+            description: Some("Local project profile".into()),
+            source: ProfileSource::Local,
+            is_default: false,
+            path: Some(std::path::PathBuf::from("/workspace/.agyva.toml")),
+            account: Some("carol".into()),
+            endpoint: Some("openai-main".into()),
+            group: Some("work".into()),
+            model: Some("gpt-4o".into()),
+            warn_percent: Some(25.0),
+            critical_percent: Some(10.0),
+            monitor_interval: Some("60s".into()),
+            env: std::collections::BTreeMap::new(),
+        },
+        ProfileSummary {
+            name: "prod".into(),
+            description: Some("Production defaults".into()),
+            source: ProfileSource::Global,
+            is_default: true,
+            path: None,
+            account: Some("bob".into()),
+            endpoint: None,
+            group: Some("work".into()),
+            model: None,
+            warn_percent: None,
+            critical_percent: None,
+            monitor_interval: None,
+            env: std::collections::BTreeMap::new(),
+        },
+    ];
+    d.routing_groups = vec![RouteGroupSnapshot {
+        name: "work".into(),
+        ranking: Ranking::Smart,
+        auto_switch: true,
+        plan: RoutePlan {
+            schema_version: 1,
+            generated_at: now,
+            recommendation: Some(id_of(BOB)),
+            accounts: vec![
+                RouteRow {
+                    id: id_of(BOB),
+                    alias: "bob".into(),
+                    active: false,
+                    freshness: agyva::core::quota::Freshness::Fresh,
+                    eligible: true,
+                    remaining_percent: Some(85.0),
+                    rate_remaining_percent: Some(90.0),
+                    renewals: [Some(now + chrono::Duration::hours(48)), None],
+                    why: "fresh cache; 85% remains".into(),
+                    command: "agyva use bob".into(),
+                },
+                RouteRow {
+                    id: id_of(ALICE),
+                    alias: "alice".into(),
+                    active: false,
+                    freshness: agyva::core::quota::Freshness::Missing,
+                    eligible: false,
+                    remaining_percent: None,
+                    rate_remaining_percent: None,
+                    renewals: [None, None],
+                    why: "quota unknown".into(),
+                    command: "agyva use alice".into(),
+                },
+            ],
+        },
+    }];
+}
+
+#[test]
+fn sort_order_cycles_with_s_and_keeps_selected_account() {
+    let (_rig, _fake, mut d) = base();
+    // Give bob a higher quota than carol so Quota sort reorders visibly.
+    let mut bob_group = d.usage.accounts[2].groups[0].clone();
+    if let Some(w) = bob_group.five_hour.as_mut() {
+        w.remaining_percent = 95.0;
+    }
+    if let Some(w) = bob_group.weekly.as_mut() {
+        w.remaining_percent = 90.0;
+    }
+    d.usage.accounts[1].groups = vec![bob_group];
+
+    let mut s = state(Some(d), (100, 24));
+    assert_eq!(s.sort_order, SortOrder::Default);
+    let bob_id = id_of(BOB);
+    s.select_id(&bob_id);
+
+    press(&mut s, ch('s'));
+    assert_eq!(s.sort_order, SortOrder::Quota);
+    assert_eq!(s.selected_id.as_deref(), Some(bob_id.as_str()));
+    assert_eq!(s.visible()[0].alias, "bob");
+
+    press(&mut s, ch('s'));
+    assert_eq!(s.sort_order, SortOrder::Alias);
+    assert_eq!(s.visible()[0].alias, "alice");
+    assert_eq!(s.selected_id.as_deref(), Some(bob_id.as_str()));
+
+    press(&mut s, ch('s'));
+    assert_eq!(s.sort_order, SortOrder::Freshness);
+
+    press(&mut s, ch('s'));
+    assert_eq!(s.sort_order, SortOrder::Default);
+
+    // Pressing `s` on non-Accounts view does not change sort order.
+    s.view = View::Endpoints;
+    press(&mut s, ch('s'));
+    assert_eq!(s.sort_order, SortOrder::Default);
+}
+
+#[test]
+fn accounts_and_usage_display_summary_strip_smooth_bars_and_burn_rate_eta() {
+    let (_rig, _fake, mut d) = base();
+    let now = d.generated_at;
+    d.endpoints = sample_endpoints(now);
+    for g in &mut d.usage.accounts[2].groups {
+        if let Some(w) = g.weekly.as_mut() {
+            w.burn_rate = Some(BurnRateView {
+                percent_per_hour: Some(12.5),
+                eta_exhaustion_secs: Some(42 * 60),
+                exhausts_before_reset: Some(true),
+                samples: 4,
+            });
+        }
+    }
+    let mut s = state(Some(d), (120, 28));
+    s.now = now;
+    let out = text(&s, 120, 28);
+    assert!(out.contains("Active Target"), "{out}");
+    assert!(out.contains("Lowest & Burn"), "{out}");
+    assert!(out.contains("Endpoints"), "{out}");
+    assert!(out.contains("Next Reset"), "{out}");
+    assert!(out.contains("~42m"), "ETA hint shown: {out}");
+    assert!(
+        out.contains('\u{2593}') || out.contains('\u{2588}'),
+        "smooth block bar chars: {out}"
+    );
+
+    // Usage tab shows framed rounded card, burn rate %/h, ETA, and warning.
+    s.view = View::Usage;
+    let usage_out = text(&s, 100, 30);
+    assert!(usage_out.contains("╭─"), "rounded card: {usage_out}");
+    assert!(usage_out.contains("12.5%/h"), "{usage_out}");
+    assert!(usage_out.contains("~42m"), "{usage_out}");
+    assert!(usage_out.contains("exhausts before reset"), "{usage_out}");
+}
+
+#[test]
+fn endpoints_tab_renders_badges_limits_errors_filters_and_actions() {
+    let (_rig, _fake, mut d) = base();
+    let now = d.generated_at;
+    d.endpoints = sample_endpoints(now);
+    d.active_endpoint = Some("openai-main".into());
+
+    let mut s = state(Some(d), (120, 28));
+    s.now = now;
+    press(&mut s, key(KeyCode::F(3)));
+    assert_eq!(s.view, View::Endpoints);
+
+    let out = text(&s, 120, 28);
+    assert!(out.contains("[OPENAI]"), "{out}");
+    assert!(out.contains("[ANTHROPIC]"), "{out}");
+    assert!(out.contains("[OLLAMA]"), "{out}");
+    assert!(out.contains("42ms"), "{out}");
+    assert!(out.contains("req 95/100"), "{out}");
+    assert!(out.contains("err: connection"), "{out}");
+    assert!(out.contains("gpt-4o"), "{out}");
+
+    // Number key selects endpoint #2 (anthropic-alt), `d` shows details without secrets.
+    press(&mut s, ch('2'));
+    assert_eq!(
+        s.selected_endpoint().map(|e| e.alias.as_str()),
+        Some("anthropic-alt")
+    );
+    assert!(
+        text(&s, 120, 28).contains("Error: connection timed out"),
+        "preview card shows full error"
+    );
+    press(&mut s, ch('d'));
+    assert_eq!(s.overlay, Some(Overlay::Details));
+    let det = text(&s, 100, 24);
+    assert!(det.contains("https://api.anthropic.com"), "{det}");
+    assert!(!det.contains("sk-"), "{det}");
+    press(&mut s, key(KeyCode::Esc));
+
+    // `t` tests connection, `f` fetches models.
+    let jobs = press(&mut s, ch('t'));
+    assert_eq!(
+        jobs,
+        vec![Job::TestEndpoint {
+            id: "abcdef0123".into()
+        }]
+    );
+    assert!(s.endpoint_busy);
+    update(
+        &mut s,
+        Event::Msg(Msg::EndpointTested(Ok(EndpointProbeSummary {
+            id: "abcdef0123".into(),
+            alias: "anthropic-alt".into(),
+            probe: Box::new(ProbeResult {
+                reachable: true,
+                detected_protocol: Some(EndpointProtocol::Anthropic),
+                latency_ms: Some(33),
+                model_count: 4,
+                models: vec![],
+                rate_limits: None,
+                error: None,
+            }),
+        }))),
+    );
+    assert!(!s.endpoint_busy);
+    assert!(
+        s.message
+            .as_deref()
+            .is_some_and(|m| m.contains("33ms") && m.contains("4 model"))
+    );
+
+    let jobs = press(&mut s, ch('f'));
+    assert_eq!(
+        jobs,
+        vec![Job::FetchEndpointModels {
+            id: "abcdef0123".into()
+        }]
+    );
+    let reload = update(
+        &mut s,
+        Event::Msg(Msg::EndpointModelsFetched(Ok(EndpointProbeSummary {
+            id: "abcdef0123".into(),
+            alias: "anthropic-alt".into(),
+            probe: Box::new(ProbeResult {
+                reachable: true,
+                detected_protocol: Some(EndpointProtocol::Anthropic),
+                latency_ms: Some(29),
+                model_count: 5,
+                models: vec![],
+                rate_limits: None,
+                error: None,
+            }),
+        }))),
+    );
+    assert_eq!(reload, vec![Job::Load(RefreshMode::Skip)]);
+
+    // `Enter` on inactive endpoint opens ConfirmEndpoint, `y` dispatches SwitchEndpoint.
+    press(&mut s, key(KeyCode::Enter));
+    assert!(matches!(s.overlay, Some(Overlay::ConfirmEndpoint { .. })));
+    let confirm_out = text(&s, 100, 24);
+    assert!(
+        confirm_out.contains("Activate endpoint anthropic-alt"),
+        "{confirm_out}"
+    );
+    let jobs = press(&mut s, ch('y'));
+    assert_eq!(
+        jobs,
+        vec![Job::SwitchEndpoint {
+            id: "abcdef0123".into()
+        }]
+    );
+    assert!(s.switching);
+    update(
+        &mut s,
+        Event::Msg(Msg::EndpointSwitched(Ok(EndpointSwitchSummary {
+            alias: "anthropic-alt".into(),
+            default_model: Some("claude-sonnet-4".into()),
+        }))),
+    );
+    assert!(!s.switching);
+
+    // Filter `/` works on Endpoints.
+    press(&mut s, ch('/'));
+    type_str(&mut s, "ollama");
+    assert_eq!(s.visible_endpoints().len(), 1);
+    assert_eq!(
+        s.selected_endpoint().map(|e| e.alias.as_str()),
+        Some("local-ollama")
+    );
+    press(&mut s, key(KeyCode::Esc));
+    assert_eq!(s.visible_endpoints().len(), 3);
+}
+
+#[test]
+fn routes_tab_renders_profiles_and_ranked_candidates_and_activates() {
+    let (_rig, _fake, mut d) = base();
+    let now = d.generated_at;
+    enrich_routes(&mut d, now);
+
+    let mut s = state(Some(d), (120, 28));
+    s.now = now;
+    press(&mut s, key(KeyCode::F(4)));
+    assert_eq!(s.view, View::Routes);
+
+    let out = text(&s, 120, 28);
+    assert!(out.contains("Active Project Profile"), "{out}");
+    assert!(out.contains("dev"), "{out}");
+    assert!(out.contains("prod"), "{out}");
+    assert!(out.contains("work"), "{out}");
+
+    // Confirm profile activation on item 1 (`dev`).
+    press(&mut s, ch('1'));
+    press(&mut s, key(KeyCode::Enter));
+    assert!(matches!(s.overlay, Some(Overlay::ConfirmProfile { .. })));
+    let jobs = press(&mut s, ch('y'));
+    assert_eq!(jobs, vec![Job::ActivateProfile { name: "dev".into() }]);
+    update(
+        &mut s,
+        Event::Msg(Msg::ProfileActivated(Ok(ProfileSwitchSummary {
+            name: "dev".into(),
+            switched_account: Some("carol".into()),
+            active_endpoint: Some("openai-main".into()),
+            warnings: vec![],
+        }))),
+    );
+    assert!(!s.switching);
+    assert!(
+        s.message
+            .as_deref()
+            .is_some_and(|m| m.contains("Activated profile dev"))
+    );
+
+    // Select route group (`3`) -> shows ranked candidates, share %, exclusion reason.
+    press(&mut s, ch('3'));
+    let group_out = text(&s, 120, 28);
+    assert!(group_out.contains("85%"), "{group_out}");
+    assert!(group_out.contains("quota unknown"), "{group_out}");
+    assert!(group_out.contains("[OK]"), "{group_out}");
+    assert!(group_out.contains("[NO]"), "{group_out}");
+
+    // `d` opens route group details.
+    press(&mut s, ch('d'));
+    assert_eq!(s.overlay, Some(Overlay::Details));
+    assert!(text(&s, 100, 24).contains("Route Group: work"));
+    press(&mut s, key(KeyCode::Esc));
+
+    // `Enter` on route group opens ConfirmRoute, `y` dispatches ApplyRoute.
+    press(&mut s, key(KeyCode::Enter));
+    assert!(matches!(s.overlay, Some(Overlay::ConfirmRoute { .. })));
+    let jobs = press(&mut s, ch('y'));
+    assert_eq!(
+        jobs,
+        vec![Job::ApplyRoute {
+            group: "work".into()
+        }]
+    );
+    update(
+        &mut s,
+        Event::Msg(Msg::RouteApplied(Ok(SwitchSummary {
+            alias: "bob".into(),
+            already_active: false,
+            warnings: vec![],
+        }))),
+    );
+    assert!(!s.switching);
+
+    // Filter `/` works on Routes.
+    press(&mut s, ch('/'));
+    type_str(&mut s, "prod");
+    assert_eq!(s.visible_route_items().len(), 1);
+    press(&mut s, key(KeyCode::Esc));
+    assert_eq!(s.visible_route_items().len(), 3);
+}
+
+#[test]
+fn diagnostics_renders_all_seven_cards_and_tag_badges() {
+    let (_rig, _fake, mut d) = base();
+    let now = d.generated_at;
+    d.endpoints = sample_endpoints(now);
+    enrich_routes(&mut d, now);
+    d.doctor.checks.push(Check {
+        name: "sample-info",
+        level: Level::Info,
+        detail: "info detail".into(),
+        hint: None,
+    });
+    d.doctor.checks.push(Check {
+        name: "sample-warn",
+        level: Level::Warn,
+        detail: "warn detail".into(),
+        hint: None,
+    });
+    d.doctor.checks.push(Check {
+        name: "sample-fail",
+        level: Level::Fail,
+        detail: "fail detail".into(),
+        hint: None,
+    });
+
+    let mut s = state(Some(d), (110, 44));
+    s.view = View::Diagnostics;
+    let out = text(&s, 110, 44);
+    for want in [
+        "agyva:",
+        "agy:",
+        "credential backend:",
+        "vault:",
+        "endpoints:",
+        "profiles:",
+        "checkpoints:",
+        "[ OK ]",
+        "[INFO]",
+        "[WARN]",
+        "[FAIL]",
+    ] {
+        assert!(out.contains(want), "missing {want} in:\n{out}");
+    }
+}
+
+#[test]
+fn worker_dispatches_all_new_backend_methods() {
+    let (_rig, _fake, d) = base();
+    let fake = Fake::new(Ok(d));
+    let worker = spawn_worker(fake.clone());
+
+    worker
+        .jobs
+        .send(Job::SwitchEndpoint { id: "ep1".into() })
+        .expect("send");
+    assert!(matches!(
+        wait_msg(&worker),
+        Msg::EndpointSwitched(Ok(ref s)) if s.alias == "ep1"
+    ));
+
+    worker
+        .jobs
+        .send(Job::TestEndpoint { id: "ep1".into() })
+        .expect("send");
+    assert!(matches!(
+        wait_msg(&worker),
+        Msg::EndpointTested(Ok(ref s)) if s.probe.reachable
+    ));
+
+    worker
+        .jobs
+        .send(Job::FetchEndpointModels { id: "ep1".into() })
+        .expect("send");
+    assert!(matches!(
+        wait_msg(&worker),
+        Msg::EndpointModelsFetched(Ok(ref s)) if s.probe.model_count == 3
+    ));
+
+    worker
+        .jobs
+        .send(Job::ApplyRoute {
+            group: "work".into(),
+        })
+        .expect("send");
+    assert!(matches!(
+        wait_msg(&worker),
+        Msg::RouteApplied(Ok(ref s)) if s.alias == "bob"
+    ));
+
+    worker
+        .jobs
+        .send(Job::ActivateProfile { name: "dev".into() })
+        .expect("send");
+    assert!(matches!(
+        wait_msg(&worker),
+        Msg::ProfileActivated(Ok(ref s)) if s.name == "dev"
+    ));
+
+    assert_eq!(*fake.endpoint_switches.lock().expect("lock"), vec!["ep1"]);
+    assert_eq!(*fake.endpoint_tests.lock().expect("lock"), vec!["ep1"]);
+    assert_eq!(*fake.endpoint_fetches.lock().expect("lock"), vec!["ep1"]);
+    assert_eq!(*fake.route_applies.lock().expect("lock"), vec!["work"]);
+    assert_eq!(*fake.profile_activates.lock().expect("lock"), vec!["dev"]);
 }

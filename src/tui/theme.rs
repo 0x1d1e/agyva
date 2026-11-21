@@ -4,6 +4,7 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
+use crate::core::doctor::Level;
 use crate::core::health::AccountHealth;
 
 pub fn plain() -> Style {
@@ -22,8 +23,60 @@ pub fn selected() -> Style {
     Style::default().add_modifier(Modifier::REVERSED)
 }
 
+pub fn brand() -> Style {
+    Style::default()
+        .fg(Color::LightCyan)
+        .add_modifier(Modifier::BOLD)
+}
+
+pub fn accent() -> Style {
+    Style::default().fg(Color::Cyan)
+}
+
+pub fn accent_bold() -> Style {
+    Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD)
+}
+
+pub fn info() -> Style {
+    Style::default().fg(Color::Blue)
+}
+
+pub fn border() -> Style {
+    Style::default().fg(Color::DarkGray)
+}
+
+pub fn border_focus() -> Style {
+    Style::default().fg(Color::Cyan)
+}
+
+pub fn card_title() -> Style {
+    Style::default()
+        .fg(Color::LightCyan)
+        .add_modifier(Modifier::BOLD)
+}
+
 pub fn tab_active() -> Style {
-    Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+    Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::REVERSED | Modifier::BOLD)
+}
+
+pub fn tab_inactive() -> Style {
+    Style::default().fg(Color::DarkGray)
+}
+
+pub fn badge_profile() -> Style {
+    Style::default()
+        .fg(Color::Blue)
+        .add_modifier(Modifier::BOLD)
+}
+
+pub fn badge_proto() -> Style {
+    Style::default()
+        .fg(Color::LightCyan)
+        .add_modifier(Modifier::BOLD)
 }
 
 pub fn good() -> Style {
@@ -74,5 +127,14 @@ pub fn health(state: AccountHealth) -> Style {
         s if s.is_alarming() => bad(),
         AccountHealth::QuotaLimited | AccountHealth::NetworkUnavailable => warn(),
         _ => dim(),
+    }
+}
+
+pub fn doctor_level(level: Level) -> Style {
+    match level {
+        Level::Ok => good(),
+        Level::Info => info(),
+        Level::Warn => warn(),
+        Level::Fail => bad().add_modifier(Modifier::BOLD),
     }
 }

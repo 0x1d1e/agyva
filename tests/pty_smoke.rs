@@ -228,11 +228,14 @@ fn bare_agyva_on_a_pty_draws_navigates_and_restores_the_terminal() {
     let (code, out) = scenario(
         &[
             ("Gemini Pro", b"\t"),
-            ("journal: no interrupted switch", b"\t"),
+            ("No custom endpoints configured", b"\t"),
+            ("Active profile: none", b"\t"),
+            ("Security & Checkpoints", b"\t"),
         ],
         b"q",
     );
     assert_eq!(code, Some(0), "{out:?}");
+    assert!(out.contains("journal:"), "{out:?}");
     check_terminal_restored(&out);
 }
 

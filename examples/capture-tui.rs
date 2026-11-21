@@ -73,6 +73,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     key(&mut state, KeyCode::Char('?'));
     frames.push(capture(&state, "Help · 96×26")?);
     key(&mut state, KeyCode::Esc);
+    key(&mut state, KeyCode::F(3));
+    frames.push(capture(&state, "Endpoints · 96×26")?);
+    key(&mut state, KeyCode::F(4));
+    frames.push(capture(&state, "Routes · 96×26")?);
+    key(&mut state, KeyCode::F(5));
+    frames.push(capture(&state, "Diagnostics · 96×26")?);
     state.view = View::Accounts;
     update(&mut state, Event::Resize(40, 12));
     frames.push(capture(&state, "Accounts · narrow 40×12")?);

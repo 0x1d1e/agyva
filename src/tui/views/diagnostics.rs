@@ -1,38 +1,104 @@
-//! Environment and health diagnostics: agy version and compatibility, the
-//! credential backend, doctor findings, pending recovery and suspensions.
+//! Environment and health diagnostics: framed environment cards (`agyva`, `agy`,
+//! `backend`, `vault`, `endpoints`, `profiles`, `checkpoints`), pending
+//! recovery, suspensions, and `[ OK ]`/`[INFO]`/`[WARN]`/`[FAIL]` check rows.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use super::{line, rect_u16};
+use super::{line, rect_u16, rounded_card_lines};
 use crate::core::doctor::Level;
 use crate::tui::app::AppState;
 use crate::tui::theme;
 
-pub fn lines(state: &AppState) -> Vec<Line<'static>> {
+pub fn lines_for_width(state: &AppState, width: usize) -> Vec<Line<'static>> {
     let Some(d) = &state.data else {
         return vec![line("Loading...", theme::dim())];
     };
     let st = &d.status;
-    let mut out = vec![
-        line(format!("agyva {}", st.agyva_version), theme::bold()),
+    let framed = width >= 60;
+    let card_w = width.min(86);
+
+    let mut runtime = vec![
+        line(format!("agyva: {}", st.agyva_version), theme::bold()),
         line(format!("agy: {}", st.agy), theme::plain()),
     ];
     if let Some(p) = &st.agy_path {
-        out.push(line(format!("agy path: {p}"), theme::dim()));
+        runtime.push(line(format!("agy path: {p}"), theme::dim()));
     }
-    out.push(line(
+    runtime.push(line(
         format!("quota: {}", st.quota_provider),
         theme::plain(),
     ));
-    out.push(line(
-        format!("credential backend: {}", st.backend),
-        theme::plain(),
-    ));
-    out.push(line(format!("vault: {}", st.vault), theme::plain()));
-    out.push(line(format!("accounts: {}", st.accounts), theme::plain()));
+
+    let pinned_ckpts = d.checkpoints.iter().filter(|c| c.pinned).count();
+    let security = vec![
+        line(
+            format!("credential backend: {}", st.backend),
+            theme::plain(),
+        ),
+        line(format!("vault: {}", st.vault), theme::plain()),
+        line(format!("accounts: {}", st.accounts), theme::plain()),
+        line(
+            format!(
+                "checkpoints: {} saved ({pinned_ckpts} pinned)",
+                d.checkpoints.len()
+            ),
+            theme::plain(),
+        ),
+    ];
+
+    let ep_active = d.active_endpoint.as_deref().unwrap_or("none");
+    let prof_active = state.active_profile_name();
+    let integrations = vec![
+        line(
+            format!(
+                "endpoints: {} configured (active: {ep_active})",
+                d.endpoints.len()
+            ),
+            theme::plain(),
+        ),
+        line(
+            format!(
+                "profiles: {} saved (active: {})",
+                d.profiles.len(),
+                prof_active.as_deref().unwrap_or("none")
+            ),
+            theme::plain(),
+        ),
+        line(
+            format!("routes: {} group(s)", d.routing_groups.len()),
+            theme::plain(),
+        ),
+    ];
+
+    let mut out = Vec::new();
+    if framed {
+        out.extend(rounded_card_lines(
+            "Runtime (agyva & agy)",
+            theme::card_title(),
+            runtime,
+            card_w,
+        ));
+        out.extend(rounded_card_lines(
+            "Security & Checkpoints",
+            theme::card_title(),
+            security,
+            card_w,
+        ));
+        out.extend(rounded_card_lines(
+            "Endpoints & Profiles",
+            theme::card_title(),
+            integrations,
+            card_w,
+        ));
+    } else {
+        out.extend(runtime);
+        out.extend(security);
+        out.extend(integrations);
+    }
+
     if let Some(w) = state.sessions_warning() {
         out.push(line(format!("Running agy: {w}"), theme::warn()));
     }
@@ -55,25 +121,38 @@ pub fn lines(state: &AppState) -> Vec<Line<'static>> {
             }
         }
     }
+
     out.push(Line::default());
-    out.push(line("Checks", theme::bold()));
+    out.push(line("Checks", theme::card_title()));
     for c in &d.doctor.checks {
-        let (tag, style) = match c.level {
-            Level::Ok => ("ok  ", theme::good()),
-            Level::Info => ("info", theme::dim()),
-            Level::Warn => ("warn", theme::warn()),
-            Level::Fail => ("FAIL", theme::bad()),
+        let tag = match c.level {
+            Level::Ok => "[ OK ]",
+            Level::Info => "[INFO]",
+            Level::Warn => "[WARN]",
+            Level::Fail => "[FAIL]",
         };
-        out.push(line(format!("{tag} {}: {}", c.name, c.detail), style));
+        let style = theme::doctor_level(c.level);
+        out.push(Line::from(vec![
+            Span::styled(tag, style),
+            Span::styled(
+                format!(" {}: {}", c.name, crate::core::format::sanitize(&c.detail)),
+                if c.level == Level::Fail {
+                    style
+                } else {
+                    theme::plain()
+                },
+            ),
+        ]));
         if let Some(h) = &c.hint {
-            out.push(line(format!("     hint: {h}"), theme::dim()));
+            out.push(line(format!("       hint: {h}"), theme::dim()));
         }
     }
     out
 }
 
 pub(super) fn render(state: &AppState, f: &mut Frame<'_>, area: Rect) {
-    let paragraph = Paragraph::new(lines(state)).wrap(Wrap { trim: false });
+    let paragraph =
+        Paragraph::new(lines_for_width(state, usize::from(area.width))).wrap(Wrap { trim: false });
     let top = state.scroll.min(super::paragraph_max(&paragraph, area));
     f.render_widget(paragraph.scroll((rect_u16(top), 0)), area);
 }
