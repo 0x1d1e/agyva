@@ -42,11 +42,11 @@ never terminates agy; it only reports detected sessions (from
 Saved credentials and checkpoints are sealed at rest, and the surrounding files
 are written defensively:
 
-- **Envelope.** Saved credentials and checkpoints are AES-256-GCM envelopes: a
-  versioned header, a random 96-bit nonce, and AAD binding the format version,
-  algorithm and a context string (`snapshot:<id>`, `checkpoint:<txn>`). A file
-  moved to another account's slot, a flipped bit or a changed version fails to
-  open.
+- **Envelope.** Saved credentials, custom endpoint secrets (`endpoints/<id>.ep.snap`),
+  and checkpoints are AES-256-GCM envelopes: a versioned header, a random 96-bit
+  nonce, and AAD binding the format version, algorithm and a context string
+  (`snapshot:<id>`, `endpoint:<id>`, `checkpoint:<txn>`). A file moved to
+  another slot, a flipped bit or a changed version fails to open.
 - **Vault key.** It lives in the OS keyring (`agyva`/`vault-key`). If no keyring
   is reachable, or `vault_key = passphrase`, the key is derived with Argon2id
   (19 MiB, t=2, p=1 by default) from a passphrase of at least 8 characters
@@ -82,13 +82,15 @@ are written defensively:
 ## Usage, health and the TUI
 
 Everything Agyva reads or reports about quota, health and the dashboard stays
-local, read-only and credential-free, with self-update as the single network
-exception.
+local, read-only and credential-free, with self-update and user-configured
+custom endpoints as the only network surfaces.
 
 | Surface | What it does | What it never does |
 | --- | --- | --- |
 | Quota | Runs agy's own `/usage` for the active login: no stdin, all `AGYVA_*` variables removed, bounded output, time-limited. | Make a network request of its own, use an OAuth client of its own, or pass a credential to agy. |
 | Quota cache (`<cache>/quota.json`, 0600) | Holds percentages, reset times, health state and a one-line rule description. | Hold tokens, email or raw agy output. The TUI and JSON show the same data, and tests assert none of the synthetic secrets appear in the cache or output. |
+| Custom endpoints & bridge | Encrypts API keys in `endpoints/<id>.ep.snap`; enforces `https://` (or loopback/local `http://`), rejects embedded URL userinfo and `169.254/16` link-local targets, binds `bridge` to loopback only, and redacts secrets from probe/bridge errors. | Write API keys to `endpoints.json`, `settings.json`, `endpoint-models.json`, or `--json` output. |
+| Profiles (`.agyva.toml`, `profiles.toml`) | Stores non-secret defaults (`account`, `endpoint`, `group`, `model`, thresholds, non-secret `env`). | Accept `env` keys containing `API_KEY`, `SECRET`, `TOKEN`, `PASSWORD`, or `PASSPHRASE`. |
 | Self-update | See [below](#self-update): HTTPS GETs to GitHub Releases, verified and staged atomically. | Touch any other host, or treat a malformed digest as absent. |
 | Export archives (`core::transfer`) | Sealed with AES-256-GCM under the dedicated `archive:1` context, keyed from a **separate** archive passphrase via Argon2id (64 MiB, `t=3`, `p=1` on export; import accepts down to the 19 MiB, `t=2`, `p=1` floor). | Export the vault key, or modify existing identities on import (they are skipped bit-for-bit untouched). |
 | Suspension state | Detects a Terms-of-Service suspension only from an explicit agy message, marks the account `TermsSuspended`, and shows it prominently (CLI and TUI banner) with a pointer to the Antigravity FAQ and Google support. | Retry it automatically — refresh, watch, the TUI and the monitor's `agy models` catalog tick all skip it unless you explicitly force a check (`--force-refresh`, or `agyva models --refresh`) — or auto-switch away from it (route automation ranks it ineligible). |
@@ -115,9 +117,11 @@ and imports only ever add.
 - Every tar member is screened (no traversal, no links, plain directories
   tolerated, exactly one executable), and the binary is staged and renamed
   atomically.
-- Only supported release targets (`x86_64-unknown-linux-gnu` and
-  `aarch64-unknown-linux-gnu`) query or install releases; unsupported targets
-  skip the startup check and refuse `agyva update`.
+- Only supported release targets (`x86_64-unknown-linux-gnu`,
+  `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`,
+  `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`, `aarch64-apple-darwin`,
+  `x86_64-pc-windows-msvc`, and `aarch64-pc-windows-msvc`) query or install
+  releases; unsupported targets skip the startup check and refuse `agyva update`.
 - The startup check is passive: one metadata request, silent failure, cached in
   `<cache>/update-check.json` (mode 0600) for 24 hours on success and 1 hour on
   failure. It runs at the start of every invocation whose config allows it —
@@ -162,9 +166,9 @@ A switch is journaled, checkpointed and verified rather than assumed:
 
 - A switch never overwrites an agy login agyva has not saved unless you pass
   `--force`; the unsaved login is then kept in a **pinned** encrypted
-  checkpoint (`<state>/checkpoints/*.keep.ckpt`) that is never pruned, and the
-  command prints its path. agyva cannot restore it yet; it exists so the login
-  is not lost.
+  checkpoint (`<state>/checkpoints/*.keep.ckpt`) that is never pruned by
+  ordinary retention, and the command prints its path. Use
+  `agyva checkpoints list|restore|prune` to inspect, restore, or prune them.
 - agy's login is re-read immediately before the write; if it changed, the
   switch aborts with nothing written.
 - `recover` reads agy's current login first. If it matches neither the
@@ -202,7 +206,9 @@ A switch is journaled, checkpointed and verified rather than assumed:
 - **Encryption does not defend against a compromised running session.**
   Software running as you with an unlocked keyring can read the vault key and
   agy's own live login directly.
-- Pinned checkpoints hold old logins until you delete them by hand.
+- Pinned checkpoints hold old logins until you restore or prune them
+  (`agyva checkpoints prune --include-pinned`) or delete them from
+  `<state>/checkpoints`.
 - JWT claims are read without signature verification; they are labels only.
 - A running agy may refresh its token after a switch; agyva saves the outgoing
   account's live credential back on the next switch, not continuously.

@@ -10,6 +10,38 @@ tagged; release artifacts are built by pushing a `v*` tag (see
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-21
+
+Cross-platform expansion, custom LLM endpoints with local protocol bridge, project profiles, quota burn-rate analytics, and a 5-tab TUI.
+
+### Added
+
+- **Custom endpoints and local bridge**:
+  - `agyva endpoint` (`ep`) `presets|add|list|show|use|test|models|update|rename|remove` manages custom LLM providers with API keys sealed in `<config>/endpoints/<id>.ep.snap` (AES-256-GCM, AAD `endpoint:<id>`) and public metadata in `<config>/endpoints.json`.
+  - 17 built-in provider presets (`openai`, `anthropic`, `gemini`, `openrouter`, `groq`, `deepseek`, `mistral`, `together`, `fireworks`, `xai`, `perplexity`, `ollama`, `lmstudio`, `vllm`, `litellm`, `azure`, `cohere`), `auto` protocol detection, and wire protocols `openai`, `openai-responses`, `anthropic`, `gemini`, `azure-openai`, `ollama`, `cohere`, and `custom`.
+  - Live model discovery (`<cache>/endpoint-models.json`), HTTP rate-limit and OpenRouter credit probing, secret-redacted probe errors, and HTTPS-only (or loopback/local HTTP) URL enforcement.
+  - `agyva use ep:<name>` / `agyva use --endpoint <selector>` activates an endpoint and syncs `modelProvider` and `customModelsConfig` in `agy`'s `settings.json` without writing API keys.
+  - `agyva bridge` starts a synchronous loopback HTTP/1.1 protocol-translating proxy (`/v1/chat/completions`, `/v1/messages`, `/v1beta/models/*`, model-listing routes).
+  - `agyva env` prints shell-quoted exports (`bash`, `zsh`, `fish`, `powershell`, `dotenv`); `agyva exec` launches child commands with resolved endpoint/profile environment variables and an optional ephemeral `--bridge`.
+- **Profiles, burn-rate analytics, and statusline**:
+  - `agyva profile` (`prof`) `init|create|list|show|which|set|delete|use` manages project-local `.agyva.toml` files (discovered up to `.git`) and global `<config>/profiles.toml`, rejecting secret-looking `env` keys.
+  - Bounded quota history (`<cache>/quota-history.json`) computes per-window burn rate (`%/h`) and exhaustion ETA across `usage`, `monitor`, `statusline`, and the TUI.
+  - `agyva statusline` renders fast cache-only status summaries in `compact`, `full`, `plain`, `starship`, `tmux`, `waybar`, and `json` formats.
+  - `agyva watch` and `agyva monitor` (`mon`) add quota warning/critical thresholds (`--warn-below`, `--critical-below`), `--once`, `--json-stream`, and `--profile`.
+  - New `config.toml` keys: `warn_percent` (`25.0`), `critical_percent` (`10.0`), `default_profile`, and `statusline_format` (`compact` | `full` | `json`).
+- **5-tab TUI and CLI quality-of-life**:
+  - Dashboard expands to 5 tabs (`Accounts`, `Usage`, `Endpoints`, `Routes`, `Diagnostics` via `Tab` / `F1`–`F5`), adding a responsive summary metric strip, rounded borders, smooth block gauges, Accounts sort cycling (`s`), endpoint probe/fetch/activate (`t` / `f` / `Enter`), and route/profile activation (`Enter`).
+  - `agyva checkpoints` (`ckpt`) `list|restore|prune` lists, restores (`--force`, `-y`), and prunes encrypted checkpoints (including pinned `*.keep.ckpt`).
+  - `agyva route init|add|remove`, `agyva config reset <key>`, `agyva doctor --fix` (safe 0700/0600 permissions, missing directories, stale lockfile cleanup), command aliases (`ls`, `switch`, `ep`, `prof`, `mon`, `st`, `ckpt`), and global `-q` / `--quiet`.
+  - `agyva completions` adds `powershell` and `elvish`, and expands Fish dynamic completions to endpoints (`ep:<name>`), profiles, and checkpoints.
+
+### Changed
+
+- **Broader platform support**:
+  - Keyring integration supports Linux/BSD Secret Service, macOS Apple Keychain, and Windows Credential Manager; `updater`, `fsutil`, `discovery` (`PATHEXT` / `.exe`), and `sessions` (`agy.exe`) support cross-platform targets (`x86_64`/`aarch64` Linux gnu & musl, macOS, Windows).
+  - CI (`.github/workflows/ci.yml`) adds `macos-latest` and `windows-latest` build/test jobs; release (`.github/workflows/release.yml`) builds 7 targets (`linux-gnu`, `linux-musl`, `apple-darwin`, `x86_64-pc-windows-msvc`); `install.sh` supports Linux (glibc and musl) and macOS.
+  - Verification note: Linux targets and sandboxed suites are verified locally; macOS Apple Keychain and Windows Credential Manager backends are implemented and CI-configured, not locally tested on macOS or Windows hardware.
+
 ## [0.1.2] - 2026-11-21
 
 Auto-switch deadlocks and safety fixes, updater and session hardening, `agyva rekey`, and release installer.

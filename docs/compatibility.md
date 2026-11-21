@@ -26,19 +26,23 @@ Three labels are used throughout:
 | Native store location: Secret Service `service=gemini`, `username=antigravity` | FROM-REFERENCE | |
 | Native store alternative: file `~/.gemini/antigravity-cli/antigravity-oauth-token` | FROM-REFERENCE | Select with `backend = file`. |
 | **Byte-compatibility of agyva's keyring write with real agy** (attributes, label `Password for 'antigravity' on 'gemini'`, `xdg:schema`, content type) | **UNVERIFIED** | Agyva sets `application/octet-stream`; go-keyring (which agy is believed to use) writes `text/plain`. Reads of agy's own item are expected to work; whether agy accepts an item agyva created or overwrote is not proven. See "Checking it yourself". |
-| Companion state: `installation_id`, `settings.json` `gcp` block | FROM-REFERENCE | Only the `gcp` block of `settings.json` is ever modified. |
-| Running-session detection (`presence/*.lock`, process name `agy`) | FROM-REFERENCE | Advisory only; agyva never signals a process. Uses a non-blocking `flock` liveness probe on `presence/*.lock` (ignoring stale locks) and filters `agy` processes to the current UID. |
+| Companion state: `installation_id`, `settings.json` `gcp` block, custom provider sync | FROM-REFERENCE | OAuth switches touch only the `gcp` block; custom endpoint activation (`use ep:<name>` / `endpoint use`) writes `modelProvider` and `customModelsConfig` (no API keys) and clears them when switching back to an OAuth account. |
+| Running-session detection (`presence/*.lock`, process name `agy` / `agy.exe`) | FROM-REFERENCE | Advisory only; agyva never signals a process. Uses a non-blocking `flock` liveness probe on `presence/*.lock` (ignoring stale locks) and filters `agy` (`agy.exe` on Windows) processes to the current user. |
 | Health wording (Terms of Service message) | FROM-REFERENCE | Matched against the wording seen in the reference material; a changed message degrades to `unknown`. |
-| macOS Keychain, Windows Credential Manager | UNVERIFIED / not supported | Disabled in CI and release jobs. |
+| macOS Keychain, Windows Credential Manager | **UNVERIFIED** (hardware) | Implemented via `apple-native-keyring-store` and `windows-native-keyring-store`; built and tested with sandboxed/mock stores in CI (`macos-latest`, `windows-latest`) and packaged in `release.yml`. Real Keychain/Credential Manager hardware behavior is unverified on this Linux host. |
 
 ## Platform support
 
-Linux with the freedesktop Secret Service (GNOME Keyring, KeePassXC, KWallet's
-bridge) is the target. The file backend works wherever `agy` keeps its token in
-the file. Without a Secret Service provider (headless server, container, SSH
-without a session bus), agyva's own vault uses a passphrase automatically
-(`vault_key = auto`) or by choice (`vault_key = passphrase`); `agy`'s login
-still has to live somewhere agyva can reach, which means `backend = file`.
+Linux (x86-64 and ARM64, glibc and musl) with the freedesktop Secret Service
+(GNOME Keyring, KeePassXC, KWallet's bridge) is the locally verified target.
+macOS (Apple Keychain, `x86_64` and `aarch64`) and Windows (Credential Manager,
+`x86_64` MSVC; `aarch64` MSVC in updater) are implemented and CI-configured,
+though unverified locally on macOS/Windows hardware. The file backend works
+wherever `agy` keeps its token in the file. Without an OS keyring provider
+(headless server, container, SSH without a session bus), agyva's own vault uses
+a passphrase automatically (`vault_key = auto`) or by choice
+(`vault_key = passphrase`); `agy`'s login still has to live somewhere agyva can
+reach, which means `backend = file`.
 
 After any switch, restart `agy`: a running session keeps the login it started
 with.

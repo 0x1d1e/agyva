@@ -13,6 +13,10 @@ agyva current --json
 agyva usage --all --no-refresh --json
 agyva health --no-refresh --json
 agyva models --json
+agyva endpoint list --json
+agyva profile list --json
+agyva statusline --format json
+agyva checkpoints list --json
 agyva status --json
 agyva doctor --json
 ```
@@ -72,7 +76,7 @@ refreshed in the same run.
 | `observed_at`, `last_successful_update`, `last_attempt` | Per-account timestamps, each possibly `null`. |
 | `refreshed_now` | This run got data from agy. |
 | `groups[]` | `group`, optional `model`, `disabled`, `exhausted`, optional `five_hour` and `weekly`. |
-| `groups[].five_hour` / `weekly` | `remaining_percent`, `reset_at`, `observed_at`, `source` (`cache` or `agy_usage_command`). |
+| `groups[].five_hour` / `weekly` | `remaining_percent`, `reset_at`, `observed_at`, `source` (`cache` or `agy_usage_command`), optional `burn_rate` (`percent_per_hour`, `eta_exhaustion_secs`, `exhausts_before_reset`, `samples`). |
 | `plan` | `null` when not reported — agy’s `/usage` does not report plans. |
 | `unavailable` | Why there is no (new) reading; may accompany retained quota data. |
 | `health` | `state`, `label`, `evidence`, `observed_at`, `source`, `verified_now`, `warning`. |
@@ -143,11 +147,46 @@ clamped to `--limit` (1–50, default 10) exactly like the human table.
 
 `route apply GROUP --json` requires `--yes` — it never prompts on stdout — and
 emits one object: `group`, `target`, `target_alias`, `changed`,
-`already_active`, `reason`, `declared_plan` and `warnings`.
+`already_active`, `reason`, `declared_plan` and `warnings`. `route init|add|remove --json`
+emit the updated `RoutingFile` (`remove --json` requires `--yes`).
 
-## `agyva status` and `agyva doctor`
+## `agyva endpoint`, `agyva profile`, and `agyva use`
 
-Summarize local state and pending recovery, or run read-only checks.
+Endpoint, profile, and unified `use` commands never emit API keys or secret
+headers in JSON.
+
+| Command | Key fields |
+| --- | --- |
+| `use --json` | Tagged `UnifiedUseOutcome` (`kind`: `"account"` with `account`, `already_active`, `warnings`, `policy_notice`; or `"endpoint"` with `endpoint`). With `--profile`: `profile`, optional `switched_account`, optional `active_endpoint`, optional `warnings`. |
+| `endpoint presets --json` | `schema_version`, `presets[]` (`name`, `display_name`, `base_url`, `protocol`, `auth_scheme`, `default_model`, `api_version`). |
+| `endpoint list --json` | `schema_version`, `endpoints[]` (`id`, `alias`, `base_url`, `protocol`, `detected_protocol`, `default_model`, `active`, `enabled`, `model_count`, `models[]`, `fetched_at`, `latency_ms`, `rate_limits`, `last_error`). |
+| `endpoint show --json` | Endpoint metadata, `effective_protocol`, `auth_scheme`, `extra_headers`, `active`, `enabled`, timestamps, `models[]`, `rate_limits`, `last_error`. |
+| `endpoint test --json` | `reachable`, `detected_protocol`, `latency_ms`, `model_count`, `models[]`, `rate_limits`, `error`. |
+| `endpoint models --json` | `schema_version`, `endpoint`, `id`, `refreshed`, `model_count`, `models[]`, `fetched_at`, `latency_ms`, `rate_limits`. |
+| `endpoint add\|update\|rename\|remove\|use --json` | `add`: `endpoint`, `activated`, `probe`; `use`: `cleared`, `endpoint`; `update`/`rename`/`remove`: `endpoint` (`remove --json` requires `--yes`). |
+| `profile list\|show\|which\|init\|create\|set\|delete\|use --json` | `list`: `profiles[]`; `show`/`which`: `profile` (`null` if none); `init`/`create`: `path`, `name`, `source`, `profile`; `set`: `name`, `field`, `profile`; `delete`: `deleted` (requires `--yes`); `use`: `ProfileUseOutcome`. |
+
+## `agyva statusline`, `watch`, and `monitor`
+
+- `statusline --format json` prints `schema_version`, `active_account`,
+  `active_account_id`, `active_endpoint`, `active_endpoint_model`,
+  `active_profile`, `lowest_five_hour_percent`, `lowest_weekly_percent`,
+  `burn_rate_percent_per_hour`, `eta_exhaustion_secs`, `health`, `suspended`,
+  `recovery_pending`, and `threshold_alert`. `statusline --format waybar` prints
+  `{"text", "tooltip", "class"}` (`ok` | `warning` | `critical` | `suspended`).
+- `watch --json-stream` emits NDJSON lines with `at` and flattened `WatchEvent`
+  (`event`: `started`, `cycle_ok`, `cycle_failed`, `note`, `health_changed`,
+  `reset_approaching`, or `suspended_skipped`).
+- `monitor --json` (implies `--once`) prints one `MonitorSnapshot`
+  (`schema_version`, `generated_at`, `group`, `for_model`, `active_endpoint`,
+  `active_profile`, `recommendation`, `sticky_pick` with `id`/`alias`/`changed`,
+  `last_auto`, and `rows[]` including `burn_rate` and `eta_exhaustion_secs`).
+  `monitor --json-stream` emits NDJSON lines with `at`, flattened `WatchEvent`,
+  and `snapshot` on `cycle_ok`.
+
+## `agyva checkpoints`, `status`, and `doctor`
+
+Summarize local state and pending recovery, manage checkpoints, or run checks.
 
 | Field | Meaning |
 | --- | --- |
@@ -160,8 +199,14 @@ Summarize local state and pending recovery, or run read-only checks.
 | `recovery_pending` | `txn_id`, `target`, `phase`, `started_at`, optional `detail`; `null` when none. |
 
 `doctor --json` reports `healthy` and `recovery_pending` booleans plus `checks[]`,
-each with `name`, `level` and `detail`, plus an optional `hint`. Both commands
+each with `name`, `level` and `detail`, plus an optional `hint`. `doctor --fix --json`
+returns `schema_version`, `actions[]`, and `report` (`DoctorReport`). Both commands
 return exit 3 when recovery is pending, even though they print a full report.
+
+`checkpoints list --json` returns `schema_version` and `checkpoints[]` (`name`,
+`txn_id`, `created_at`, `pinned`, `size_bytes`, `valid`). `checkpoints restore --json`
+and `checkpoints prune --json` require `--yes` and return `RestoreCheckpointResult`
+and `PruneResult`.
 
 This JSON schema is Agyva’s output contract. It is distinct from the
 [undocumented agy usage envelope](compatibility.md#matrix) that Agyva parses.

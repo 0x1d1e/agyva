@@ -16,6 +16,7 @@ tests through the library.
 - [Development and test environment](#development-and-test-environment)
 - [Transfer (export/import)](#transfer-exportimport)
 - [Self-update](#self-update)
+- [Custom endpoints and local bridge](#custom-endpoints-and-local-bridge)
 - [Quota provider boundary](#quota-provider-boundary)
 - [Health](#health)
 - [Watch](#watch)
@@ -27,16 +28,14 @@ tests through the library.
 
 | Module | Role |
 | --- | --- |
-| `cli` | clap definition, dispatch, table rendering. No business logic. |
-| `core` | Domain: `App` context, add/switch/recover/manage/rekey/status/doctor, registry, selectors, views, failpoints. |
-| `agy` | Everything about agy: credential parsing, native backends, companion state, session detection, version compatibility. |
-| `storage` | Encrypted vault, vault-key provider, atomic file IO, state lock, journal. |
+| `cli` | clap definition, dispatch (`commands`, `endpoints_cmd`, `profiles_cmd`, `watch_cmd`, `monitor_cmd`), table/statusline rendering (`output`, `usage_out`). No business logic. |
+| `core` | Domain: `App` context, `add`/`switch`/`recover`/`manage`/`rekey`/`checkpoints`/`status`/`doctor`, `endpoints`/`protocol`/`bridge`/`profile`/`app_integrations`, `quota`/`quota_cache`/`quota_history`/`health`/`provider`/`refresh`/`usage`/`watch`/`monitor`/`route`/`route_config`/`route_apply`/`auto`/`catalog`/`dashboard`, `registry`/`selector`/`view`/`failpoint`. |
+| `agy` | Everything about agy: credential parsing, native backends, companion state, session detection, version compatibility, model catalog & `/usage` runner/parser. |
+| `storage` | Encrypted vault, vault-key provider, OS keyring abstraction, atomic file IO, state lock, journal. |
 | `paths`, `config` | Directory resolution (`Env` snapshot, no ad hoc env reads) and `config.toml`. |
+| `notify`, `updater` | Best-effort desktop notifications and GitHub Releases self-updater. |
+| `tui` | Ratatui state machine (`app.rs`, `event.rs`), background worker (`backend.rs`), views (`views/*`), theme (`theme.rs`). |
 | `testing` | Synthetic credential builders (hidden from docs). |
-
-Round 2 adds, inside those layers: `core::{quota, health, provider,
-quota_cache, refresh, usage, watch, dashboard, health_report, doctor_agy}`,
-`agy::{usage_parse, usage_run}`, `notify`, and the `tui` module (see below).
 
 ## Storage layout
 
@@ -45,12 +44,20 @@ quota_cache, refresh, usage, watch, dashboard, health_report, doctor_agy}`,
 | `<config>/registry.json` | Public account list: id, alias, email, auth method, timestamps, `active`, `previous`; carries `schema_version`. |
 | `<config>/vault.json` | Vault key mode (keyring or Argon2id parameters) and a verifier. No key. |
 | `<config>/accounts/<id>.snap` | Encrypted credential and companion state for one account. |
+| `<config>/endpoints.json` | Public custom endpoint registry (`schema_version`, `active_endpoint`, `endpoints[]`). |
+| `<config>/endpoints/<id>.ep.snap` | Encrypted API key and secret headers for one endpoint (AES-256-GCM, AAD `endpoint:<id>`). |
+| `<config>/profiles.toml` | Global named profiles (`schema_version`, `default`, `profiles`). Project-local overrides live in `.agyva.toml`. |
+| `<config>/routing.toml` | Routing groups, priorities, declared plans, model-group mappings, and auto-switch opt-in. |
 | `<config>/config.toml` | Settings and the policy-acknowledged flag. |
 | `<state>/agyva.lock` | Interprocess lock (fs4). |
 | `<state>/journal/pending.json` | Transaction journal while a switch is in flight. |
 | `<state>/checkpoints/*.ckpt` | Encrypted pre-switch checkpoints, newest 5 kept (`checkpoints_keep`). |
-| `<state>/checkpoints/*.keep.ckpt` | **Pinned** checkpoints: a login agyva holds no other copy of. Never counted or pruned. |
+| `<state>/checkpoints/*.keep.ckpt` | **Pinned** checkpoints: a login agyva holds no other copy of. Never counted or pruned unless `--include-pinned`. |
 | `<cache>/quota.json` | Quota cache: per account id, quota groups, health, timestamps. 0600, written atomically under a lock. No email, no tokens, no raw agy output. |
+| `<cache>/quota-history.json` | Bounded quota sample history (up to 64 samples per `(account_id, group_label, window)`) for burn-rate and ETA analytics. |
+| `<cache>/models.json` | Per-account cached `agy models` family catalog. |
+| `<cache>/endpoint-models.json` | Cached discovered models, latency, rate limits, and last probe error per custom endpoint. |
+| `<cache>/update-check.json` | Cached passive GitHub Releases update-check decision (0600). |
 
 Defaults come from the `directories` crate. Files are 0600, directories 0700.
 
@@ -105,16 +112,20 @@ interrupted switch and restoring would overwrite it: `recover` refuses unless
 `recover --force`, which first writes a pinned checkpoint of the current login.
 
 `status` and `doctor` detect an incomplete journal and exit 3; `doctor` is
-read-only. There is no command yet to restore from a pinned checkpoint.
+read-only (`doctor --fix` applies safe permission/directory/stale-lock repairs).
+Use `agyva checkpoints list|restore|prune` to inspect, restore (`--force` keeps
+a pinned backup if the live login differs), or prune checkpoints.
 
 ## Native credential
 
-agy stores its login as a Secret Service item (`service=gemini`,
+agy stores its login in the OS keyring (`service=gemini`,
 `username=antigravity`) or, optionally, the file
-`~/.gemini/antigravity-cli/antigravity-oauth-token`. Agyva reads and writes
-exactly that item through the standard Secret Service API and never touches
-anything else of agy's. Compatibility of the item attributes with real agy is
-**not verified** in this round (see `docs/security.md`).
+`~/.gemini/antigravity-cli/antigravity-oauth-token`. `storage::keyring` uses
+`keyring-core` with Secret Service on Linux/BSD, Apple Keychain on macOS, and
+Windows Credential Manager on Windows. Linux keyring write compatibility with
+real `agy` remains **unverified** (see `docs/security.md`); macOS and Windows
+backends are implemented and tested in CI, not verified locally on macOS or
+Windows hardware.
 
 ## Errors and exit codes
 
@@ -185,19 +196,38 @@ next run; unexpected staging entries are preserved and reported.
 
 ## Self-update
 
-`updater.rs` checks GitHub Releases (one GET, 2 s, silent) on supported Linux
-targets (`x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`), caching
-results in `<cache>/update-check.json` (24 hours on success, 1 hour on failure)
-and skipping checks for `--json` and `completions` invocations. `agyva update`
-installs: stable SemVer must be strictly newer, the
-`agyva-<version>-<target>.tar.gz` asset plus `SHA256SUMS` are downloaded and
-verified (file sums and the GitHub per-asset digest when exposed), exactly
-`<stem>/agyva` is extracted (single regular executable; links, traversal names
-and duplicates refused) and the binary is staged next to the running one and
-renamed atomically. The `Transport` trait is the seam: production uses `ureq`
-with `https_only`, tests inject in-memory transports. The notice reaches humans
-on stderr and the TUI through `Dashboard::update_notice`, never stderr under the
-alternate screen.
+`updater.rs` checks GitHub Releases (one GET, 2 s, silent) on supported
+targets (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`,
+`x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`, and
+`aarch64-pc-windows-msvc`), caching results in `<cache>/update-check.json` (24
+hours on success, 1 hour on failure) and skipping checks for `--json` and
+`completions` invocations. `agyva update` installs: stable SemVer must be
+strictly newer, the `agyva-<version>-<target>.tar.gz` asset plus `SHA256SUMS`
+are downloaded and verified (file sums and the GitHub per-asset digest when
+exposed), exactly `<stem>/agyva` (`<stem>/agyva.exe` on Windows) is extracted
+(single regular executable; links, traversal names and duplicates refused) and
+the binary is staged next to the running one and replaced atomically (using a
+`.old` rename-aside on Windows). The `Transport` trait is the seam: production
+uses `ureq` with `https_only`, tests inject in-memory transports. The notice
+reaches humans on stderr and the TUI through `Dashboard::update_notice`, never
+stderr under the alternate screen.
+
+## Custom endpoints and local bridge
+
+`core::protocol` defines `EndpointProtocol` (`auto`, `openai`,
+`openai-responses`, `anthropic`, `gemini`, `azure-openai`, `ollama`, `cohere`,
+`custom`), `AuthScheme`, 17 built-in `ProviderPreset`s, URL validation
+(`https://` or loopback/local `http://`), model-list parsing, and rate-limit /
+OpenRouter credit extraction over the `HttpTransport` seam (`UreqTransport` in
+production; mocks in tests). `core::endpoints` seals API keys and secret headers
+in `<config>/endpoints/<id>.ep.snap` (AAD `endpoint:<id>`), stores public
+metadata in `endpoints.json`, caches discovered models in
+`<cache>/endpoint-models.json`, exports shell env vars, and syncs
+`modelProvider` / `customModelsConfig` in `agy`'s `settings.json` without
+writing secrets. `core::bridge` runs a pure-std synchronous HTTP/1.1 loopback
+proxy (`agyva bridge`, `agyva exec --bridge`) translating OpenAI, Anthropic, and
+Gemini inbound requests to any configured upstream protocol.
 
 ## Quota provider boundary
 
@@ -261,20 +291,20 @@ help. Layers in `src/tui`:
 
 | File | Role |
 | --- | --- |
-| `app.rs` | `AppState` (plain data): view, data, selection by account id, filter, overlay, flags. |
+| `app.rs` | `AppState` (plain data): view, data, selections by account/endpoint/route id, sort order, filter, overlay, flags. |
 | `event.rs` | Pure state machine `update(&mut AppState, Event) -> Vec<Job>`. Key handling, quit deferral, confirmation. No IO. |
-| `backend.rs` | `Backend` trait (`load`, `switch`), `AppBackend` over the real core, and `spawn_worker`. |
-| `views/*` | Pure render functions into a ratatui `Frame` (Accounts, Usage, Diagnostics, overlays). |
+| `backend.rs` | `Backend` trait (`load`, `switch`, `switch_endpoint`, `test_endpoint`, `fetch_endpoint_models`, `apply_route`, `use_profile`), `AppBackend`, and `spawn_worker`. |
+| `views/*` | Pure render functions into a ratatui `Frame` (Accounts, Usage, Endpoints, Routes, Diagnostics, chrome, overlays). |
 | `theme.rs` | ANSI named colours only (no RGB), so it follows the terminal theme. |
 | `mod.rs` | Terminal ownership and the loop. |
 
-**Worker.** All slow work (reading the cache, running agy, switching) happens
-on one background thread that processes jobs sequentially and reports
-`Msg`s over a channel. The UI thread never blocks on agy. Each job builds a
-fresh `App`. Startup queues a cache-only load, then a normal refresh; `r`
-queues a normal refresh (never forced) unless one is already in flight. After
-a switch only a cache read follows, never an agy run. The thread is not joined
-at exit.
+**Worker.** All slow work (reading the cache, running agy, switching, probing
+endpoints, applying routes/profiles) happens on one background thread that
+processes jobs sequentially and reports `Msg`s over a channel. The UI thread
+never blocks on agy or HTTP probes. Each job builds a fresh `App`. Startup
+queues a cache-only load, then a normal refresh; `r` queues a normal refresh
+(never forced) unless one is already in flight. After a switch only a cache read
+follows, never an agy run. The thread is not joined at exit.
 
 **Switching** uses the same `core` switch path as `agyva use` (journal,
 checkpoint, verification). Enter opens a y/n confirmation that warns when agy
@@ -284,13 +314,14 @@ the switch is refused with a pointer to `agyva use` in a shell.
 
 **Rendering.** Redraw only when the dirty flag is set (events, worker
 messages, resize, a 30 s tick for relative times). Column layout is a pure
-function of width (`column_plan`: drops cache age, weekly, status, 5H in that
-order); text is truncated by unicode display width. Selection follows the
-account id. Freshness is reclassified on the 30 s tick with the configured
-policy; historical observations never become a permanent "just now" label.
-Scrollable views measure actual wrapped rows with Ratatui’s `Paragraph::line_count`.
-Modal controls occupy a reserved final row. Monochrome rendering removes colors
-while preserving bold/reverse selection and text statuses.
+function of width (`column_plan`: drops `eta`, `cache age`, `weekly`, `status`,
+`5H` in that order); text is truncated by unicode display width. Selection
+follows stable ids. Freshness is reclassified on the 30 s tick with the
+configured policy; historical observations never become a permanent "just now"
+label. Scrollable views measure actual wrapped rows with Ratatui’s
+`Paragraph::line_count`. Modal controls occupy a reserved final row. Monochrome
+rendering removes colors while preserving bold/reverse selection and text
+statuses.
 
 **Terminal safety.** A `TerminalGuard` (RAII) enters raw mode and the
 alternate screen and restores them on every exit path; a panic hook restores
@@ -300,17 +331,16 @@ tracing cannot write over the screen.
 
 ## Shell completions
 
-`agyva completions fish|bash|zsh` prints a script generated by `clap_complete`.
-The Fish script additionally defines `__agyva_aliases` (runs
-`agyva list --json`, read-only, no keyring access) and completes saved aliases
-for `use`, `rename`, `remove`, `usage` and `health`; it also turns file
-completion off since no argument is a path. Install to
+`agyva completions fish|bash|zsh|powershell|elvish` prints a script generated by
+`clap_complete`. The Fish script additionally defines `__agyva_aliases`,
+`__agyva_endpoints`, `__agyva_profiles`, `__agyva_checkpoints`, and
+`__agyva_use_targets` (running read-only `--json` subcommands with no keyring
+access) and turns file completion off since no argument is a path. Install to
 `~/.config/fish/completions/agyva.fish`.
 
 ## Not yet built (deferred)
 
-- A command to restore a pinned checkpoint.
 - Plan detection; any quota source other than agy's own `/usage`.
-- macOS Keychain and Windows Credential Manager backends (CI jobs are
-  present but disabled).
+- Local hardware verification for macOS Keychain and Windows Credential Manager
+  backends (implemented and CI-configured, not locally verified).
 - Protection against rollback of an old encrypted blob (see `docs/security.md`).

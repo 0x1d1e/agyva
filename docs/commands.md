@@ -3,8 +3,9 @@
 [README](../README.md) · [Dashboard](dashboard.md) · [JSON and exit codes](json.md) · [Security](security.md)
 
 Run `agyva --help` for task groups and examples, or `agyva <command> --help`
-for flags. Bare `agyva` opens the dashboard when stdin and stdout are terminals;
-otherwise it prints help.
+for flags. Global flags: `--allow-untested` (bypass the `agy` version gate) and
+`-q` / `--quiet` (suppress non-essential notices). Bare `agyva` opens the
+dashboard when stdin and stdout are terminals; otherwise it prints help.
 
 ## Save and manage accounts
 
@@ -13,7 +14,7 @@ Save the login `agy` already holds, and manage the saved copies.
 ```sh
 agyva add --alias personal            # save agy's current login
 agyva add --alias personal --refresh  # update an already saved login
-agyva list
+agyva list                            # alias: ls
 agyva current
 agyva rename personal home
 agyva remove work                     # asks for confirmation
@@ -26,25 +27,96 @@ shapes are in [JSON and exit codes](json.md).
 
 ## Switch and restart
 
-Activate a saved account through a journaled, verified switch.
+Activate a saved account, custom endpoint (`ep:<name>`), or profile.
 
 ```sh
-agyva use personal
+agyva use personal              # alias: switch
 agyva use 2
-agyva use -                     # previous account
+agyva use -                     # previous OAuth account
+agyva use ep:openai             # activate a custom endpoint
+agyva use --profile work        # activate a profile's account and/or endpoint
 ```
 
 Selectors accept an alias, list number, exact email, account id, unique id
-prefix, or `-` for the previous account. Ambiguous selectors fail with exit 2.
+prefix, `ep:<name>` for custom endpoints, or `-` for the previous OAuth
+account. Ambiguous selectors fail with exit 2. Explicit target flags
+`--account`, `--endpoint`, and `--profile` avoid ambiguity.
+
 If agy holds an unsaved login, save it with `add` first; `use <selector> --force`
-replaces it only after keeping a pinned encrypted checkpoint. There is currently
-no command to restore a pinned checkpoint — see
-[switch safety](security.md#switch-safety).
+replaces it only after keeping a pinned encrypted checkpoint, which you can later
+inspect or restore with [`agyva checkpoints`](#checkpoints). Switching to an OAuth
+account clears any active custom endpoint (`modelProvider` / `customModelsConfig`
+in `agy`'s `settings.json`).
 
 **Restart `agy` after switching.** Existing sessions keep their old login;
 Agyva reports detected sessions and never kills them. A switch never happens
 automatically. Exit code 3 and the recovery procedure are in
 [Recover an interrupted switch](#recover-an-interrupted-switch).
+
+## Custom endpoints, bridge, env, and exec
+
+Manage custom LLM providers, translate protocols locally, and run tools with
+resolved endpoint or profile settings.
+
+```sh
+agyva endpoint presets                # alias: ep
+agyva endpoint add openai --preset openai --api-key-env OPENAI_API_KEY --use
+agyva endpoint list
+agyva endpoint show openai
+agyva endpoint test openai
+agyva endpoint models openai --refresh
+agyva endpoint update openai --model gpt-4.1
+agyva endpoint rename openai prod-openai
+agyva endpoint use --clear
+agyva endpoint remove prod-openai -y
+```
+
+API keys are read from `--api-key-env <VAR>`, `--api-key-stdin`, or an
+interactive hidden prompt (never argv), and stored encrypted in
+`<config>/endpoints/<id>.ep.snap`. Non-secret metadata lives in
+`<config>/endpoints.json`, and discovered models/rate limits live in
+`<cache>/endpoint-models.json`.
+
+- **17 built-in presets**: `openai`, `anthropic`, `gemini`, `openrouter`, `groq`, `deepseek`, `mistral`, `together`, `fireworks`, `xai`, `perplexity`, `ollama`, `lmstudio`, `vllm`, `litellm`, `azure`, `cohere`.
+- **Wire protocols** (`--protocol`): `auto` (default when no preset sets one), `openai`, `openai-responses`, `anthropic`, `gemini`, `azure-openai`, `ollama`, `cohere`, `custom`.
+- **Auth schemes** (`--auth-scheme`): `bearer`, `x-api-key`, `x-goog-api-key`, `api-key`, `none`, or `custom-header:<name>[:<prefix>]`.
+- **URL validation**: `https://` is required for remote hosts; `http://` is permitted only for loopback or local addresses (`localhost`, `*.localhost`, `*.local`, `*.internal`, loopback IPs, RFC1918 private IPv4, `fc00::/7` IPv6). Embedded URL credentials (`user:pass@`) are rejected.
+- **`agy` sync**: `agyva endpoint use <sel>` and `agyva use ep:<sel>` write `modelProvider` and `customModelsConfig` into `agy`'s `settings.json`, preserving other keys and never writing API keys.
+
+### Local protocol bridge, env, and exec
+
+```sh
+agyva bridge --endpoint openai --port 8787
+agyva env --endpoint openai --shell bash
+agyva exec --endpoint openai --bridge -- my-tool --flag
+```
+
+- **`agyva bridge`** starts a synchronous loopback HTTP/1.1 server (`--listen 127.0.0.1:0` by default, `--port` override, optional `--local-token-env`) accepting OpenAI Chat (`/v1/chat/completions`), Anthropic Messages (`/v1/messages`), Gemini (`/v1beta/models/{model}:generateContent` and `:streamGenerateContent`), and model-listing routes (`/v1/models`, `/v1beta/models`, `/api/tags`), translating requests to the endpoint's configured protocol.
+- **`agyva env`** prints shell-quoted exports (`--shell bash|zsh|fish|powershell|dotenv`) for `--endpoint`, `--profile` (or auto-discovered profile / active endpoint), optional `--model`, and optional `--bridge-url`.
+- **`agyva exec`** injects resolved profile, account (`AGYVA_ACCOUNT`, `AGYVA_ACCOUNT_ID`), and endpoint environment variables into a child command (`-- <COMMAND> [ARGS...]`). Passing `--bridge` starts an ephemeral `127.0.0.1:0` bridge for the target endpoint and tears it down when the command exits.
+
+## Project and global profiles
+
+Store non-secret workflow defaults (account, endpoint, routing group, model,
+thresholds, monitor interval, and non-secret `env` pairs) in a project-local
+`.agyva.toml` or global `<config>/profiles.toml`.
+
+```sh
+agyva profile init --local --endpoint openai --model gpt-4o   # alias: prof
+agyva profile create work --account work --group work --warn-below 30 --default
+agyva profile list
+agyva profile which
+agyva profile show work
+agyva profile set work model claude-sonnet-4-20250514
+agyva profile use work
+agyva profile delete work -y
+```
+
+Without `--profile`, Agyva walks up from the current directory looking for
+`.agyva.toml` (stopping at `.git`, filesystem root, or 32 levels), then falls
+back to `config.default_profile`, then `default` in `profiles.toml`. Environment
+keys containing `API_KEY`, `SECRET`, `TOKEN`, `PASSWORD`, or `PASSPHRASE` are
+refused; keep credentials in the vault or encrypted endpoint snapshots.
 
 ## Inspect quota and health
 
@@ -53,25 +125,47 @@ refresh.
 
 ```sh
 agyva usage                     # active account; normal refresh
-agyva usage --all               # other accounts use the cache
+agyva usage --all --compact     # compact table; others use cache
 agyva usage work --no-refresh   # cached data only
+agyva statusline                # fast cache-only status bar summary
 agyva health --no-refresh       # health for every saved account
-agyva watch                     # foreground observer, Ctrl+C stops
+agyva watch --warn-below 25 --critical-below 10
 ```
 
 | Flag | Effect |
 | --- | --- |
-| `--all` | Include every saved account (`usage` only). |
-| `--no-refresh` | Read the cache; never run agy. |
-| `--force-refresh` | Ignore the minimum interval and check a suspended account once; conflicts with `--no-refresh`. |
+| `--all` | Include every saved account (`usage`, `monitor`). |
+| `--compact` | Single-line-per-account table (`usage`). |
+| `--profile NAME` | Apply account/defaults from a named profile (`usage`, `statusline`, `watch`, `monitor`). |
+| `--no-refresh` | Read the cache; never run agy (`usage`, `health`). |
+| `--force-refresh` | Ignore the minimum interval and check a suspended account once; conflicts with `--no-refresh` (`usage`, `health`). |
+| `--warn-below PCT` / `--critical-below PCT` | Quota threshold alerts (`watch`, `monitor`). |
+| `--once` | Run a single cycle and exit (`watch`, `monitor`). |
 | `--json` | Machine-readable output — see [JSON and exit codes](json.md). |
+| `--json-stream` | Emit one NDJSON event object per line (`watch`, `monitor`). |
 
 Normal refreshes respect the minimum interval and skip suspended accounts; only
-the active account can refresh. `watch` observes the active account at the
-configured interval, backs off on transient failures, and never switches or warms
-quota windows. Optional desktop notifications contain an alias and state, not
-credentials. [Windows, groups and freshness](antigravity.md#read-quota-and-health).
-Model catalogs have their own command: [Model catalog](#model-catalog).
+the active account can refresh. Quota observations are recorded in
+`<cache>/quota-history.json` to compute per-window burn rates (`%/h`) and
+exhaustion ETAs. `watch` observes the active account at the configured interval,
+backs off on transient failures, emits threshold alerts (`--warn-below`,
+`--critical-below`, or config/profile defaults), and never switches or warms
+quota windows. Optional desktop notifications (`--notify` or
+`desktop_notifications = true`) contain an alias and state, not credentials.
+[Windows, groups and freshness](antigravity.md#read-quota-and-health). Model
+catalogs have their own command: [Model catalog](#model-catalog).
+
+### Statusline
+
+`agyva statusline` prints a fast, cache-only summary suitable for shell prompts
+and status bars without spawning `agy` or touching the keyring.
+
+```sh
+agyva statusline --format compact   # compact | full | plain | starship | tmux | waybar | json
+```
+
+Defaults come from `statusline_format` in `config.toml` (`compact` by default)
+and thresholds from the active `--profile` or `config.toml`.
 
 ### Model catalog
 
@@ -91,40 +185,46 @@ the prior observation. Accounts other than the active one only get a catalog by
 being active when it runs. `--refresh` runs under the same version gate as every
 write path: an untested agy is skipped, and `--allow-untested` (or
 `allow_untested_agy = true`) is the only bypass — `--refresh` does not override
-the gate. A dedicated interactive TUI route tab is not in 0.1.2; the route pane
-ships in the watch-style terminal monitor instead.
+the gate.
 
 ### Route-aware monitor
 
-Print the sticky pick plus each account’s share, freshness and exclusion reason,
-with the next weekly reset countdown.
+Print the sticky pick plus each account’s share, freshness, burn rate/ETA, and
+exclusion reason, with the next weekly reset countdown.
 
 ```sh
-agyva monitor [--interval 15s] [--group NAME] [--for-model FAMILY]
+agyva monitor [--interval 15s] [--group NAME | --all] [--for-model FAMILY] [--profile NAME]
 ```
 
-Every tick re-ranks the cached evidence (never an agy spawn). `--interval`
-accepts `15s`, `30`, `2m`, `1h` with a 5 s floor — a faster loop changes nothing,
-because the evaluation is cache-only. The active account’s quota refresh runs on
-its own 300 s cadence through the existing single-flight refresh guard, so
-several monitors and a manual `usage` collapse to one run; the same tick keeps
-the active account’s model catalog current (bounded `agy models`, throttled by
-`models_cache_secs`, skipped while the observation is fresh). `monitor` never
-switches accounts unless the group explicitly opts in — see
-[Opt-in auto-switch](#opt-in-auto-switch).
+Alias: `agyva mon`. Every tick re-ranks the cached evidence (never an agy spawn).
+`--interval` accepts `15s`, `30`, `2m`, `1h` with a 5 s floor — a faster loop
+changes nothing, because the evaluation is cache-only. `--once` runs one cycle,
+`--json` prints a single `MonitorSnapshot` (implies `--once`), and
+`--json-stream` emits continuous NDJSON events with snapshots. The active
+account’s quota refresh runs on its own 300 s cadence through the existing
+single-flight refresh guard, so several monitors and a manual `usage` collapse
+to one run; the same tick keeps the active account’s model catalog current
+(bounded `agy models`, throttled by `models_cache_secs`, skipped while the
+observation is fresh). `monitor` never switches accounts unless the group
+explicitly opts in — see [Opt-in auto-switch](#opt-in-auto-switch). You can also
+inspect and apply route groups or profiles interactively in the dashboard’s
+`Routes` tab (`F4`).
 
 ## Plan a route
 
-Rank cached readings without running agy or changing any account, then optionally
-activate the recommendation.
+Create routing groups, rank cached readings without running agy or changing any
+account, and optionally activate the recommendation.
 
 ```sh
-agyva route list                    # groups and their activation mode
-agyva route inspect GROUP           # cached evidence per account
-agyva route plan GROUP [--json]     # recommended account
-agyva route plan                    # every saved account, no group
-agyva route apply GROUP [--yes]     # one journaled switch
-agyva route history [--limit N]     # recent decisions and reasons
+agyva route init [-y]                            # seed `default` group from saved accounts
+agyva route add work --accounts work,personal    # create/update a group (--ranking, --auto-switch)
+agyva route remove work [-y]                     # remove a group
+agyva route list                                 # groups and their activation mode
+agyva route inspect GROUP                        # cached evidence per account
+agyva route plan GROUP [--json]                  # recommended account
+agyva route plan                                 # every saved account, no group
+agyva route apply GROUP [--yes]                  # one journaled switch
+agyva route history [--limit N]                  # recent decisions and reasons
 ```
 
 ### Groups
@@ -257,12 +357,13 @@ back to `false` (or `auto_switch` to `false`) to stop it.
 
 ## Recover an interrupted switch
 
-Finish or undo a switch that did not complete.
+Finish or undo a switch that did not complete, or inspect and repair local state.
 
 ```sh
-agyva status     # state and any pending recovery
-agyva doctor     # read-only checks
-agyva recover    # complete a verified switch, or restore the checkpoint
+agyva status          # alias: st; state and any pending recovery
+agyva doctor          # read-only checks
+agyva doctor --fix    # apply safe non-destructive repairs (0700/0600 modes, dirs, stale lockfiles)
+agyva recover         # complete a verified switch, or restore the checkpoint
 ```
 
 Exit 3 means recovery is required. Resolve an outstanding keyring unlock prompt
@@ -274,6 +375,28 @@ neither side of the interrupted switch, recovery refuses to overwrite it —
 inspect `status` first, and note that `recover --force` keeps a pinned encrypted
 copy of that current login before restoring. A failure after the registry commit
 is a cleanup warning; the switch itself is complete.
+
+`agyva doctor --fix` ensures 0700/0600 permissions on private directories and
+files (under Unix), creates missing state/cache subdirectories when already
+initialized, and removes uncontended stale lockfiles whose recorded PID is no
+longer running, then re-runs `doctor`.
+
+### Checkpoints
+
+List, restore, or prune encrypted pre-switch checkpoints (ordinary `*.ckpt` and
+pinned `*.keep.ckpt`).
+
+```sh
+agyva checkpoints list                         # alias: ckpt
+agyva checkpoints restore <NAME> [--force] [-y]
+agyva checkpoints prune [--include-pinned] [-y]
+```
+
+`restore` refuses when recovery is pending (exit 3). If the live `agy` login
+differs from the checkpoint, `--force` keeps an encrypted pinned backup of the
+current login before restoring, then clears any active custom endpoint in
+`endpoints.json`. `prune` removes ordinary checkpoints beyond `checkpoints_keep`;
+pass `--include-pinned` to prune pinned `*.keep.ckpt` copies too.
 
 | Symptom | Next step |
 | --- | --- |
@@ -324,17 +447,20 @@ agyva update --install            # same as `agyva update`
 version exists without modifying anything; `agyva update` (or
 `agyva update --install`) downloads, verifies, and replaces the running binary
 atomically. Fresh installs can also use [`install.sh`](../install.sh) on Linux
-x86-64 and ARM64 (glibc).
+(x86-64 and ARM64, glibc and musl) and macOS (x86-64 and ARM64).
 
 Updates come from this project’s GitHub Releases on supported targets
-(`x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`): the release
-tarball and its `SHA256SUMS` are verified before the running binary is replaced
-atomically. Every human-output startup also checks for a newer stable release
-(2 s timeout, silent on failure, cached in `<cache>/update-check.json` for 24
-hours on success and 1 hour on failure; skipped on unsupported targets and for
-`--json` or `completions`) and prints a one-line notice on stderr; disable that
-with `check_updates = false` in the config or `AGYVA_UPDATE_CHECK=0` in the
-environment. [Self-update internals](architecture.md#self-update).
+(`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`,
+`x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`, and
+`aarch64-pc-windows-msvc`): the release tarball and its `SHA256SUMS` are
+verified before the running binary is replaced atomically. Every human-output
+startup also checks for a newer stable release (2 s timeout, silent on failure,
+cached in `<cache>/update-check.json` for 24 hours on success and 1 hour on
+failure; skipped on unsupported targets and for `--json` or `completions`) and
+prints a one-line notice on stderr; disable that with `check_updates = false` in
+the config or `AGYVA_UPDATE_CHECK=0` in the environment.
+[Self-update internals](architecture.md#self-update).
 
 ## Rekey the vault
 
@@ -356,7 +482,8 @@ characters). Pending switch recovery blocks `rekey` with exit 3.
 ## Settings
 
 `agyva config show` lists values and their meanings. `agyva config path` prints
-the file path; `agyva config set <key> <value>` validates before saving.
+the file path; `agyva config set <key> <value>` validates before saving;
+`agyva config reset <key>` restores a single setting to its default.
 
 | Setting | Default / range |
 | --- | --- |
@@ -364,26 +491,32 @@ the file path; `agyva config set <key> <value>` validates before saving.
 | `auto_switch_ack` | `false`; explicit acknowledgement that opt-in route automation may switch accounts. |
 | `auto_switch_candidate_max_age_secs` | `21600`; maximum cache age in seconds for standby auto-switch candidates, 60–604800. |
 | `auto_switch_cooldown_secs` | `900`; minimum seconds between switches before auto-switch may run again, 30–86400. |
-| `backend` | `auto`; `secret-service` or `file` chooses agy’s native store. |
+| `backend` | `auto`; `secret-service` (aliases `keyring`, `keychain`, `credential-manager`) or `file` chooses agy’s native store. |
 | `check_updates` | `true`; check GitHub Releases for newer agyva at startup. |
 | `checkpoints_keep` | `5`; ordinary checkpoints retained, 1–20. Pinned copies are never pruned. |
 | `color` | `auto`; `always` or `never`. Nonempty `NO_COLOR` disables colors; pipes stay plain. |
+| `critical_percent` | `10`; remaining quota critical threshold percentage (0–100, `<= warn_percent`). |
+| `default_profile` | unset; default global profile name (or empty string to unset). |
 | `desktop_notifications` | `false`; let `agyva watch` send desktop notifications. |
 | `lock_timeout_secs` | `10`; seconds to wait for another agyva, 0–600. |
 | `models_cache_secs` | `86400`; how long a saved model catalog counts as fresh, 60–604800. |
 | `policy_acknowledged` | `false`; whether the one-time policy notice was shown. |
 | `quota_fresh_secs` | `300`; how long a quota reading counts as fresh, 10–86400. |
 | `quota_min_refresh_secs` | `60`; minimum seconds between quota refreshes, 10–3600. |
+| `statusline_format` | `compact`; `compact`, `full`, or `json`. |
 | `vault_key` | `auto`; `keyring` or `passphrase`. Sets initial vault mode; use `agyva rekey` to rotate or migrate an existing vault. |
+| `warn_percent` | `25`; remaining quota warning threshold percentage (0–100). |
 | `watch_interval_secs` | `300`; seconds between `agyva watch` checks, 60–86400. |
 
-State and cache use XDG directories. `AGYVA_LOG=debug` sends logs to stderr;
-logging is disabled in the dashboard. Development overrides and isolated
-backends are in [development](development.md#environment-overrides).
+State and cache use platform config/state/cache directories (XDG on Linux).
+`AGYVA_LOG=debug` sends logs to stderr; logging is disabled in the dashboard.
+Development overrides and isolated backends are in
+[development](development.md#environment-overrides).
 
 ## Shell completion
 
-Print a completion script for your shell.
+Print a completion script for your shell (`fish`, `bash`, `zsh`, `powershell`,
+or `elvish`).
 
 ```sh
 mkdir -p ~/.config/fish/completions
@@ -394,8 +527,12 @@ agyva completions bash > ~/.local/share/bash-completion/completions/agyva
 
 mkdir -p ~/.zfunc
 agyva completions zsh > ~/.zfunc/_agyva
+
+agyva completions powershell > agyva.ps1
+agyva completions elvish > agyva.elv
 ```
 
 For Zsh, add `~/.zfunc` to `$fpath` in your shell configuration. Fish also
-completes saved aliases by running `agyva list --json`, which reads only the
-public registry and needs no keyring access.
+completes saved account aliases, `ep:<endpoint>` targets, profile names, and
+checkpoint names by running read-only `--json` subcommands that need no keyring
+access.

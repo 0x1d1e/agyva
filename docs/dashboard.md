@@ -2,40 +2,67 @@
 
 [README](../README.md) · [Commands](commands.md) · [Quota and health](antigravity.md#read-quota-and-health)
 
-Run `agyva` in a terminal. Accounts is the compact overview; Usage keeps every
-reported group and window separate; Diagnostics lists environment checks and
-recovery instructions. `Tab` cycles views and `?` opens the key reference.
+Run `agyva` in a terminal. The dashboard has five tabs (`Tab` / `Shift+Tab` or
+`F1`–`F5`): **Accounts** (compact overview and summary strip), **Usage**
+(per-group cards, gauges, and burn-rate ETA), **Endpoints** (custom LLM
+endpoints and live probe/fetch), **Routes** (active profile, saved profiles,
+and `routing.toml` groups), and **Diagnostics** (environment cards and `doctor`
+checks). `?` opens the key reference.
 
 ## Read the overview
 
-`●` marks the active account. Reverse video marks the selected row, including
-with colors disabled. Health carries text and alarming states also carry `!`.
+`●` marks the active account (or active endpoint / profile on their tabs).
+Reverse video marks the selected row, including with colors disabled. Health
+carries text and alarming states also carry `!`.
+
+On wide terminals (`>=60` columns and `>=12` rows), **Accounts** renders a
+Summary Metric Strip (`Active Target`, `Lowest & Burn`, and on `>=96` columns
+also `Endpoints` and `Next Reset`) above a rounded table container. Smooth
+block gauges (`█▓░`) show remaining percentages.
 
 The **5H LEFT** and **WEEKLY LEFT** columns show the minimum reported remaining
 percentage for that window across enabled groups. They are a conservative
 summary, not a shared account-wide quota. `—` means the window was not reported.
 A group that is not enabled is excluded from the minimum; exhausted groups
-remain included. Open Usage to see which group is limiting.
+remain included. Open **Usage** (`F2`) to see which group is limiting, along
+with per-window burn rate (`%/h`) and exhaustion ETA.
 
 **CACHE / AGE** reports freshness and observation age. It is not a subscription
-plan; agy’s usage response does not report plans. As the terminal narrows,
-cache age, weekly, status and five-hour columns drop in that order. Alias,
-selection and help/quit controls remain visible. Details and Usage retain the
-full evidence even when the overview drops columns.
+plan; agy’s usage response does not report plans. **BURN ETA** estimates time to
+exhaustion from `<cache>/quota-history.json`. As the terminal narrows, columns
+drop in order: `BURN ETA`, `CACHE / AGE`, `WEEKLY LEFT`, `STATUS`, `5H LEFT`.
+Alias, selection and help/quit controls remain visible.
+
+## Endpoints and Routes tabs
+
+- **Endpoints (`F3`)**: Lists configured custom endpoints with protocol badges
+  (`[OPENAI]`, `[RESPONSES]`, `[ANTHROPIC]`, `[GEMINI]`, `[AZURE]`, `[OLLAMA]`,
+  `[COHERE]`, `[CUSTOM]`, `[AUTO]`), latency, cached model count, default model,
+  and rate-limit/credit summary or cached error. Press `t` to test connectivity,
+  `f` to fetch and cache models, `d` for details (including cached models and
+  rate limits), or `Enter` to activate the endpoint and sync `agy`'s
+  `settings.json`.
+- **Routes (`F4`)**: Shows the active project/global profile banner, saved
+  local (`.agyva.toml`) and global (`profiles.toml`) profiles, and `routing.toml`
+  groups with their ranked candidates and exclusion reasons. Press `Enter` on a
+  profile to activate its account/endpoint, or `Enter` on a route group to
+  confirm and apply its recommended account.
 
 ## Keys
 
 | Key | Action |
 | --- | --- |
-| `Tab`, `Shift+Tab`, `F1`–`F3` | Change view. |
-| `↑↓`, `j/k` | Select an account in Accounts/Usage; scroll Diagnostics. |
-| `1`–`9` | Select a list number. With ambiguous multi-digit numbers, use arrows or filtering. |
-| `Enter` | Open a manual switch confirmation in Accounts/Usage. No switch action in Diagnostics. |
-| `y` | Confirm a pending switch. |
-| `n`, `Esc`, `q` in confirmation | Cancel without switching. |
+| `Tab`, `Shift+Tab`, `F1`–`F5` | Change view (`Accounts`, `Usage`, `Endpoints`, `Routes`, `Diagnostics`). |
+| `↑↓`, `j/k` | Select an item in Accounts/Usage/Endpoints/Routes; scroll Diagnostics. |
+| `1`–`9` | Quick-select a list number. With 10+ items, use arrows or `/`. |
+| `Enter` | Open confirmation to switch account (Accounts/Usage), activate endpoint (Endpoints), or apply route/profile (Routes). No Enter action in Diagnostics. |
+| `y` | Confirm a pending action. |
+| `n`, `Esc`, `q` in confirmation | Cancel without making changes. |
+| `s` | Cycle sort order on Accounts (`default`, `quota`, `alias`, `freshness`). |
+| `t`, `f` | Test connection (`t`) or fetch models (`f`) for the selected endpoint on Endpoints. |
 | `r` | Normal refresh of the active account, respecting interval/suspension restrictions. |
-| `d` | Selected account details. |
-| `/` | Filter aliases, emails or id prefixes. Enter keeps the filter; Esc clears. |
+| `d` | Context-sensitive details (Accounts/Usage, Endpoints, or Routes). |
+| `/` | Filter items (Accounts, Usage, Endpoints, Routes; disabled in Diagnostics). Enter keeps the filter; Esc clears. |
 | `?` | Help, including while editing a filter. |
 | `PageUp/Down`, `Home/End` | Scroll Usage/Diagnostics; also Help, Details and confirmation content. |
 | `↑↓`, `j/k` in a window | Scroll wrapped content. |

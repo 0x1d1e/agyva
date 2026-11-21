@@ -9,12 +9,16 @@ create an OAuth client or call a private Google endpoint.
 
 ## Choose a credential store
 
-Linux is supported. The default `backend = auto` discovers agy’s credential
-store, using freedesktop Secret Service over D-Bus or the native token file.
-Common Secret Service providers include GNOME Keyring, KeePassXC and KWallet
-with its Secret Service bridge. Agyva’s byte compatibility when writing agy’s
-keyring item remains **unverified against real agy**; read the
-[compatibility matrix](compatibility.md#matrix).
+Linux (Secret Service or file) is the locally verified target. macOS (Apple
+Keychain) and Windows (Windows Credential Manager) keyring backends are
+implemented and tested in CI, though unverified locally on macOS or Windows
+hardware. The default `backend = auto` discovers agy’s credential store, using
+the platform OS keyring (freedesktop Secret Service over D-Bus on Linux/BSD,
+Apple Keychain on macOS, Windows Credential Manager on Windows) or the native
+token file. Common Linux Secret Service providers include GNOME Keyring,
+KeePassXC and KWallet with its Secret Service bridge. Agyva’s byte compatibility
+when writing agy’s keyring item remains **unverified against real agy**; read
+the [compatibility matrix](compatibility.md#matrix).
 
 For agy installations that keep their login in
 `~/.gemini/antigravity-cli/antigravity-oauth-token`:
@@ -28,8 +32,7 @@ On a headless or no-D-Bus system, Agyva’s vault can use a passphrase
 (`vault_key = passphrase`, or automatically with `auto` when no keyring answers).
 Agy’s own login must still be in a store Agyva can reach. If it exists only in
 an unreachable keyring, switching cannot work. The file backend only helps
-when your agy reads that token file. macOS Keychain and Windows Credential
-Manager are unsupported.
+when your agy reads that token file.
 
 The version gate accepts 1.5.x. Consumer credential and quota shapes were
 observed on `agy 1.5.9`; enterprise/GCP credentials and native keyring writes

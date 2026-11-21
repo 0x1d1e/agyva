@@ -84,38 +84,58 @@ if [ "$UNINSTALL" -eq 1 ]; then
 fi
 
 OS=$(uname -s)
-[ "$OS" = "Linux" ] || die "unsupported operating system: $OS (precompiled releases support Linux only)"
-
 ARCH=$(uname -m)
-case "$ARCH" in
-  x86_64)
-    TARGET="x86_64-unknown-linux-gnu"
+case "$OS" in
+  Linux)
+    LIBC="gnu"
+    if command -v ldd >/dev/null 2>&1; then
+      LDD_OUT=$(ldd --version 2>&1 || true)
+      case "$LDD_OUT" in
+        *musl*)
+          LIBC="musl"
+          ;;
+        *GNU*|*GLIBC*|*glibc*)
+          LIBC="gnu"
+          ;;
+        *)
+          if ls /lib/ld-musl-* /lib64/ld-musl-* >/dev/null 2>&1; then
+            LIBC="musl"
+          fi
+          ;;
+      esac
+    elif ls /lib/ld-musl-* /lib64/ld-musl-* >/dev/null 2>&1; then
+      LIBC="musl"
+    fi
+
+    case "$ARCH" in
+      x86_64)
+        TARGET="x86_64-unknown-linux-$LIBC"
+        ;;
+      aarch64|arm64)
+        TARGET="aarch64-unknown-linux-$LIBC"
+        ;;
+      *)
+        die "unsupported architecture: $ARCH (supported: x86_64, aarch64)"
+        ;;
+    esac
     ;;
-  aarch64|arm64)
-    TARGET="aarch64-unknown-linux-gnu"
+  Darwin)
+    case "$ARCH" in
+      x86_64)
+        TARGET="x86_64-apple-darwin"
+        ;;
+      arm64|aarch64)
+        TARGET="aarch64-apple-darwin"
+        ;;
+      *)
+        die "unsupported architecture: $ARCH (supported: x86_64, arm64)"
+        ;;
+    esac
     ;;
   *)
-    die "unsupported architecture: $ARCH (supported: x86_64, aarch64)"
+    die "unsupported operating system: $OS (install.sh supports Linux and macOS; Windows builds are on GitHub Releases)"
     ;;
 esac
-
-if command -v ldd >/dev/null 2>&1; then
-  LDD_OUT=$(ldd --version 2>&1 || true)
-  case "$LDD_OUT" in
-    *musl*)
-      die "musl libc is not supported; prebuilt binaries require glibc ($TARGET)"
-      ;;
-    *GNU*|*GLIBC*|*glibc*)
-      ;;
-    *)
-      if ls /lib/ld-musl-* /lib64/ld-musl-* >/dev/null 2>&1; then
-        die "musl libc is not supported; prebuilt binaries require glibc ($TARGET)"
-      fi
-      ;;
-  esac
-elif ls /lib/ld-musl-* /lib64/ld-musl-* >/dev/null 2>&1; then
-  die "musl libc is not supported; prebuilt binaries require glibc ($TARGET)"
-fi
 
 need_cmd curl
 need_cmd tar
