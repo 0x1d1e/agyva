@@ -25,7 +25,15 @@ impl Env {
         Self(
             std::env::vars()
                 .filter(|(k, _)| {
-                    k.starts_with("AGYVA_") || k == "AGY_AUTH_STORAGE" || k == "NO_COLOR"
+                    k.starts_with("AGYVA_")
+                        || matches!(
+                            k.as_str(),
+                            "AGY_AUTH_STORAGE"
+                                | "NO_COLOR"
+                                | "SSH_TTY"
+                                | "SSH_CLIENT"
+                                | "SSH_CONNECTION"
+                        )
                 })
                 .collect(),
         )
