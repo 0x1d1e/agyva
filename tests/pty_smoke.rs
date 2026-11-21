@@ -1,6 +1,7 @@
 //! Drives the real binary on a pseudo-terminal (via util-linux `script`) with
 //! a synthetic fake `agy` and a tempdir sandbox. Skipped, loudly, where
 //! `script` is not installed.
+#![cfg(unix)]
 
 mod common;
 

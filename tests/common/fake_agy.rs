@@ -23,8 +23,12 @@ pub fn usage_json(five: f64, weekly: f64) -> String {
 impl FakeAgy {
     pub fn install(dir: &Path) -> Self {
         std::fs::create_dir_all(dir).expect("mkdir");
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-agy.sh");
-        let dst = dir.join("agy");
+        #[cfg(windows)]
+        let (src_rel, name) = ("tests/fixtures/fake-agy.cmd", "agy.cmd");
+        #[cfg(not(windows))]
+        let (src_rel, name) = ("tests/fixtures/fake-agy.sh", "agy");
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join(src_rel);
+        let dst = dir.join(name);
         std::fs::copy(&src, &dst).expect("copy fake agy");
         Self {
             dir: dir.to_path_buf(),
@@ -32,7 +36,14 @@ impl FakeAgy {
     }
 
     pub fn bin(&self) -> PathBuf {
-        self.dir.join("agy")
+        #[cfg(windows)]
+        {
+            self.dir.join("agy.cmd")
+        }
+        #[cfg(not(windows))]
+        {
+            self.dir.join("agy")
+        }
     }
 
     fn put(&self, name: &str, text: &str) {

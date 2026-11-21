@@ -1,5 +1,6 @@
 //! Usage, health and watch through the real binary, against a synthetic fake
 //! `agy`. Nothing touches the OS keyring, the real HOME or a real agy.
+#![cfg(unix)]
 
 mod common;
 
@@ -134,12 +135,15 @@ fn usage_json_labels_source_and_freshness_and_leaks_nothing() {
     );
     let mut files = Vec::new();
     all_files(&sb.p("cache"), &mut files);
-    use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(sb.p("cache/quota.json"))
-        .unwrap()
-        .permissions()
-        .mode();
-    assert_eq!(mode & 0o777, 0o600);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(sb.p("cache/quota.json"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 
     // Within the minimum interval the cache answers and agy is left alone.
     let calls = sb.fake.calls();

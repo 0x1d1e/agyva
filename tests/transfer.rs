@@ -634,6 +634,7 @@ fn a_skipped_identity_keeps_its_destination_alias() {
     let _ = fs::remove_file(&file);
 }
 
+#[cfg(unix)]
 #[test]
 fn an_orphan_or_symlink_at_a_final_path_refuses_the_import() {
     let source = source_rig();

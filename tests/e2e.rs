@@ -1,10 +1,12 @@
 //! Binary-level scenarios against a tempdir sandbox. `AGYVA_BACKEND=file`
 //! keeps the OS keyring out of the picture; logins are synthetic files.
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[cfg(unix)]
 use agyva::testing::{credential, secrets_for};
 use tempfile::TempDir;
 
@@ -33,9 +35,12 @@ impl Sandbox {
         for d in ["home", "agyhome"] {
             std::fs::create_dir_all(tmp.path().join(d)).expect("mkdir");
         }
-        let agy = tmp.path().join("agy");
-        std::fs::write(&agy, "#!/bin/sh\necho 'agy 1.5.9'\n").expect("fake agy");
-        std::fs::set_permissions(&agy, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        #[cfg(unix)]
+        {
+            let agy = tmp.path().join("agy");
+            std::fs::write(&agy, "#!/bin/sh\necho 'agy 1.5.9'\n").expect("fake agy");
+            std::fs::set_permissions(&agy, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
         Self { tmp }
     }
 
@@ -43,19 +48,23 @@ impl Sandbox {
         self.tmp.path().join(rel)
     }
 
+    #[cfg(unix)]
     fn token_file(&self) -> PathBuf {
         self.p("agyhome/antigravity-oauth-token")
     }
 
+    #[cfg(unix)]
     fn login(&self, sub: &str, email: &str, tag: &str) {
         std::fs::write(self.token_file(), credential(sub, email, tag)).expect("login");
     }
 
     /// Store an arbitrary synthetic live credential.
+    #[cfg(unix)]
     fn login_raw(&self, raw: Vec<u8>) {
         std::fs::write(self.token_file(), raw).expect("login");
     }
 
+    #[cfg(unix)]
     fn live_email(&self) -> String {
         let text = std::fs::read_to_string(self.token_file()).unwrap_or_default();
         ["alice", "bob"]
@@ -67,10 +76,10 @@ impl Sandbox {
 
     fn cmd(&self, args: &[&str], extra: &[(&str, &str)]) -> Run {
         let mut c = Command::new(env!("CARGO_BIN_EXE_agyva"));
-        c.args(args)
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("HOME", self.p("home"))
+        c.args(args).env_clear();
+        #[cfg(unix)]
+        c.env("PATH", "/usr/bin:/bin");
+        c.env("HOME", self.p("home"))
             .env("AGYVA_CONFIG_DIR", self.p("cfg"))
             .env("AGYVA_STATE_DIR", self.p("state"))
             .env("AGYVA_CACHE_DIR", self.p("cache"))
@@ -106,6 +115,7 @@ impl Sandbox {
     }
 }
 
+#[cfg(unix)]
 fn files_under(p: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = std::fs::read_dir(p) else { return };
     for e in rd.flatten() {
@@ -118,6 +128,7 @@ fn files_under(p: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn full_account_lifecycle_through_the_binary() {
     let sb = Sandbox::new();
@@ -202,6 +213,7 @@ fn full_account_lifecycle_through_the_binary() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_consumer_login_without_an_id_token_can_be_added() {
     let sb = Sandbox::new();
@@ -230,6 +242,7 @@ fn a_consumer_login_without_an_id_token_can_be_added() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn interrupted_switch_is_detected_blocked_and_recovered() {
     let sb = Sandbox::new();
@@ -359,6 +372,7 @@ fn help_completions_config_and_version() {
     assert!(mem.err.contains("AGYVA_BACKEND=memory"), "{}", mem.err);
 }
 
+#[cfg(unix)]
 #[test]
 fn untested_agy_versions_need_an_explicit_flag() {
     let sb = Sandbox::new();
@@ -372,6 +386,7 @@ fn untested_agy_versions_need_an_explicit_flag() {
 
 // ---------------------------------------------------------------- round 3
 
+#[cfg(unix)]
 fn two_saved(sb: &Sandbox) {
     sb.login("sub-alice", "alice@example.invalid", "alice");
     assert_eq!(sb.run(&["add"]).code, 0);
@@ -404,6 +419,7 @@ fn backend_hook_needs_every_sandbox_directory() {
 }
 
 /// Fix 6: without AGYVA_TEST_MODE=1 a failpoint is ignored, with one warning.
+#[cfg(unix)]
 #[test]
 fn failpoint_is_ignored_with_one_warning_outside_test_mode() {
     let sb = Sandbox::new();
@@ -429,6 +445,7 @@ fn failpoint_is_ignored_with_one_warning_outside_test_mode() {
 
 /// Fix 7 through the binary: cleanup trouble after a committed switch is a
 /// note on stderr and exit 0.
+#[cfg(unix)]
 #[test]
 fn post_commit_cleanup_failure_exits_zero_with_a_note() {
     let sb = Sandbox::new();
@@ -450,6 +467,7 @@ fn post_commit_cleanup_failure_exits_zero_with_a_note() {
 
 /// Fix 1 through the binary: --force over an unsaved login says where it is
 /// kept and that it is not pruned.
+#[cfg(unix)]
 #[test]
 fn force_switch_reports_where_the_old_login_is_kept() {
     let sb = Sandbox::new();
@@ -482,6 +500,7 @@ fn force_switch_reports_where_the_old_login_is_kept() {
 
 /// Fix 2 through the binary: recover will not clobber an unrelated login
 /// without --force.
+#[cfg(unix)]
 #[test]
 fn recover_refuses_over_an_unrelated_login_and_force_keeps_a_copy() {
     let sb = Sandbox::new();
@@ -529,6 +548,7 @@ fn a_closed_output_pipe_is_not_a_crash() {
 }
 
 /// Smoke 9: the documented table says bad selectors are usage errors (2).
+#[cfg(unix)]
 #[test]
 fn a_missing_or_ambiguous_selector_exits_two() {
     let sb = Sandbox::new();
@@ -554,6 +574,7 @@ fn a_missing_or_ambiguous_selector_exits_two() {
     assert!(both.err.contains("hint:"), "{}", both.err);
 }
 
+#[cfg(unix)]
 #[test]
 fn redirected_human_and_json_output_stay_plain_with_color_always() {
     let sb = Sandbox::new();

@@ -3,6 +3,7 @@
 //! temp-file target so the running test binary is never touched.
 
 use std::io::Write as _;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -96,6 +97,11 @@ fn archive_with(
 ) -> Vec<u8> {
     let target = test_target();
     let stem = format!("agyva-{version}-{target}");
+    let exe_name = if target.contains("-windows-") {
+        "agyva.exe"
+    } else {
+        "agyva"
+    };
     let mut buf = Vec::new();
     let raw_member = extra
         .filter(|(n, _, _)| n.contains(".."))
@@ -131,7 +137,7 @@ fn archive_with(
         h.set_size(bytes.len() as u64);
         h.set_mode(0o755);
         h.set_entry_type(tar::EntryType::Regular);
-        b.append_data(&mut h, format!("{stem}/agyva"), bytes)
+        b.append_data(&mut h, format!("{stem}/{exe_name}"), bytes)
             .unwrap();
         if raw_member.is_none()
             && let Some((name, ty, mode)) = extra
@@ -218,14 +224,15 @@ fn a_full_install_replaces_a_temp_target() {
     let dir = install_dir("happy");
     let exe = dir.join("agyva");
     std::fs::write(&exe, b"old-binary").expect("old exe");
-    let old_mode = std::fs::metadata(&exe).unwrap().permissions().mode();
 
     let check = install_update(false, Box::new(t), Some(&exe)).expect("install");
     assert_eq!(check.latest.as_deref(), Some(version));
     assert_eq!(std::fs::read(&exe).unwrap(), payload, "binary replaced");
-    let mode = std::fs::metadata(&exe).unwrap().permissions().mode();
-    assert_eq!(mode & 0o777, 0o755, "installed executable");
-    let _ = old_mode;
+    #[cfg(unix)]
+    {
+        let mode = std::fs::metadata(&exe).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755, "installed executable");
+    }
     // No staging leftover.
     let leftovers: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()

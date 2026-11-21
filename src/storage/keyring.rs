@@ -4,8 +4,9 @@
 //! vault key (`agyva`/`vault-key`) go through [`SecretStore`], so tests can
 //! substitute [`MemoryKeyring`], including a failing one.
 //!
-//! The real implementation sits on `keyring-core` with the Secret Service
-//! store. Errors from `keyring-core` can embed raw secret bytes
+//! The real implementation sits on `keyring-core` with the platform OS
+//! keyring (Secret Service on Linux/BSD, Keychain on macOS, Credential
+//! Manager on Windows). Errors from `keyring-core` can embed raw secret bytes
 //! (`BadEncoding`, `BadDataFormat`), so they are mapped by variant and are
 //! never formatted with `Debug`.
 
@@ -62,7 +63,34 @@ impl From<StoreError> for Error {
     fn from(e: StoreError) -> Self {
         let hint = match e.kind {
             StoreErrorKind::Unavailable => {
-                "no OS keyring is reachable; is a Secret Service provider (gnome-keyring, KWallet) running?"
+                #[cfg(any(
+                    target_os = "linux",
+                    target_os = "freebsd",
+                    target_os = "openbsd",
+                    target_os = "netbsd"
+                ))]
+                {
+                    "no OS keyring is reachable; is a Secret Service provider (gnome-keyring, KWallet) running?"
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    "no OS keyring is reachable; check that Apple Keychain is accessible"
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    "no OS keyring is reachable; check that Windows Credential Manager is accessible"
+                }
+                #[cfg(not(any(
+                    target_os = "linux",
+                    target_os = "freebsd",
+                    target_os = "openbsd",
+                    target_os = "netbsd",
+                    target_os = "macos",
+                    target_os = "windows"
+                )))]
+                {
+                    "no OS keyring is reachable (Secret Service / Apple Keychain / Windows Credential Manager)"
+                }
             }
             StoreErrorKind::Locked => "unlock your OS keyring and try again",
             StoreErrorKind::Ambiguous => {
@@ -105,7 +133,7 @@ pub trait SecretStore: Send + Sync + fmt::Debug {
 
 // ---------------------------------------------------------------- system
 
-/// The OS keyring (Secret Service on Linux).
+/// The OS keyring (Secret Service on Linux/BSD, Keychain on macOS, Credential Manager on Windows).
 #[derive(Debug, Default)]
 pub struct SystemKeyring {
     _private: (),
@@ -116,14 +144,40 @@ static STORE_INIT: OnceLock<Result<(), StoreError>> = OnceLock::new();
 fn init_default_store() -> Result<(), StoreError> {
     STORE_INIT
         .get_or_init(|| {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "freebsd",
+                target_os = "openbsd",
+                target_os = "netbsd"
+            ))]
             {
                 let store =
                     zbus_secret_service_keyring_store::Store::new().map_err(|e| map_error(&e))?;
                 keyring_core::set_default_store(store);
                 Ok(())
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(target_os = "macos")]
+            {
+                let store = apple_native_keyring_store::keychain::Store::new()
+                    .map_err(|e| map_error(&e))?;
+                keyring_core::set_default_store(store);
+                Ok(())
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let store =
+                    windows_native_keyring_store::Store::new().map_err(|e| map_error(&e))?;
+                keyring_core::set_default_store(store);
+                Ok(())
+            }
+            #[cfg(not(any(
+                target_os = "linux",
+                target_os = "freebsd",
+                target_os = "openbsd",
+                target_os = "netbsd",
+                target_os = "macos",
+                target_os = "windows"
+            )))]
             {
                 Err(StoreError::new(
                     StoreErrorKind::Unavailable,
@@ -218,27 +272,58 @@ impl SecretStore for SystemKeyring {
     ) -> Result<(), StoreError> {
         let (service, user) = (service.to_owned(), user.to_owned());
         let secret = Zeroizing::new(secret.to_vec());
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd"
+        ))]
         let opts = opts.clone();
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd"
+        )))]
+        let _ = opts;
         with_timeout(move || {
             init_default_store()?;
-            let mut mods: HashMap<&str, &str> = HashMap::new();
-            if let Some(label) = opts.label.as_deref() {
-                mods.insert("label", label);
-            }
-            let entry = keyring_core::Entry::new_with_modifiers(&service, &user, &mods)
-                .map_err(|e| map_error(&e))?;
-            let existed = match entry.get_secret() {
-                Ok(_) => true,
-                Err(keyring_core::Error::NoEntry) => false,
-                Err(e) => return Err(map_error(&e)),
-            };
-            entry.set_secret(&secret).map_err(|e| map_error(&e))?;
-            if !existed && let Some(schema) = opts.xdg_schema.as_deref() {
-                // Best effort: only for items we created ourselves.
-                let attrs = HashMap::from([("xdg:schema", schema)]);
-                if let Err(e) = entry.update_attributes(&attrs) {
-                    tracing::debug!(error = %map_error(&e), "could not set xdg:schema on new keyring item");
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "freebsd",
+                target_os = "openbsd",
+                target_os = "netbsd"
+            ))]
+            {
+                let mut mods: HashMap<&str, &str> = HashMap::new();
+                if let Some(label) = opts.label.as_deref() {
+                    mods.insert("label", label);
                 }
+                let entry = keyring_core::Entry::new_with_modifiers(&service, &user, &mods)
+                    .map_err(|e| map_error(&e))?;
+                let existed = match entry.get_secret() {
+                    Ok(_) => true,
+                    Err(keyring_core::Error::NoEntry) => false,
+                    Err(e) => return Err(map_error(&e)),
+                };
+                entry.set_secret(&secret).map_err(|e| map_error(&e))?;
+                if !existed && let Some(schema) = opts.xdg_schema.as_deref() {
+                    // Best effort: only for items we created ourselves.
+                    let attrs = HashMap::from([("xdg:schema", schema)]);
+                    if let Err(e) = entry.update_attributes(&attrs) {
+                        tracing::debug!(error = %map_error(&e), "could not set xdg:schema on new keyring item");
+                    }
+                }
+            }
+            #[cfg(not(any(
+                target_os = "linux",
+                target_os = "freebsd",
+                target_os = "openbsd",
+                target_os = "netbsd"
+            )))]
+            {
+                let entry = keyring_core::Entry::new(&service, &user).map_err(|e| map_error(&e))?;
+                entry.set_secret(&secret).map_err(|e| map_error(&e))?;
             }
             Ok(())
         })

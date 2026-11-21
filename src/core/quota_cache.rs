@@ -158,11 +158,14 @@ mod tests {
             })
             .unwrap();
         assert!(cache.load().accounts.contains_key("abc"));
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(cache.path())
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(cache.path())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
     }
 }

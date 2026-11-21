@@ -50,9 +50,47 @@ pub fn find_agy(env: &Env) -> Option<PathBuf> {
         return Some(PathBuf::from(p));
     }
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|d| d.join("agy"))
-        .find(|c| is_executable(c))
+    #[cfg(windows)]
+    {
+        let pathext = std::env::var_os("PATHEXT");
+        let candidates = windows_candidate_names(pathext.as_deref());
+        std::env::split_paths(&path)
+            .flat_map(|d| candidates.iter().map(move |name| d.join(name)))
+            .find(|c| is_executable(c))
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::split_paths(&path)
+            .map(|d| d.join("agy"))
+            .find(|c| is_executable(c))
+    }
+}
+
+#[cfg(any(windows, test))]
+fn windows_candidate_names(pathext: Option<&std::ffi::OsStr>) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut push_unique = |candidate: String| {
+        if !names
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(&candidate))
+        {
+            names.push(candidate);
+        }
+    };
+    if let Some(raw) = pathext {
+        for ext in raw.to_string_lossy().split(';').filter(|s| !s.is_empty()) {
+            let ext = if ext.starts_with('.') {
+                ext.to_owned()
+            } else {
+                format!(".{ext}")
+            };
+            push_unique(format!("agy{ext}"));
+        }
+    }
+    for fallback in ["agy.exe", "agy.cmd", "agy.bat", "agy"] {
+        push_unique(fallback.to_owned());
+    }
+    names
 }
 
 fn is_executable(p: &Path) -> bool {
@@ -328,5 +366,17 @@ mod tests {
             select_backend(BackendKind::Auto, &Env::default(), &paths, keyring, None).unwrap();
         assert_eq!(auth.backend_name(), "secret-service");
         assert_eq!(auth.read().unwrap().unwrap().as_bytes(), b"keyring-cred");
+    }
+
+    #[test]
+    fn windows_candidates_probe_pathext_and_default_suffixes() {
+        let without = windows_candidate_names(None);
+        assert_eq!(without, vec!["agy.exe", "agy.cmd", "agy.bat", "agy"]);
+
+        let with = windows_candidate_names(Some(std::ffi::OsStr::new(".COM;.EXE;.CMD")));
+        assert_eq!(
+            with,
+            vec!["agy.COM", "agy.EXE", "agy.CMD", "agy.bat", "agy"]
+        );
     }
 }

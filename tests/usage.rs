@@ -1,26 +1,42 @@
 //! Phase D: quota, health and refresh behavior against a fake `agy`.
 
+#[cfg(unix)]
 mod common;
 
+#[cfg(unix)]
 use std::sync::Arc;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 use agyva::agy::usage_run::RunLimits;
+#[cfg(unix)]
 use agyva::core::app::App;
+#[cfg(unix)]
 use agyva::core::health::AccountHealth;
+#[cfg(unix)]
 use agyva::core::provider::AgyUsageProvider;
+#[cfg(unix)]
 use agyva::core::quota::{Freshness, QuotaSource, UnavailableReason};
+#[cfg(unix)]
 use agyva::core::refresh::{RefreshOutcome, RefreshStatus};
+#[cfg(unix)]
 use agyva::core::usage::{NOT_REFRESHED, RefreshMode, UsageOptions};
-use chrono::{Duration as Cd, Utc};
+#[cfg(unix)]
+use chrono::Duration as Cd;
+use chrono::Utc;
+#[cfg(unix)]
 use common::fake_agy::FakeAgy;
+#[cfg(unix)]
 use common::*;
 
+#[cfg(unix)]
 struct World {
     rig: Rig,
     fake: FakeAgy,
 }
 
+#[cfg(unix)]
 impl World {
     /// bob (active, live) and alice saved.
     fn new() -> Self {
@@ -34,10 +50,12 @@ impl World {
     }
 }
 
+#[cfg(unix)]
 fn reason(o: &RefreshOutcome) -> UnavailableReason {
     o.unavailable().map(|u| u.reason).expect("unavailable")
 }
 
+#[cfg(unix)]
 fn row<'a>(
     v: &'a [agyva::core::usage::AccountUsage],
     alias: &str,
@@ -45,6 +63,7 @@ fn row<'a>(
     v.iter().find(|a| a.alias == alias).expect("account row")
 }
 
+#[cfg(unix)]
 #[test]
 fn live_refresh_reports_groups_with_source_freshness_and_health() {
     let w = World::new();
@@ -90,6 +109,7 @@ fn live_refresh_reports_groups_with_source_freshness_and_health() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn cached_data_is_labeled_stale_and_never_claims_healthy() {
     let w = World::new();
@@ -121,6 +141,7 @@ fn cached_data_is_labeled_stale_and_never_claims_healthy() {
     assert_eq!(row(&rows, "bob").freshness, Freshness::Expired);
 }
 
+#[cfg(unix)]
 #[test]
 fn refresh_is_throttled_and_the_cache_survives_failures() {
     let w = World::new();
@@ -153,6 +174,7 @@ fn refresh_is_throttled_and_the_cache_survives_failures() {
     assert!(bob.unavailable.is_some());
 }
 
+#[cfg(unix)]
 #[test]
 fn failure_outputs_map_to_explicit_states() {
     let cases = [
@@ -181,6 +203,7 @@ fn failure_outputs_map_to_explicit_states() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn tos_message_marks_suspended_and_stops_retrying() {
     let w = World::new();
@@ -226,6 +249,7 @@ fn tos_message_marks_suspended_and_stops_retrying() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn bare_403_is_not_a_suspension() {
     let w = World::new();
@@ -239,6 +263,7 @@ fn bare_403_is_not_a_suspension() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn exhausted_enabled_group_is_quota_limited_but_disabled_is_not() {
     let w = World::new();
@@ -252,6 +277,7 @@ fn exhausted_enabled_group_is_quota_limited_but_disabled_is_not() {
     assert_eq!(out.live.unwrap().health.state, AccountHealth::Healthy);
 }
 
+#[cfg(unix)]
 #[test]
 fn no_provider_when_agy_is_missing_or_untested() {
     let w = World::new();
@@ -276,6 +302,7 @@ fn no_provider_when_agy_is_missing_or_untested() {
     assert_eq!(w.fake.calls(), 0, "an unsupported agy is not run");
 }
 
+#[cfg(unix)]
 #[test]
 fn garbled_or_changed_output_is_schema_changed() {
     for text in [
@@ -292,6 +319,7 @@ fn garbled_or_changed_output_is_schema_changed() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn hung_agy_is_killed_at_the_timeout() {
     let w = World::new();
@@ -313,6 +341,7 @@ fn hung_agy_is_killed_at_the_timeout() {
     assert_eq!(reason(&out), UnavailableReason::TimedOut);
 }
 
+#[cfg(unix)]
 #[test]
 fn mismatched_live_identity_is_not_attributed() {
     let w = World::new();
@@ -331,6 +360,7 @@ fn mismatched_live_identity_is_not_attributed() {
     assert!(cache.accounts.is_empty(), "nothing was cached for anyone");
 }
 
+#[cfg(unix)]
 #[test]
 fn json_views_carry_no_secrets() {
     let w = World::new();
@@ -352,14 +382,18 @@ fn json_views_carry_no_secrets() {
         }
     }
     assert!(usage.contains("\"schema_version\":1"));
-    use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(app.quota_cache().path())
-        .unwrap()
-        .permissions()
-        .mode();
-    assert_eq!(mode & 0o777, 0o600);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(app.quota_cache().path())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 }
 
+#[cfg(unix)]
 #[test]
 fn partial_buckets_without_reset_times_still_parse() {
     let w = World::new();
@@ -378,6 +412,7 @@ fn partial_buckets_without_reset_times_still_parse() {
     assert!(g.weekly.is_none(), "a bucket with no value is not invented");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_refresh_skips_while_another_holds_the_refresh_lock() {
     let w = World::new();
@@ -404,6 +439,7 @@ fn a_refresh_skips_while_another_holds_the_refresh_lock() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_switch_waits_for_a_running_refresh_instead_of_racing_it() {
     let w = World::new();
@@ -509,6 +545,7 @@ fn parsed_quota_at_exit_zero_wins_over_stray_text() {
     assert_eq!(c.state, AccountHealth::Healthy, "{c:?}");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_failed_cache_write_still_shows_what_agy_just_returned() {
     use std::os::unix::fs::PermissionsExt;
@@ -547,6 +584,7 @@ fn a_failed_cache_write_still_shows_what_agy_just_returned() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_lost_quota_cache_does_not_make_a_suspended_account_refreshable() {
     let w = World::new();
@@ -590,12 +628,29 @@ fn a_lost_quota_cache_does_not_make_a_suspended_account_refreshable() {
     );
 }
 
+#[cfg(unix)]
 fn process_alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .map(|s| !s.rsplit(") ").next().unwrap_or("").starts_with('Z'))
-        .unwrap_or(false)
+    #[cfg(target_os = "linux")]
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        return !stat.rsplit(") ").next().unwrap_or("").starts_with('Z');
+    }
+    #[cfg(target_os = "linux")]
+    if std::path::Path::new("/proc").exists() {
+        return false;
+    }
+    let Some(p) = i32::try_from(pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return false;
+    };
+    matches!(
+        rustix::process::test_kill_process(p),
+        Ok(()) | Err(rustix::io::Errno::PERM)
+    )
 }
 
+#[cfg(unix)]
 #[test]
 fn a_timeout_kills_the_whole_agy_process_group() {
     let w = World::new();

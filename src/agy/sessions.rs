@@ -35,7 +35,7 @@ pub struct SessionReport {
     /// Stale `presence/*.lock` files left behind by exited sessions.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub stale_presence_locks: usize,
-    /// PIDs of processes whose name is exactly `agy`.
+    /// PIDs of processes whose name is `agy` (or `agy.exe` on Windows).
     pub agy_pids: Vec<u32>,
     /// Why the check could not be completed (unreadable presence directory,
     /// an empty process table). `None` means the answer is known.
@@ -174,6 +174,11 @@ fn probe_presence_locks(rd: std::fs::ReadDir) -> (usize, usize, Option<String>) 
     (active, stale, uncertain)
 }
 
+fn is_agy_process_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|n| n == "agy" || n.eq_ignore_ascii_case("agy.exe"))
+}
+
 fn detect_processes() -> (Vec<u32>, Option<String>) {
     let mut sys = System::new();
     let seen = sys.refresh_processes_specifics(
@@ -191,7 +196,7 @@ fn detect_processes() -> (Vec<u32>, Option<String>) {
             if Some(**pid) == current_pid {
                 return false;
             }
-            if p.name() != "agy" {
+            if !is_agy_process_name(p.name()) {
                 return false;
             }
             #[cfg(unix)]
@@ -207,8 +212,8 @@ fn detect_processes() -> (Vec<u32>, Option<String>) {
         .map(|(pid, _)| pid.as_u32())
         .collect();
     agy_pids.sort_unstable();
-    // Every Unix host has at least an init process; zero means the
-    // process table could not be read, not that agy is absent.
+    // Every host has system/init processes; zero means the process table
+    // could not be read, not that agy is absent.
     let uncertain = (seen == 0 && agy_pids.is_empty())
         .then(|| "the process table could not be read".to_owned());
     (agy_pids, uncertain)
@@ -295,5 +300,23 @@ mod tests {
         assert!(!after.any(), "{after:?}");
         assert_eq!(after.presence_locks, 0);
         assert_eq!(after.stale_presence_locks, 1);
+    }
+
+    #[test]
+    fn matches_agy_and_agy_exe_and_wouldblock_lock_contention() {
+        use std::ffi::OsStr;
+        assert!(is_agy_process_name(OsStr::new("agy")));
+        assert!(is_agy_process_name(OsStr::new("agy.exe")));
+        assert!(is_agy_process_name(OsStr::new("AGY.EXE")));
+        assert!(!is_agy_process_name(OsStr::new("agyva")));
+        assert!(!is_agy_process_name(OsStr::new("agy.cmd")));
+
+        assert!(is_lock_contended(&TryLockError::WouldBlock));
+        assert!(is_lock_contended(&TryLockError::Error(
+            std::io::Error::from(std::io::ErrorKind::WouldBlock)
+        )));
+        assert!(!is_lock_contended(&TryLockError::Error(
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied)
+        )));
     }
 }

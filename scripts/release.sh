@@ -4,7 +4,7 @@
 #   scripts/release.sh [--target <triple>]
 #
 # Output (dist/):
-#   agyva-<version>-<target>          standalone executable binary
+#   agyva-<version>-<target>[.exe]    standalone executable binary
 #   agyva-<version>-<target>.tar.gz   binary + README + LICENSE + docs
 #   SHA256SUMS                        verify with: (cd dist && sha256sum -c SHA256SUMS)
 #
@@ -60,40 +60,72 @@ target=${explicit_target:-$host_target}
 name="agyva-$version-$target"
 epoch=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct 2>/dev/null || echo 1700000000)}
 
+case "$target" in
+  *-windows-*) exe_ext=".exe" ;;
+  *) exe_ext="" ;;
+esac
+bin_name="agyva${exe_ext}"
+
 if [ -n "$explicit_target" ]; then
   cargo build --release --locked --target "$explicit_target"
-  bin_path="target/$explicit_target/release/agyva"
+  bin_path="target/$explicit_target/release/$bin_name"
 else
   cargo build --release --locked
-  bin_path="target/release/agyva"
+  bin_path="target/release/$bin_name"
 fi
 
 rm -rf dist
 stage_root="dist/.stage"
 stage="$stage_root/$name"
-mkdir -p "$stage/docs"
-install -m755 "$bin_path" "$stage/agyva"
+mkdir -p "$stage/docs/capture-data"
+install -m755 "$bin_path" "$stage/$bin_name"
 install -m644 README.md LICENSE "$stage/"
 install -m644 docs/*.md "$stage/docs/"
 for extra in docs/tui-capture.txt docs/tui.svg docs/tui-usage.svg; do
   [ -f "$extra" ] && install -m644 "$extra" "$stage/docs/"
 done
-install -Dm644 docs/capture-data/accounts.json "$stage/docs/capture-data/accounts.json"
+install -m644 docs/capture-data/accounts.json "$stage/docs/capture-data/accounts.json"
+
+tar_cmd="tar"
+if command -v gtar >/dev/null 2>&1; then
+  tar_cmd="gtar"
+fi
 
 (
   cd dist
-  tar -C .stage --sort=name --mtime="@$epoch" --owner=0 --group=0 --numeric-owner \
-      --format=gnu -cf - "$name" | gzip -n -9 > "$name.tar.gz"
+  if "$tar_cmd" --version 2>/dev/null | grep -q "GNU tar"; then
+    "$tar_cmd" -C .stage --sort=name --mtime="@$epoch" --owner=0 --group=0 --numeric-owner \
+        --format=gnu -cf - "$name" | gzip -n -9 > "$name.tar.gz"
+  else
+    COPYFILE_DISABLE=1 "$tar_cmd" -C .stage -cf - "$name" | gzip -n -9 > "$name.tar.gz"
+  fi
 )
 rm -rf "$stage_root"
-install -m755 "$bin_path" "dist/$name"
+install -m755 "$bin_path" "dist/${name}${exe_ext}"
+
+sha256_gen() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$@"
+  else
+    shasum -a 256 "$@"
+  fi
+}
+
+sha256_check() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -c "$@"
+  else
+    shasum -a 256 -c "$@"
+  fi
+}
+
 (
   cd dist
-  sha256sum "$name.tar.gz" "$name" > SHA256SUMS
-  sha256sum -c SHA256SUMS
+  sha256_gen "$name.tar.gz" "${name}${exe_ext}" > SHA256SUMS
+  sha256_check SHA256SUMS
 )
 
 echo
-echo "binary:  $PWD/dist/$name"
+echo "binary:  $PWD/dist/${name}${exe_ext}"
 echo "tarball: $PWD/dist/$name.tar.gz"
 echo "sums:    $PWD/dist/SHA256SUMS"

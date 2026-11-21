@@ -1,6 +1,7 @@
 name: release
 
-# Push a tag like v0.1.0 to build the Linux x86_64 and aarch64 release binaries, tarballs and checksums.
+# Push a tag like v0.1.0 to build release binaries, tarballs and checksums for
+# Linux (gnu + musl), macOS (x86_64 + aarch64), and Windows (x86_64).
 # Artifacts are attached to a DRAFT release; review and publish by hand.
 on:
   push:
@@ -23,16 +24,36 @@ jobs:
     name: release (${{ matrix.target }})
     permissions:
       contents: read
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            cross: false
+            os: ubuntu-latest
+            toolchain: native
           - target: aarch64-unknown-linux-gnu
-            cross: true
+            os: ubuntu-latest
+            toolchain: linux-gnu-arm64
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            toolchain: linux-musl-x64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            toolchain: linux-musl-arm64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            toolchain: native
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            toolchain: native
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            toolchain: native
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -41,9 +62,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - name: Install cross-compiler
-        if: matrix.cross
+      - name: Install Linux arm64 cross-compiler
+        if: matrix.toolchain == 'linux-gnu-arm64'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+      - name: Install x86_64 musl toolchain
+        if: matrix.toolchain == 'linux-musl-x64'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Setup Zig for aarch64 musl cross-build
+        if: matrix.toolchain == 'linux-musl-arm64'
+        uses: mlugg/setup-zig@v2
+      - name: Configure aarch64 musl CC/linker wrappers
+        if: matrix.toolchain == 'linux-musl-arm64'
+        run: |
+          mkdir -p "$RUNNER_TEMP/musl-bin"
+          printf '#!/bin/sh\nexec zig cc -target aarch64-linux-musl "$@"\n' > "$RUNNER_TEMP/musl-bin/cc"
+          printf '#!/bin/sh\nexec zig ar "$@"\n' > "$RUNNER_TEMP/musl-bin/ar"
+          chmod +x "$RUNNER_TEMP/musl-bin/cc" "$RUNNER_TEMP/musl-bin/ar"
+          echo "CC_aarch64_unknown_linux_musl=$RUNNER_TEMP/musl-bin/cc" >> "$GITHUB_ENV"
+          echo "AR_aarch64_unknown_linux_musl=$RUNNER_TEMP/musl-bin/ar" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=$RUNNER_TEMP/musl-bin/cc" >> "$GITHUB_ENV"
       - name: Check tag matches Cargo.toml
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
@@ -55,9 +92,17 @@ jobs:
         env:
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
         run: scripts/release.sh --target "${{ matrix.target }}"
       - name: Verify checksums
-        run: cd dist && sha256sum -c SHA256SUMS
+        run: |
+          cd dist
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum -c SHA256SUMS
+          else
+            shasum -a 256 -c SHA256SUMS
+          fi
       - uses: actions/upload-artifact@v7
         with:
           name: agyva-${{ matrix.target }}
@@ -92,16 +137,3 @@ jobs:
           files: |
             dist/agyva-*
             dist/SHA256SUMS
-
-  # Not supported yet (see ci.yml). Disabled on purpose.
-  macos:
-    if: false
-    runs-on: macos-latest
-    steps:
-      - run: echo "macOS builds are not supported yet"
-
-  windows:
-    if: false
-    runs-on: windows-latest
-    steps:
-      - run: echo "Windows builds are not supported yet"

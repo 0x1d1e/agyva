@@ -8,19 +8,19 @@
 //! alternate screen owns the terminal.
 //!
 //! `agyva update` installs: fetch the latest release, require a stable
-//! SemVer newer than this build, download the Linux x86_64 GNU `tar.gz`
+//! SemVer newer than this build, download the target's `tar.gz`
 //! asset plus `SHA256SUMS`, verify the archive against the file's digest
 //! and the GitHub API asset digest when present, then extract exactly
-//! `<archive-stem>/agyva` — one regular executable member, with plain
-//! directory entries tolerated; symlinks, hard links, traversal names and
-//! duplicates are refused — stage it next to the running binary, fsync and
-//! atomically rename it into place. Every request and redirect is restricted
-//! to GitHub's release hosts, and the whole decompressed stream is bounded.
-//! `agyva update --check` performs the same checks and only reports.
+//! `<archive-stem>/agyva` (or `agyva.exe` on Windows) — one regular
+//! executable member, with plain directory entries tolerated; symlinks, hard
+//! links, traversal names and duplicates are refused — stage it next to the
+//! running binary, fsync and replace it into place. Every request and
+//! redirect is restricted to GitHub's release hosts, and the whole
+//! decompressed stream is bounded. `agyva update --check` performs the same
+//! checks and only reports.
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -35,6 +35,7 @@ use crate::core::error::{Error, Result};
 /// The one endpoint agyva ever contacts (GitHub API, HTTPS only).
 pub const UPDATE_REPO_API: &str = "https://api.github.com/repos/0x1d1e/agyva/releases/latest";
 const EXECUTABLE_NAME: &str = "agyva";
+const WINDOWS_EXECUTABLE_NAME: &str = "agyva.exe";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CACHE_SCHEMA_VERSION: u32 = 1;
 const CACHE_OK_TTL_SECS: i64 = 86_400;
@@ -50,12 +51,50 @@ pub const fn supported_target() -> Option<&'static str> {
     {
         Some("aarch64-unknown-linux-gnu")
     }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "musl"))]
+    {
+        Some("x86_64-unknown-linux-musl")
+    }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64", target_env = "musl"))]
+    {
+        Some("aarch64-unknown-linux-musl")
+    }
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    {
+        Some("x86_64-apple-darwin")
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        Some("aarch64-apple-darwin")
+    }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+    {
+        Some("x86_64-pc-windows-msvc")
+    }
+    #[cfg(all(target_os = "windows", target_arch = "aarch64", target_env = "msvc"))]
+    {
+        Some("aarch64-pc-windows-msvc")
+    }
     #[cfg(not(any(
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
         all(target_os = "linux", target_arch = "aarch64", target_env = "gnu"),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "musl"),
+        all(target_os = "linux", target_arch = "aarch64", target_env = "musl"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+        all(target_os = "windows", target_arch = "aarch64", target_env = "msvc"),
     )))]
     {
         None
+    }
+}
+
+fn executable_name_for_target(target: &str) -> &'static str {
+    if target.contains("-windows-") {
+        WINDOWS_EXECUTABLE_NAME
+    } else {
+        EXECUTABLE_NAME
     }
 }
 /// Aggregate decompressed ceiling for the whole release archive.
@@ -558,7 +597,8 @@ impl<R: std::io::Read> std::io::Read for BoundedReader<R> {
 }
 fn extract_binary(archive: &[u8], version: &str, target: &str) -> Result<Zeroizing<Vec<u8>>> {
     let stem = format!("agyva-{version}-{target}");
-    let wanted = Path::new(&stem).join(EXECUTABLE_NAME);
+    let exe_name = executable_name_for_target(target);
+    let wanted = Path::new(&stem).join(exe_name);
     let gz = flate2::read::GzDecoder::new(archive);
     let mut tar = tar::Archive::new(BoundedReader {
         inner: gz,
@@ -594,7 +634,7 @@ fn extract_binary(archive: &[u8], version: &str, target: &str) -> Result<Zeroizi
         if path != wanted {
             continue;
         }
-        if entry.header().mode().unwrap_or(0) & 0o111 == 0 {
+        if !target.contains("-windows-") && entry.header().mode().unwrap_or(0) & 0o111 == 0 {
             return Err(Error::refused("the archived agyva is not executable"));
         }
         if found.is_some() {
@@ -614,7 +654,7 @@ fn extract_binary(archive: &[u8], version: &str, target: &str) -> Result<Zeroizi
     }
     found.ok_or_else(|| {
         Error::refused(format!(
-            "the release archive does not hold {stem}/{EXECUTABLE_NAME}"
+            "the release archive does not hold {stem}/{exe_name}"
         ))
     })
 }
@@ -644,8 +684,8 @@ mod origin_tests {
     }
 }
 
-/// Stage `bytes` next to `exe` (fresh 0755 temp file, fsync) and atomically
-/// rename it over the binary. The temp file is removed on any failure.
+/// Stage `bytes` next to `exe` (fresh 0755 temp file on Unix, fsync) and
+/// replace the binary. The temp file is removed on any failure.
 fn stage_and_replace(bytes: &[u8], exe: &Path) -> Result<()> {
     let dir = exe
         .parent()
@@ -654,7 +694,11 @@ fn stage_and_replace(bytes: &[u8], exe: &Path) -> Result<()> {
     let result = (|| {
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
-        options.mode(0o755);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o755);
+        }
         let mut file = options
             .open(&stage)
             .map_err(|e| Error::io("staging the new binary", e))?;
@@ -664,7 +708,9 @@ fn stage_and_replace(bytes: &[u8], exe: &Path) -> Result<()> {
             .map_err(|e| Error::io("staging the new binary", e));
         drop(file);
         written?;
-        fs::rename(&stage, exe).map_err(|e| Error::io("replacing the binary", e))?;
+        crate::storage::fsutil::make_executable(&stage)
+            .map_err(|e| Error::io("marking the staged binary executable", e))?;
+        replace_executable(&stage, exe)?;
         crate::storage::fsutil::sync_dir(dir)
             .map_err(|e| Error::io("syncing the install directory", e))
     })();
@@ -672,6 +718,28 @@ fn stage_and_replace(bytes: &[u8], exe: &Path) -> Result<()> {
         let _ = fs::remove_file(&stage);
     }
     result
+}
+
+#[cfg(not(windows))]
+fn replace_executable(stage: &Path, exe: &Path) -> Result<()> {
+    fs::rename(stage, exe).map_err(|e| Error::io("replacing the binary", e))
+}
+
+#[cfg(windows)]
+fn replace_executable(stage: &Path, exe: &Path) -> Result<()> {
+    // Windows refuses to overwrite or unlink a running .exe, but allows
+    // renaming it aside within the same directory.
+    let mut old_name = exe.as_os_str().to_os_string();
+    old_name.push(".old");
+    let old = PathBuf::from(old_name);
+    let _ = fs::remove_file(&old);
+    fs::rename(exe, &old).map_err(|e| Error::io("moving the running binary aside", e))?;
+    if let Err(e) = fs::rename(stage, exe) {
+        let _ = fs::rename(&old, exe);
+        return Err(Error::io("replacing the binary", e));
+    }
+    let _ = fs::remove_file(&old);
+    Ok(())
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -1022,15 +1090,18 @@ mod tests {
 
     #[test]
     fn stage_and_replace_swaps_a_temp_executable() {
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = std::env::temp_dir().join(format!("agyva-upd-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let exe = dir.join("agyva");
         fs::write(&exe, b"old").unwrap();
         stage_and_replace(b"new", &exe).unwrap();
         assert_eq!(fs::read(&exe).unwrap(), b"new");
-        let mode = fs::metadata(&exe).unwrap().permissions().mode();
-        assert_eq!(mode & 0o111, 0o111);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(&exe).unwrap().permissions().mode();
+            assert_eq!(mode & 0o111, 0o111);
+        }
         assert!(
             !dir.join(format!(".agyva.update.{}.tmp", std::process::id()))
                 .exists()
@@ -1122,5 +1193,76 @@ mod tests {
         let archive = e.finish().unwrap();
         assert!(archive.len() < 32 * 1024 * 1024, "the bomb stays small");
         assert!(extract_binary(&archive, "0.2.0", TEST_TARGET).is_err());
+    }
+
+    #[test]
+    fn supported_target_and_executable_names_cover_release_platforms() {
+        let unix_targets = [
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-linux-gnu",
+            "x86_64-unknown-linux-musl",
+            "aarch64-unknown-linux-musl",
+            "x86_64-apple-darwin",
+            "aarch64-apple-darwin",
+        ];
+        for t in unix_targets {
+            assert_eq!(executable_name_for_target(t), "agyva");
+        }
+        let windows_targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"];
+        for t in windows_targets {
+            assert_eq!(executable_name_for_target(t), "agyva.exe");
+        }
+
+        let current = supported_target();
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        assert_eq!(current, Some("x86_64-unknown-linux-gnu"));
+        #[cfg(all(target_os = "linux", target_arch = "aarch64", target_env = "gnu"))]
+        assert_eq!(current, Some("aarch64-unknown-linux-gnu"));
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "musl"))]
+        assert_eq!(current, Some("x86_64-unknown-linux-musl"));
+        #[cfg(all(target_os = "linux", target_arch = "aarch64", target_env = "musl"))]
+        assert_eq!(current, Some("aarch64-unknown-linux-musl"));
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        assert_eq!(current, Some("x86_64-apple-darwin"));
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        assert_eq!(current, Some("aarch64-apple-darwin"));
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+        assert_eq!(current, Some("x86_64-pc-windows-msvc"));
+        #[cfg(all(target_os = "windows", target_arch = "aarch64", target_env = "msvc"))]
+        assert_eq!(current, Some("aarch64-pc-windows-msvc"));
+    }
+
+    #[test]
+    fn extraction_handles_windows_exe_targets() {
+        for target in ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] {
+            let stem = format!("agyva-0.2.0-{target}");
+            let mut buf = Vec::new();
+            {
+                let mut b = Builder::new(&mut buf);
+                let mut h = tar::Header::new_gnu();
+                h.set_size(4);
+                h.set_mode(0o644);
+                h.set_entry_type(tar::EntryType::Regular);
+                b.append_data(&mut h, format!("{stem}/agyva.exe"), &b"pe32"[..])
+                    .unwrap();
+                b.finish().unwrap();
+            }
+            let got = extract_binary(&gz(&buf), "0.2.0", target).expect("extracts agyva.exe");
+            assert_eq!(&**got, b"pe32");
+
+            // A Unix-named member is not accepted for a Windows target.
+            let mut bad_buf = Vec::new();
+            {
+                let mut b = Builder::new(&mut bad_buf);
+                let mut h = tar::Header::new_gnu();
+                h.set_size(4);
+                h.set_mode(0o755);
+                h.set_entry_type(tar::EntryType::Regular);
+                b.append_data(&mut h, format!("{stem}/agyva"), &b"elf!"[..])
+                    .unwrap();
+                b.finish().unwrap();
+            }
+            assert!(extract_binary(&gz(&bad_buf), "0.2.0", target).is_err());
+        }
     }
 }

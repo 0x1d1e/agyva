@@ -194,6 +194,68 @@ pub fn mode_of(path: &Path) -> Option<u32> {
     }
 }
 
+/// Mark `path` executable (mode 0755 on Unix; no-op elsewhere).
+pub fn make_executable(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+/// Whether `a` and `b` refer to the same directory entry / underlying file
+/// without following symlinks.
+pub fn same_file(a: &Path, b: &Path) -> io::Result<bool> {
+    let ma = fs::symlink_metadata(a)?;
+    let mb = fs::symlink_metadata(b)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(ma.dev() == mb.dev() && ma.ino() == mb.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        if ma.file_type() != mb.file_type() {
+            return Ok(false);
+        }
+        if !ma.is_symlink()
+            && let (Ok(ca), Ok(cb)) = (fs::canonicalize(a), fs::canonicalize(b))
+            && ca == cb
+        {
+            return Ok(true);
+        }
+        if !ma.is_file() || !mb.is_file() {
+            return Ok(false);
+        }
+        if ma.len() != mb.len()
+            || ma.modified().ok() != mb.modified().ok()
+            || ma.created().ok() != mb.created().ok()
+        {
+            return Ok(false);
+        }
+        use std::io::Read;
+        let mut fa = File::open(a)?;
+        let mut fb = File::open(b)?;
+        let mut ba = [0u8; 8192];
+        let mut bb = [0u8; 8192];
+        loop {
+            let na = fa.read(&mut ba)?;
+            let nb = fb.read(&mut bb)?;
+            if na != nb || ba[..na] != bb[..nb] {
+                return Ok(false);
+            }
+            if na == 0 {
+                return Ok(true);
+            }
+        }
+    }
+}
+
 /// Files in `dir` with the given extension, sorted by file name.
 pub fn list_with_extension(dir: &Path, ext: &str) -> io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
@@ -253,6 +315,27 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec!["account.snap".to_owned()], "{names:?}");
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn same_file_and_make_executable_work() {
+        let d = dir("same");
+        let a = d.join("a.bin");
+        let link = d.join("link.bin");
+        let b = d.join("b.bin");
+        fs::write(&a, b"payload").unwrap();
+        fs::hard_link(&a, &link).unwrap();
+        fs::write(&b, b"other").unwrap();
+
+        assert!(same_file(&a, &a).unwrap());
+        assert!(same_file(&a, &link).unwrap());
+        assert!(!same_file(&a, &b).unwrap());
+
+        make_executable(&a).unwrap();
+        #[cfg(unix)]
+        assert_eq!(mode_of(&a), Some(0o755));
+
         fs::remove_dir_all(&d).unwrap();
     }
 }

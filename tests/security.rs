@@ -1,5 +1,6 @@
 mod common;
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 use agyva::agy::credentials::RawCredential;
@@ -115,6 +116,7 @@ fn nothing_on_disk_is_plaintext_and_the_key_is_not_stored() {
     assert!(snaps >= 3);
 }
 
+#[cfg(unix)]
 #[test]
 fn files_are_private() {
     let rig = Rig::new();

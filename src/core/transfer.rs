@@ -17,7 +17,6 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -797,8 +796,8 @@ fn production_profile_error(kdf: &KdfParams) -> Option<&'static str> {
     None
 }
 
-/// Whether `final_path` is a regular file whose `(dev, ino)` equals the
-/// staged anchor's: proof this import created it. Symlinks are never
+/// Whether `final_path` is a regular file referencing the same underlying
+/// file as the staged anchor: proof this import created it. Symlinks are never
 /// followed.
 fn owned_by_staging(final_path: &Path, staged: &Path) -> bool {
     let Ok(meta) = fs::symlink_metadata(final_path) else {
@@ -807,10 +806,7 @@ fn owned_by_staging(final_path: &Path, staged: &Path) -> bool {
     if !meta.is_file() {
         return false;
     }
-    let Ok(staged_meta) = fs::symlink_metadata(staged) else {
-        return false;
-    };
-    meta.dev() == staged_meta.dev() && meta.ino() == staged_meta.ino()
+    fsutil::same_file(final_path, staged).unwrap_or(false)
 }
 
 #[cfg(test)]

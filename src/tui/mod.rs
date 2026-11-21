@@ -142,8 +142,17 @@ impl Tty {
 
 /// Kill this process immediately, without cleanup.
 fn die() -> ! {
-    let _ = rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::KILL);
-    std::process::abort()
+    #[cfg(unix)]
+    {
+        let _ =
+            rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::KILL);
+        std::process::abort()
+    }
+    #[cfg(not(unix))]
+    {
+        restore_terminal();
+        std::process::exit(130)
+    }
 }
 
 /// Milliseconds since `start`, stored by the loop on every pass so the
