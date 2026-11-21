@@ -197,10 +197,9 @@ EXPECTED_SHA=$(awk -v file="$TARBALL" '
 ' "$TMPDIR/SHA256SUMS")
 
 [ -n "$EXPECTED_SHA" ] || die "no checksum entry for $TARBALL in SHA256SUMS"
+[ "${#EXPECTED_SHA}" -eq 64 ] || die "malformed SHA-256 digest in SHA256SUMS"
 case "$EXPECTED_SHA" in
-  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
-    ;;
-  *)
+  *[!0-9a-f]*)
     die "malformed SHA-256 digest in SHA256SUMS"
     ;;
 esac
