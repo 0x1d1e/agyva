@@ -76,7 +76,7 @@ agyva fail itself.
 | `tests/tui.rs`, `tests/pty_smoke.rs` | TUI state machine and rendering with a test backend; a pty smoke run. |
 | `tests/e2e.rs` | The real binary in a sandbox: add, use, crash and recover, exit codes. |
 | `tests/transfer.rs` | Export/import roundtrip, skip rules, alias and id conflicts, archive refusals, crash/recovery at every import failpoint. |
-| `tests/updater.rs` | Self-update: SemVer gating, checksum and digest verification, unsafe-archive refusal, atomic replace of a temp target. |
+| `tests/updater.rs` | Self-update: SemVer gating, checksum and digest verification, empty/oversize-binary refusal, Windows `.exe` asset naming, 6-target coverage, atomic replace of a temp target. |
 | `tests/routing.rs`, `tests/route_apply.rs`, `tests/monitor.rs`, `tests/auto_switch.rs` | Routing slices: ranking and planning, journaled apply and history, the monitor loop, and opt-in auto-switch gates (cooldown, freshness, sessions, recovery, journaled path). |
 | `tests/real_keyring.rs` | Ignored, opt-in; throwaway service name only. |
 | unit tests under `src/` | Parsers, classification, error hints, config validation. |
@@ -100,8 +100,8 @@ It never reads or writes any credential.
 | `scripts/demo-sandbox.sh <dir>` | Build a synthetic sandbox (fake accounts, fake agy, scratch HOME) and print `export` lines. Use it to try agyva without touching anything real. |
 | `scripts/capture-tui.sh [--snapshot\|--synthetic] [file]` | Rebuild the debug CLI and capture helper; replay sanitized cached evidence by default, or explicitly generate synthetic data. Writes text plus Accounts/Usage SVGs; needs Python 3. |
 | `scripts/check-links.py` | Check every relative Markdown link and heading anchor without network access. |
-| `install.sh` | Download, verify (`SHA256SUMS`), and install or uninstall a GitHub Release on Linux x86-64 / ARM64 (glibc). |
-| `scripts/release.sh [--target <triple>]` | `cargo build --release --locked`, output the standalone binary and `.tar.gz` into `dist/`, write and check `SHA256SUMS`. |
+| `install.sh` | Download, verify (`SHA256SUMS`), and install or uninstall a GitHub Release on Linux (x86-64 / ARM64) or macOS (x86-64 / ARM64). |
+| `scripts/release.sh [--target <triple>]` | `cargo build --release --locked`, output the standalone binary `agyva-<version>-<target>[.exe]` into `dist/`, write and check `SHA256SUMS`. |
 
 ```sh
 eval "$(scripts/demo-sandbox.sh /tmp/agyva-demo)"   # bash/zsh

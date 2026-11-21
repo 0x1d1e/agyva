@@ -8,7 +8,7 @@ Manual account and endpoint manager for Google's Antigravity CLI (`agy`).
 
 Agyva saves the logins `agy` already holds, reads their cached quota, manages custom LLM endpoints and project profiles, and restores the target you pick. Snapshots stay encrypted, every switch is journaled and verified, and the same commands drive a 5-tab terminal dashboard.
 
-**Unofficial.** Targets Linux (glibc and musl), macOS, and Windows (macOS Keychain and Windows Credential Manager are implemented and CI-configured, unverified locally on macOS/Windows hardware). Google’s [Antigravity FAQ](https://antigravity.google/docs/faq/) says third-party tools and account rotation are not supported on consumer plans. Read the [policy and security model](docs/security.md) first; Agyva does not bypass limits or work around suspensions.
+**Unofficial.** Targets Linux, macOS, and Windows (x64 and ARM64; macOS Keychain and Windows Credential Manager are implemented and CI-configured, unverified locally on macOS/Windows hardware). Google’s [Antigravity FAQ](https://antigravity.google/docs/faq/) says third-party tools and account rotation are not supported on consumer plans. Read the [policy and security model](docs/security.md) first; Agyva does not bypass limits or work around suspensions.
 
 ![Actual Agyva Usage rendering: stale cached Gemini weekly 99 percent, Claude and GPT zero percent, five-hour windows not reported](docs/tui-usage.svg)
 
@@ -37,26 +37,25 @@ overview](docs/tui.svg) shows the **minimum remaining quota across enabled group
 
 ## Requirements
 
-Prebuilt releases target Linux (`x86_64`, `aarch64`, glibc and musl), macOS (`x86_64`, `aarch64`), and Windows (`x86_64` MSVC; `aarch64-pc-windows-msvc` is also supported by `agyva update`). Linux behavior is tested locally; macOS Keychain and Windows Credential Manager backends are implemented and CI-configured, unverified locally on macOS or Windows hardware.
+Prebuilt releases target Linux (`x86_64`, `aarch64`), macOS (`x86_64`, `aarch64`), and Windows (`x86_64`, `aarch64` MSVC). Linux behavior is tested locally; macOS Keychain and Windows Credential Manager backends are implemented and CI-configured, unverified locally on macOS or Windows hardware.
 
-Install `agy` 1.5.x and sign in separately; Agyva does not sign you in. The default store uses the OS keyring (freedesktop Secret Service on Linux/BSD, Apple Keychain on macOS, Windows Credential Manager on Windows), the native token file (`backend = file`), or the passphrase vault (`vault_key = passphrase`); see [Antigravity setup](docs/antigravity.md#choose-a-credential-store). Building from source needs Rust 1.88 or newer.
+Install `agy` 1.5.x and sign in separately; Agyva does not sign you in. The default store uses the OS keyring (freedesktop Secret Service on Linux, Apple Keychain on macOS, Windows Credential Manager on Windows), the native token file (`backend = file`), or the passphrase vault (`vault_key = passphrase`); see [Antigravity setup](docs/antigravity.md#choose-a-credential-store). Building from source needs Rust 1.88 or newer.
 
 ## Install
 
-Install the latest release on Linux (x86-64 / ARM64, glibc or musl) or macOS (x86-64 / ARM64) with [`install.sh`](install.sh):
+Install the latest release on Linux (x86-64 / ARM64) or macOS (x86-64 / ARM64) with [`install.sh`](install.sh):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/0x1d1e/agyva/main/install.sh | sh
 ```
 
-The installer detects OS, architecture, and Linux libc (glibc vs musl), verifies the release archive against `SHA256SUMS`, and installs into `~/.local/bin/agyva`. Pass options via `sh -s --`: `--version <vX.Y.Z>`, `--prefix <dir>`, or `--uninstall`.
+The installer detects OS and architecture, verifies the release binary against `SHA256SUMS`, and installs into `~/.local/bin/agyva`. Pass options via `sh -s --`: `--version <vX.Y.Z>`, `--prefix <dir>`, or `--uninstall`.
 
-Or download a release archive or standalone binary and `SHA256SUMS` from a `v*` release ([`release.yml`](.github/workflows/release.yml)) and verify manually:
+Or download a standalone release binary and `SHA256SUMS` from a `v*` release ([`release.yml`](.github/workflows/release.yml)) and verify manually:
 
 ```sh
 sha256sum -c SHA256SUMS
-tar -xzf agyva-0.1.3-x86_64-unknown-linux-gnu.tar.gz
-install -Dm755 agyva-0.1.3-x86_64-unknown-linux-gnu/agyva ~/.local/bin/agyva
+install -Dm755 agyva-0.1.3-x86_64-unknown-linux-gnu ~/.local/bin/agyva
 ```
 
 Or build this tree:
@@ -115,7 +114,7 @@ Auto-switch is off by default and doubly gated: the group sets `auto_switch = tr
 - Saved logins, custom endpoint secrets (`endpoints/<id>.ep.snap`), and checkpoints are AES-256-GCM envelopes; the vault key lives in the OS keyring or comes from a passphrase via Argon2id. Export archives are sealed under a separate passphrase (`AGYVA_ARCHIVE_PASSPHRASE`, minimum 8 characters) using 64 MiB Argon2id (`import` accepts down to the 19 MiB floor); the vault key is never exported.
 - Switches are journaled, read back and verified locally. Exit 3 means recovery is required: resolve any keyring unlock prompt, then run `agyva recover`.
 - Quota comes only from `agy -p "/usage" --output-format json`; that envelope is locally observed and undocumented, so a changed shape reads as unavailable. Quota never switches because of an error, and suspended accounts are never retried.
-- No telemetry. Network requests occur only for user-configured custom endpoints (`endpoint add`, `test`, `models --refresh`, `bridge`, `exec --bridge`; HTTPS required except loopback/local HTTP) and optional self-update: one HTTPS request to this project’s GitHub Releases on supported targets (`x86_64`/`aarch64` Linux gnu & musl, macOS, Windows MSVC), cached in `<cache>/update-check.json` (24 hours on success, 1 hour on failure) and silent on failure. `check_updates = false` or `AGYVA_UPDATE_CHECK=0` disables the startup check; `--json` and `completions` suppress the notice, and in the TUI it appears on the dashboard instead of stderr.
+- No telemetry. Network requests occur only for user-configured custom endpoints (`endpoint add`, `test`, `models --refresh`, `bridge`, `exec --bridge`; HTTPS required except loopback/local HTTP) and optional self-update: one HTTPS request to this project’s GitHub Releases on supported targets (`x86_64`/`aarch64` Linux, macOS, Windows MSVC), cached in `<cache>/update-check.json` (24 hours on success, 1 hour on failure) and silent on failure. `check_updates = false` or `AGYVA_UPDATE_CHECK=0` disables the startup check; `--json` and `completions` suppress the notice, and in the TUI it appears on the dashboard instead of stderr.
 - Encryption protects saved copies at rest, not an unlocked, compromised session. Details: [security model](docs/security.md) · [compatibility matrix](docs/compatibility.md).
 
 ## Documentation

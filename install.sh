@@ -87,32 +87,12 @@ OS=$(uname -s)
 ARCH=$(uname -m)
 case "$OS" in
   Linux)
-    LIBC="gnu"
-    if command -v ldd >/dev/null 2>&1; then
-      LDD_OUT=$(ldd --version 2>&1 || true)
-      case "$LDD_OUT" in
-        *musl*)
-          LIBC="musl"
-          ;;
-        *GNU*|*GLIBC*|*glibc*)
-          LIBC="gnu"
-          ;;
-        *)
-          if ls /lib/ld-musl-* /lib64/ld-musl-* >/dev/null 2>&1; then
-            LIBC="musl"
-          fi
-          ;;
-      esac
-    elif ls /lib/ld-musl-* /lib64/ld-musl-* >/dev/null 2>&1; then
-      LIBC="musl"
-    fi
-
     case "$ARCH" in
       x86_64)
-        TARGET="x86_64-unknown-linux-$LIBC"
+        TARGET="x86_64-unknown-linux-gnu"
         ;;
       aarch64|arm64)
-        TARGET="aarch64-unknown-linux-$LIBC"
+        TARGET="aarch64-unknown-linux-gnu"
         ;;
       *)
         die "unsupported architecture: $ARCH (supported: x86_64, aarch64)"
@@ -138,7 +118,7 @@ case "$OS" in
 esac
 
 need_cmd curl
-need_cmd tar
+need_cmd install
 need_cmd mktemp
 
 if command -v sha256sum >/dev/null 2>&1; then
@@ -178,8 +158,7 @@ case "$VER" in
     ;;
 esac
 
-NAME="agyva-$VER-$TARGET"
-TARBALL="$NAME.tar.gz"
+ASSET="agyva-$VER-$TARGET"
 BASE_URL="https://github.com/$REPO/releases/download/$TAG"
 
 TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/agyva-install.XXXXXX")
@@ -199,13 +178,14 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM HUP
 
-printf 'Downloading %s (%s)...\n' "$TARBALL" "$TAG"
-curl -fsSL --proto '=https' --tlsv1.2 -o "$TMPDIR/$TARBALL" "$BASE_URL/$TARBALL" \
-  || die "failed to download $BASE_URL/$TARBALL"
+printf 'Downloading %s (%s)...\n' "$ASSET" "$TAG"
+curl -fsSL --proto '=https' --tlsv1.2 -o "$TMPDIR/$ASSET" "$BASE_URL/$ASSET" \
+  || die "failed to download $BASE_URL/$ASSET"
+[ -s "$TMPDIR/$ASSET" ] || die "downloaded binary is empty: $ASSET"
 curl -fsSL --proto '=https' --tlsv1.2 -o "$TMPDIR/SHA256SUMS" "$BASE_URL/SHA256SUMS" \
   || die "failed to download $BASE_URL/SHA256SUMS"
 
-EXPECTED_SHA=$(awk -v file="$TARBALL" '
+EXPECTED_SHA=$(awk -v file="$ASSET" '
   NF >= 2 {
     name = $2
     sub(/^\*/, "", name)
@@ -216,7 +196,7 @@ EXPECTED_SHA=$(awk -v file="$TARBALL" '
   }
 ' "$TMPDIR/SHA256SUMS")
 
-[ -n "$EXPECTED_SHA" ] || die "no checksum entry for $TARBALL in SHA256SUMS"
+[ -n "$EXPECTED_SHA" ] || die "no checksum entry for $ASSET in SHA256SUMS"
 [ "${#EXPECTED_SHA}" -eq 64 ] || die "malformed SHA-256 digest in SHA256SUMS"
 case "$EXPECTED_SHA" in
   *[!0-9a-f]*)
@@ -224,16 +204,12 @@ case "$EXPECTED_SHA" in
     ;;
 esac
 
-ACTUAL_SHA=$(compute_sha256 "$TMPDIR/$TARBALL" | tr 'A-F' 'a-f')
-[ "$ACTUAL_SHA" = "$EXPECTED_SHA" ] || die "SHA-256 verification failed for $TARBALL"
-
-tar -xzf "$TMPDIR/$TARBALL" -C "$TMPDIR"
-EXTRACTED_BIN="$TMPDIR/$NAME/agyva"
-[ -f "$EXTRACTED_BIN" ] && [ ! -L "$EXTRACTED_BIN" ] || die "expected binary missing from archive: $NAME/agyva"
+ACTUAL_SHA=$(compute_sha256 "$TMPDIR/$ASSET" | tr 'A-F' 'a-f')
+[ "$ACTUAL_SHA" = "$EXPECTED_SHA" ] || die "SHA-256 verification failed for $ASSET"
 
 mkdir -p "$DEST_DIR"
 STAGED=$(mktemp "$DEST_DIR/.agyva.new.XXXXXX")
-install -m 755 "$EXTRACTED_BIN" "$STAGED"
+install -m 755 "$TMPDIR/$ASSET" "$STAGED"
 
 if [ -e "$DEST_BIN" ] || [ -L "$DEST_BIN" ]; then
   BACKUP=$(mktemp "$DEST_DIR/.agyva.bak.XXXXXX")

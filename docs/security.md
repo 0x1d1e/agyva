@@ -111,15 +111,12 @@ and imports only ever add.
 - Every request and every redirect hop is restricted to `api.github.com`,
   `github.com`, `objects.githubusercontent.com`, and
   `release-assets.githubusercontent.com`.
-- The decompressed stream as a whole is bounded, not just each member.
-- Archives are verified against `SHA256SUMS` and, when GitHub exposes one, the
-  per-asset digest (a malformed digest is refused, never treated as absent).
-- Every tar member is screened (no traversal, no links, plain directories
-  tolerated, exactly one executable), and the binary is staged and renamed
-  atomically.
+- Downloaded release binaries are checked to be non-empty and bounded
+  (`MAX_BINARY_BYTES`), verified against `SHA256SUMS` and, when GitHub exposes
+  one, the per-asset digest (a malformed digest is refused, never treated as
+  absent), then staged and renamed atomically.
 - Only supported release targets (`x86_64-unknown-linux-gnu`,
-  `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`,
-  `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`, `aarch64-apple-darwin`,
+  `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`,
   `x86_64-pc-windows-msvc`, and `aarch64-pc-windows-msvc`) query or install
   releases; unsupported targets skip the startup check and refuse `agyva update`.
 - The startup check is passive: one metadata request, silent failure, cached in

@@ -121,7 +121,7 @@ a pinned backup if the live login differs), or prune checkpoints.
 agy stores its login in the OS keyring (`service=gemini`,
 `username=antigravity`) or, optionally, the file
 `~/.gemini/antigravity-cli/antigravity-oauth-token`. `storage::keyring` uses
-`keyring-core` with Secret Service on Linux/BSD, Apple Keychain on macOS, and
+`keyring-core` with Secret Service on Linux, Apple Keychain on macOS, and
 Windows Credential Manager on Windows. Linux keyring write compatibility with
 real `agy` remains **unverified** (see `docs/security.md`); macOS and Windows
 backends are implemented and tested in CI, not verified locally on macOS or
@@ -198,20 +198,18 @@ next run; unexpected staging entries are preserved and reported.
 
 `updater.rs` checks GitHub Releases (one GET, 2 s, silent) on supported
 targets (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
-`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`,
 `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`, and
 `aarch64-pc-windows-msvc`), caching results in `<cache>/update-check.json` (24
 hours on success, 1 hour on failure) and skipping checks for `--json` and
 `completions` invocations. `agyva update` installs: stable SemVer must be
-strictly newer, the `agyva-<version>-<target>.tar.gz` asset plus `SHA256SUMS`
-are downloaded and verified (file sums and the GitHub per-asset digest when
-exposed), exactly `<stem>/agyva` (`<stem>/agyva.exe` on Windows) is extracted
-(single regular executable; links, traversal names and duplicates refused) and
-the binary is staged next to the running one and replaced atomically (using a
-`.old` rename-aside on Windows). The `Transport` trait is the seam: production
-uses `ureq` with `https_only`, tests inject in-memory transports. The notice
-reaches humans on stderr and the TUI through `Dashboard::update_notice`, never
-stderr under the alternate screen.
+strictly newer, the standalone `agyva-<version>-<target>` binary asset (with
+`.exe` for `-windows-`) plus `SHA256SUMS` are downloaded, verified non-empty and
+within `MAX_BINARY_BYTES`, checked against `SHA256SUMS` and the GitHub
+per-asset digest when exposed, and staged next to the running binary and
+replaced atomically (using a `.old` rename-aside on Windows). The `Transport`
+trait is the seam: production uses `ureq` with `https_only`, tests inject
+in-memory transports. The notice reaches humans on stderr and the TUI through
+`Dashboard::update_notice`, never stderr under the alternate screen.
 
 ## Custom endpoints and local bridge
 

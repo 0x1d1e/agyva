@@ -2,19 +2,26 @@
 //! in-memory transport (never a loopback server, never the network), and a
 //! temp-file target so the running test binary is never touched.
 
-use std::io::Write as _;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use agyva::updater::{
-    Transport, UPDATE_REPO_API, install_update, run_update_for_target, startup_check_with,
-    supported_target,
+    MAX_BINARY_BYTES, Transport, UPDATE_REPO_API, install_update, run_update_for_target,
+    startup_check_with, supported_target,
 };
 
 fn test_target() -> &'static str {
     supported_target().unwrap_or("x86_64-unknown-linux-gnu")
+}
+
+fn asset_name_for(version: &str, target: &str) -> String {
+    if target.contains("-windows-") {
+        format!("agyva-{version}-{target}.exe")
+    } else {
+        format!("agyva-{version}-{target}")
+    }
 }
 
 /// URL-keyed in-memory transport.
@@ -56,19 +63,18 @@ fn release_json(tag: &str, assets: serde_json::Value) -> Vec<u8> {
     .into_bytes()
 }
 
-/// A valid release body for `version`: tarball asset + SHA256SUMS whose
+/// A valid release body for `version`: raw binary asset + SHA256SUMS whose
 /// entries match the real bytes, plus the GitHub-style `sha256:` digest.
-fn release_with(version: &str, archive: &[u8]) -> Vec<u8> {
-    let target = test_target();
-    let archive_name = format!("agyva-{version}-{target}.tar.gz");
-    let digest = format!("sha256:{}", hex_digest(archive));
+fn release_with_target(version: &str, target: &str, binary: &[u8]) -> Vec<u8> {
+    let asset_name = asset_name_for(version, target);
+    let digest = format!("sha256:{}", hex_digest(binary));
     release_json(
         &format!("v{version}"),
         serde_json::json!([
             {
-                "name": archive_name,
+                "name": asset_name,
                 "digest": digest,
-                "browser_download_url": format!("https://example.invalid/{archive_name}")
+                "browser_download_url": format!("https://example.invalid/{asset_name}")
             },
             {
                 "name": "SHA256SUMS",
@@ -78,84 +84,22 @@ fn release_with(version: &str, archive: &[u8]) -> Vec<u8> {
     )
 }
 
-fn sums_body(version: &str, archive: &[u8]) -> String {
-    let target = test_target();
-    let archive_name = format!("agyva-{version}-{target}.tar.gz");
-    format!("{}  {archive_name}\n", hex_digest(archive))
+fn release_with(version: &str, binary: &[u8]) -> Vec<u8> {
+    release_with_target(version, test_target(), binary)
+}
+
+fn sums_body_for(version: &str, target: &str, binary: &[u8]) -> String {
+    let asset_name = asset_name_for(version, target);
+    format!("{}  {asset_name}\n", hex_digest(binary))
+}
+
+fn sums_body(version: &str, binary: &[u8]) -> String {
+    sums_body_for(version, test_target(), binary)
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(bytes))
-}
-
-/// A tar.gz holding `<stem>/agyva` (mode 0755) plus an innocuous extra.
-fn archive_with(
-    version: &str,
-    bytes: &[u8],
-    extra: Option<(&str, tar::EntryType, u32)>,
-) -> Vec<u8> {
-    let target = test_target();
-    let stem = format!("agyva-{version}-{target}");
-    let exe_name = if target.contains("-windows-") {
-        "agyva.exe"
-    } else {
-        "agyva"
-    };
-    let mut buf = Vec::new();
-    let raw_member = extra
-        .filter(|(n, _, _)| n.contains(".."))
-        .map(|(n, ty, m)| {
-            let mut h = [0u8; 512];
-            let nb = n.as_bytes();
-            h[..nb.len()].copy_from_slice(nb);
-            let mode_oct = format!("{m:07o}\0");
-            h[100..108].copy_from_slice(mode_oct.as_bytes());
-            h[108..116].copy_from_slice(b"0000000\0");
-            h[116..124].copy_from_slice(b"0000000\0");
-            h[124..136].copy_from_slice(b"00000000000\0"); // size 0
-            h[136..148].copy_from_slice(b"00000000000\0"); // mtime
-            h[148..156].copy_from_slice(b"        "); // checksum blank
-            h[156] = match ty {
-                tar::EntryType::Symlink => b'2',
-                _ => b'0',
-            };
-            h[257..263].copy_from_slice(b"ustar\0");
-            h[263..265].copy_from_slice(b"00");
-            let sum: u32 = h.iter().map(|b| *b as u32).sum();
-            let chk = format!("{sum:06o}\0 ");
-            h[148..156].copy_from_slice(chk.as_bytes());
-            (h, ty)
-        });
-    if let Some((raw, _)) = &raw_member {
-        buf.extend_from_slice(raw);
-        buf.extend_from_slice(&[0u8; 512]); // empty data block
-    }
-    {
-        let mut b = tar::Builder::new(&mut buf);
-        let mut h = tar::Header::new_gnu();
-        h.set_size(bytes.len() as u64);
-        h.set_mode(0o755);
-        h.set_entry_type(tar::EntryType::Regular);
-        b.append_data(&mut h, format!("{stem}/{exe_name}"), bytes)
-            .unwrap();
-        if raw_member.is_none()
-            && let Some((name, ty, mode)) = extra
-        {
-            let mut h2 = tar::Header::new_gnu();
-            h2.set_size(0);
-            h2.set_mode(mode);
-            h2.set_entry_type(ty);
-            if ty == tar::EntryType::Symlink {
-                h2.set_link_name("../outside").unwrap();
-            }
-            b.append_data(&mut h2, name, std::io::empty()).unwrap();
-        }
-        b.finish().unwrap();
-    }
-    let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-    e.write_all(&buf).unwrap();
-    e.finish().unwrap()
 }
 
 fn install_dir(name: &str) -> PathBuf {
@@ -207,15 +151,12 @@ fn offline_and_empty_release_fail_cleanly() {
 fn a_full_install_replaces_a_temp_target() {
     let version = "9.9.9";
     let payload = b"new-binary-bytes";
-    let archive = archive_with(version, payload, None);
-    let sums = sums_body(version, &archive);
+    let sums = sums_body(version, payload);
     let target = test_target();
+    let asset = asset_name_for(version, target);
     let t = Mapping(vec![])
-        .with(UPDATE_REPO_API.into(), release_with(version, &archive))
-        .with(
-            format!("https://example.invalid/agyva-{version}-{target}.tar.gz"),
-            archive.clone(),
-        )
+        .with(UPDATE_REPO_API.into(), release_with(version, payload))
+        .with(format!("https://example.invalid/{asset}"), payload.to_vec())
         .with(
             "https://example.invalid/SHA256SUMS".into(),
             sums.into_bytes(),
@@ -246,15 +187,13 @@ fn a_full_install_replaces_a_temp_target() {
 #[test]
 fn a_checksum_mismatch_installs_nothing() {
     let version = "9.9.8";
-    let archive = archive_with(version, b"evil", None);
+    let binary = b"evil";
     let target = test_target();
-    let wrong_sums = format!("{}  agyva-{version}-{target}.tar.gz\n", "0".repeat(64));
+    let asset = asset_name_for(version, target);
+    let wrong_sums = format!("{}  {asset}\n", "0".repeat(64));
     let t = Mapping(vec![])
-        .with(UPDATE_REPO_API.into(), release_with(version, &archive))
-        .with(
-            format!("https://example.invalid/agyva-{version}-{target}.tar.gz"),
-            archive,
-        )
+        .with(UPDATE_REPO_API.into(), release_with(version, binary))
+        .with(format!("https://example.invalid/{asset}"), binary.to_vec())
         .with(
             "https://example.invalid/SHA256SUMS".into(),
             wrong_sums.into_bytes(),
@@ -277,28 +216,25 @@ fn a_checksum_mismatch_installs_nothing() {
 #[test]
 fn an_api_digest_mismatch_installs_nothing() {
     let version = "9.9.7";
-    let archive = archive_with(version, b"bytes", None);
+    let binary = b"bytes";
     let target = test_target();
-    // SUMS match the archive but the GitHub digest claims something else.
+    let asset = asset_name_for(version, target);
+    // SUMS match the binary but the GitHub digest claims something else.
     let body = release_json(
         &format!("v{version}"),
         serde_json::json!([
             {
-                "name": format!("agyva-{version}-{target}.tar.gz"),
+                "name": asset,
                 "digest": format!("sha256:{}", "f".repeat(64)),
-                "browser_download_url":
-                    format!("https://example.invalid/agyva-{version}-{target}.tar.gz")
+                "browser_download_url": format!("https://example.invalid/{asset}")
             },
             { "name": "SHA256SUMS", "browser_download_url": "https://example.invalid/SHA256SUMS" }
         ]),
     );
-    let sums = sums_body(version, &archive);
+    let sums = sums_body(version, binary);
     let t = Mapping(vec![])
         .with(UPDATE_REPO_API.into(), body)
-        .with(
-            format!("https://example.invalid/agyva-{version}-{target}.tar.gz"),
-            archive,
-        )
+        .with(format!("https://example.invalid/{asset}"), binary.to_vec())
         .with(
             "https://example.invalid/SHA256SUMS".into(),
             sums.into_bytes(),
@@ -318,57 +254,40 @@ fn an_api_digest_mismatch_installs_nothing() {
 }
 
 #[test]
-fn unsafe_archive_members_are_refused() {
+fn empty_and_oversize_binaries_are_refused() {
     let version = "9.9.6";
-
-    // A symlink member anywhere: refused.
-    let symlinked = archive_with(
-        version,
-        b"bytes",
-        Some(("extra", tar::EntryType::Symlink, 0o777)),
-    );
-    let sums = sums_body(version, &symlinked);
     let target = test_target();
-    let t = Mapping(vec![])
-        .with(UPDATE_REPO_API.into(), release_with(version, &symlinked))
-        .with(
-            format!("https://example.invalid/agyva-{version}-{target}.tar.gz"),
-            symlinked.clone(),
-        )
-        .with(
-            "https://example.invalid/SHA256SUMS".into(),
-            sums.into_bytes(),
-        );
-    let dir = install_dir("symlink");
+    let asset = asset_name_for(version, target);
+
+    let dir = install_dir("bounds");
     let exe = dir.join("agyva");
     std::fs::write(&exe, b"keep-me").expect("old exe");
-    let err = install_update(false, Box::new(t), Some(&exe)).expect_err("symlink");
-    assert!(
-        err.message().contains("non-regular entry"),
-        "{}",
-        err.message()
-    );
-    assert_eq!(std::fs::read(&exe).unwrap(), b"keep-me");
 
-    // A traversal member: refused.
-    let traversal = archive_with(
-        version,
-        b"bytes",
-        Some(("../escape", tar::EntryType::Regular, 0o755)),
-    );
-    let sums = sums_body(version, &traversal);
-    let t = Mapping(vec![])
-        .with(UPDATE_REPO_API.into(), release_with(version, &traversal))
-        .with(
-            format!("https://example.invalid/agyva-{version}-{target}.tar.gz"),
-            traversal.clone(),
-        )
+    // Empty binary is refused even with matching SHA256SUMS and API digest.
+    let empty_sums = sums_body(version, b"");
+    let t_empty = Mapping(vec![])
+        .with(UPDATE_REPO_API.into(), release_with(version, b""))
+        .with(format!("https://example.invalid/{asset}"), Vec::new())
         .with(
             "https://example.invalid/SHA256SUMS".into(),
-            sums.into_bytes(),
+            empty_sums.into_bytes(),
         );
-    let err = install_update(false, Box::new(t), Some(&exe)).expect_err("traversal");
-    assert!(err.message().contains("unsafe path"), "{}", err.message());
+    let err = install_update(false, Box::new(t_empty), Some(&exe)).expect_err("empty");
+    assert!(err.message().contains("empty"), "{}", err.message());
+    assert_eq!(std::fs::read(&exe).unwrap(), b"keep-me");
+
+    // Oversize binary (> MAX_BINARY_BYTES) is refused without touching exe.
+    let oversize = vec![0u8; MAX_BINARY_BYTES as usize + 1];
+    let oversize_sums = sums_body(version, &oversize);
+    let t_oversize = Mapping(vec![])
+        .with(UPDATE_REPO_API.into(), release_with(version, &oversize))
+        .with(format!("https://example.invalid/{asset}"), oversize)
+        .with(
+            "https://example.invalid/SHA256SUMS".into(),
+            oversize_sums.into_bytes(),
+        );
+    let err = install_update(false, Box::new(t_oversize), Some(&exe)).expect_err("oversize");
+    assert!(err.message().contains("too large"), "{}", err.message());
     assert_eq!(std::fs::read(&exe).unwrap(), b"keep-me");
 
     // Up-to-date version: refused without downloading.
@@ -385,6 +304,70 @@ fn unsafe_archive_members_are_refused() {
         "{}",
         err.message()
     );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn all_six_supported_targets_plan_and_windows_uses_exe_asset() {
+    let version = "9.9.5";
+    let payload = b"binary-payload";
+    let dir = install_dir("six-targets");
+
+    let all_targets = [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+    ];
+    for target in all_targets {
+        let asset = asset_name_for(version, target);
+        if target.contains("-windows-") {
+            assert!(asset.ends_with(".exe"), "{asset}");
+        } else {
+            assert!(!asset.ends_with(".exe"), "{asset}");
+        }
+        let sums = sums_body_for(version, target, payload);
+        let t = Mapping(vec![])
+            .with(
+                UPDATE_REPO_API.into(),
+                release_with_target(version, target, payload),
+            )
+            .with(format!("https://example.invalid/{asset}"), payload.to_vec())
+            .with(
+                "https://example.invalid/SHA256SUMS".into(),
+                sums.into_bytes(),
+            );
+        let exe = dir.join(format!("agyva-{target}"));
+        std::fs::write(&exe, b"old").unwrap();
+        let check = run_update_for_target(false, &t, Some(&exe), Some(target)).expect(target);
+        assert_eq!(check.latest.as_deref(), Some(version));
+        assert_eq!(std::fs::read(&exe).unwrap(), payload);
+    }
+
+    // Windows target refuses an asset missing the .exe suffix.
+    for win_target in ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] {
+        let bad_name = format!("agyva-{version}-{win_target}");
+        let bad_release = release_json(
+            &format!("v{version}"),
+            serde_json::json!([
+                {
+                    "name": bad_name,
+                    "browser_download_url": format!("https://example.invalid/{bad_name}")
+                },
+                {
+                    "name": "SHA256SUMS",
+                    "browser_download_url": "https://example.invalid/SHA256SUMS"
+                }
+            ]),
+        );
+        let t = Mapping(vec![]).with(UPDATE_REPO_API.into(), bad_release);
+        let err =
+            run_update_for_target(false, &t, None, Some(win_target)).expect_err("missing .exe");
+        assert!(err.message().contains(".exe"), "{}", err.message());
+    }
+
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

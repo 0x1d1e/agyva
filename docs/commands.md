@@ -447,14 +447,13 @@ agyva update --install            # same as `agyva update`
 version exists without modifying anything; `agyva update` (or
 `agyva update --install`) downloads, verifies, and replaces the running binary
 atomically. Fresh installs can also use [`install.sh`](../install.sh) on Linux
-(x86-64 and ARM64, glibc and musl) and macOS (x86-64 and ARM64).
+(x86-64 and ARM64) and macOS (x86-64 and ARM64).
 
 Updates come from this project’s GitHub Releases on supported targets
-(`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
-`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`,
-`x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`, and
-`aarch64-pc-windows-msvc`): the release tarball and its `SHA256SUMS` are
-verified before the running binary is replaced atomically. Every human-output
+(`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`,
+`aarch64-apple-darwin`, `x86_64-pc-windows-msvc`, and
+`aarch64-pc-windows-msvc`): the standalone release binary and its `SHA256SUMS`
+are verified before the running binary is replaced atomically. Every human-output
 startup also checks for a newer stable release (2 s timeout, silent on failure,
 cached in `<cache>/update-check.json` for 24 hours on success and 1 hour on
 failure; skipped on unsupported targets and for `--json` or `completions`) and

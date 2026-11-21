@@ -8,16 +8,13 @@
 //! alternate screen owns the terminal.
 //!
 //! `agyva update` installs: fetch the latest release, require a stable
-//! SemVer newer than this build, download the target's `tar.gz`
-//! asset plus `SHA256SUMS`, verify the archive against the file's digest
-//! and the GitHub API asset digest when present, then extract exactly
-//! `<archive-stem>/agyva` (or `agyva.exe` on Windows) — one regular
-//! executable member, with plain directory entries tolerated; symlinks, hard
-//! links, traversal names and duplicates are refused — stage it next to the
-//! running binary, fsync and replace it into place. Every request and
-//! redirect is restricted to GitHub's release hosts, and the whole
-//! decompressed stream is bounded. `agyva update --check` performs the same
-//! checks and only reports.
+//! SemVer newer than this build, download the target's raw binary asset
+//! (`agyva-<version>-<target>`, or `.exe` on Windows) plus `SHA256SUMS`,
+//! verify the binary is non-empty and within `MAX_BINARY_BYTES`, verify its
+//! SHA-256 against `SHA256SUMS` and the GitHub API asset digest when present,
+//! stage it next to the running binary, fsync and replace it into place. Every
+//! request and redirect is restricted to GitHub's release hosts.
+//! `agyva update --check` performs the same metadata check and only reports.
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -28,14 +25,11 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use zeroize::Zeroizing;
 
 use crate::core::error::{Error, Result};
 
 /// The one endpoint agyva ever contacts (GitHub API, HTTPS only).
 pub const UPDATE_REPO_API: &str = "https://api.github.com/repos/0x1d1e/agyva/releases/latest";
-const EXECUTABLE_NAME: &str = "agyva";
-const WINDOWS_EXECUTABLE_NAME: &str = "agyva.exe";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CACHE_SCHEMA_VERSION: u32 = 1;
 const CACHE_OK_TTL_SECS: i64 = 86_400;
@@ -50,14 +44,6 @@ pub const fn supported_target() -> Option<&'static str> {
     #[cfg(all(target_os = "linux", target_arch = "aarch64", target_env = "gnu"))]
     {
         Some("aarch64-unknown-linux-gnu")
-    }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "musl"))]
-    {
-        Some("x86_64-unknown-linux-musl")
-    }
-    #[cfg(all(target_os = "linux", target_arch = "aarch64", target_env = "musl"))]
-    {
-        Some("aarch64-unknown-linux-musl")
     }
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     {
@@ -78,8 +64,6 @@ pub const fn supported_target() -> Option<&'static str> {
     #[cfg(not(any(
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
         all(target_os = "linux", target_arch = "aarch64", target_env = "gnu"),
-        all(target_os = "linux", target_arch = "x86_64", target_env = "musl"),
-        all(target_os = "linux", target_arch = "aarch64", target_env = "musl"),
         all(target_os = "macos", target_arch = "x86_64"),
         all(target_os = "macos", target_arch = "aarch64"),
         all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
@@ -90,23 +74,22 @@ pub const fn supported_target() -> Option<&'static str> {
     }
 }
 
-fn executable_name_for_target(target: &str) -> &'static str {
+fn asset_name_for_target(version: &Version, target: &str) -> String {
     if target.contains("-windows-") {
-        WINDOWS_EXECUTABLE_NAME
+        format!("agyva-{version}-{target}.exe")
     } else {
-        EXECUTABLE_NAME
+        format!("agyva-{version}-{target}")
     }
 }
-/// Aggregate decompressed ceiling for the whole release archive.
-const MAX_ARCHIVE_UNCOMPRESSED: u64 = 128 * 1024 * 1024;
+
 /// Passive startup checks must never hold a command back for long; the
 /// explicit `update` gets more room.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(10);
-/// Metadata and download ceilings (a release tarball is ~10 MiB).
+/// Metadata and download ceilings (a release binary is ~10 MiB).
 const MAX_METADATA_BYTES: u64 = 1024 * 1024;
-const MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_BINARY_BYTES: u64 = 128 * 1024 * 1024;
+pub const MAX_BINARY_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_DOWNLOAD_BYTES: u64 = MAX_BINARY_BYTES;
 
 /// What a check found: the installed version and a newer one, if any.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -413,7 +396,7 @@ pub fn run_update_for_target(
     let Some(target) = target else {
         return Err(
             Error::refused("self-update is not supported on this platform/architecture")
-                .hint("download a release archive for your platform manually from GitHub Releases"),
+                .hint("download a release binary for your platform manually from GitHub Releases"),
         );
     };
     let release = fetch_release(transport, UPDATE_TIMEOUT)?;
@@ -431,30 +414,34 @@ pub fn run_update_for_target(
         )));
     };
     let plan = plan_from_release(&release, &latest, target)?;
-    let archive_name = format!("agyva-{latest}-{target}.tar.gz");
-    let archive = transport.get(&plan.archive_url, UPDATE_TIMEOUT)?;
-    if archive.len() as u64 > MAX_DOWNLOAD_BYTES {
-        return Err(Error::refused("the release archive is too large"));
+    let binary_name = asset_name_for_target(&latest, target);
+    let binary = transport.get(&plan.binary_url, UPDATE_TIMEOUT)?;
+    if binary.is_empty() {
+        return Err(Error::refused(
+            "the downloaded binary is empty; nothing was installed",
+        ));
+    }
+    if binary.len() as u64 > MAX_BINARY_BYTES {
+        return Err(Error::refused("the downloaded binary is too large"));
     }
     let sums = transport.get(&plan.sums_url, UPDATE_TIMEOUT)?;
     if sums.len() as u64 > MAX_METADATA_BYTES {
         return Err(Error::refused("SHA256SUMS is too large"));
     }
-    let actual = hex_digest(&archive);
-    let expected = expected_sum(&sums, &archive_name)?;
+    let actual = hex_digest(&binary);
+    let expected = expected_sum(&sums, &binary_name)?;
     if actual != expected {
         return Err(Error::refused(
-            "the downloaded archive does not match SHA256SUMS; nothing was installed",
+            "the downloaded binary does not match SHA256SUMS; nothing was installed",
         ));
     }
     if let Some(api) = &plan.api_digest
         && *api != actual
     {
         return Err(Error::refused(
-            "the downloaded archive does not match the release digest; nothing was installed",
+            "the downloaded binary does not match the release digest; nothing was installed",
         ));
     }
-    let bytes = extract_binary(&archive, &latest.to_string(), target)?;
     let exe: PathBuf = match target_exe {
         Some(p) => p.to_path_buf(),
         None => std::env::current_exe()
@@ -467,7 +454,7 @@ pub fn run_update_for_target(
             "the running binary is not a regular file; refusing to replace it",
         ));
     }
-    stage_and_replace(&bytes, &exe)?;
+    stage_and_replace(&binary, &exe)?;
     tracing::info!(version = %latest, "agyva updated itself");
     Ok(check)
 }
@@ -494,7 +481,7 @@ fn fetch_release(transport: &dyn Transport, timeout: Duration) -> Result<Release
 
 /// Everything verified before the running binary is touched.
 struct UpdatePlan {
-    archive_url: String,
+    binary_url: String,
     sums_url: String,
     /// The API digest when GitHub exposes one (verified too, when present).
     api_digest: Option<String>,
@@ -502,7 +489,7 @@ struct UpdatePlan {
 
 fn plan_from_release(release: &Release, latest: &Version, target: &str) -> Result<UpdatePlan> {
     // Exact names, no ambiguous duplicates.
-    let archive_name = format!("agyva-{latest}-{target}.tar.gz");
+    let binary_name = asset_name_for_target(latest, target);
     let pick = |name: &str| -> Result<&Asset> {
         let found: Vec<&Asset> = release.assets.iter().filter(|a| a.name == name).collect();
         let [only] = found.as_slice() else {
@@ -512,9 +499,9 @@ fn plan_from_release(release: &Release, latest: &Version, target: &str) -> Resul
         };
         Ok(only)
     };
-    let archive = pick(&archive_name)?;
+    let binary = pick(&binary_name)?;
     let sums = pick("SHA256SUMS")?;
-    let api_digest = match archive.digest.as_deref() {
+    let api_digest = match binary.digest.as_deref() {
         None => None,
         Some("") => None,
         Some(d) => Some(
@@ -525,11 +512,11 @@ fn plan_from_release(release: &Release, latest: &Version, target: &str) -> Resul
                         "the release carries a malformed per-asset digest; nothing was installed",
                     )
                 })?
-                .to_owned(),
+                .to_ascii_lowercase(),
         ),
     };
     Ok(UpdatePlan {
-        archive_url: archive.url.clone(),
+        binary_url: binary.url.clone(),
         sums_url: sums.url.clone(),
         api_digest,
     })
@@ -558,104 +545,8 @@ fn expected_sum(sums: &[u8], name: &str) -> Result<String> {
         found = Some(hex);
     }
     found.ok_or_else(|| {
-        Error::refused("SHA256SUMS does not name the release archive")
+        Error::refused("SHA256SUMS does not name the release binary")
             .hint("download the release manually and verify it yourself")
-    })
-}
-
-/// Refuse any archive path that could escape or alias the extraction root.
-fn member_is_dangerous(path: &Path) -> bool {
-    path.components().any(|c| {
-        !matches!(
-            c,
-            std::path::Component::Normal(_) | std::path::Component::CurDir
-        )
-    })
-}
-
-/// Extract exactly `<stem>/agyva` from the gzipped tar. The whole archive is
-/// decompressed under an aggregate bound and every member inspected: plain
-/// directory entries are accepted, everything else must be a safely-named
-/// regular file; the binary appears exactly once and is executable.
-struct BoundedReader<R: std::io::Read> {
-    inner: R,
-    total: u64,
-}
-
-impl<R: std::io::Read> std::io::Read for BoundedReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        self.total += n as u64;
-        if self.total > MAX_ARCHIVE_UNCOMPRESSED {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "release archive decompresses beyond its bound",
-            ));
-        }
-        Ok(n)
-    }
-}
-fn extract_binary(archive: &[u8], version: &str, target: &str) -> Result<Zeroizing<Vec<u8>>> {
-    let stem = format!("agyva-{version}-{target}");
-    let exe_name = executable_name_for_target(target);
-    let wanted = Path::new(&stem).join(exe_name);
-    let gz = flate2::read::GzDecoder::new(archive);
-    let mut tar = tar::Archive::new(BoundedReader {
-        inner: gz,
-        total: 0,
-    });
-    let mut found: Option<Zeroizing<Vec<u8>>> = None;
-    let entries = tar
-        .entries()
-        .map_err(|e| Error::refused(format!("the release archive is unreadable: {e}")))?;
-    for entry in entries {
-        let entry =
-            entry.map_err(|e| Error::refused(format!("the release archive is unreadable: {e}")))?;
-        let path = entry
-            .path()
-            .map_err(|e| Error::refused(format!("the release archive is unreadable: {e}")))?
-            .into_owned();
-        if member_is_dangerous(&path) {
-            return Err(Error::refused(format!(
-                "the release archive holds an unsafe path: {}",
-                path.display()
-            )));
-        }
-        // Plain directories are neutral: they hold no bytes to install.
-        if entry.header().entry_type().is_dir() || path.to_string_lossy().ends_with('/') {
-            continue;
-        }
-        if !entry.header().entry_type().is_file() {
-            return Err(Error::refused(format!(
-                "the release archive holds a non-regular entry: {}",
-                path.display()
-            )));
-        }
-        if path != wanted {
-            continue;
-        }
-        if !target.contains("-windows-") && entry.header().mode().unwrap_or(0) & 0o111 == 0 {
-            return Err(Error::refused("the archived agyva is not executable"));
-        }
-        if found.is_some() {
-            return Err(Error::refused(
-                "the release archive holds duplicate agyva members",
-            ));
-        }
-        let mut bytes = Vec::new();
-        entry
-            .take(MAX_BINARY_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|e| Error::refused(format!("the archived binary is unreadable: {e}")))?;
-        if bytes.len() as u64 > MAX_BINARY_BYTES {
-            return Err(Error::refused("the archived binary is too large"));
-        }
-        found = Some(Zeroizing::new(bytes));
-    }
-    found.ok_or_else(|| {
-        Error::refused(format!(
-            "the release archive does not hold {stem}/{exe_name}"
-        ))
     })
 }
 
@@ -777,12 +668,6 @@ mod tests {
         })
         .to_string()
         .into_bytes()
-    }
-
-    fn gz(bytes: &[u8]) -> Vec<u8> {
-        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-        e.write_all(bytes).unwrap();
-        e.finish().unwrap()
     }
 
     #[test]
@@ -962,130 +847,23 @@ mod tests {
 
     #[test]
     fn sums_parsing_is_exact_and_strict() {
-        let name = "agyva-0.2.0-x86_64-unknown-linux-gnu.tar.gz";
+        let name = "agyva-0.2.0-x86_64-unknown-linux-gnu";
+        let win_name = "agyva-0.2.0-x86_64-pc-windows-msvc.exe";
         let sums = format!(
-            "{}  {name}\n{}  other.tar.gz\n",
+            "{}  {name}\n{} *{win_name}\n",
             "a".repeat(64),
             "b".repeat(64)
         );
         assert_eq!(expected_sum(sums.as_bytes(), name).unwrap(), "a".repeat(64));
-        assert!(expected_sum(sums.as_bytes(), "missing.tar.gz").is_err());
+        assert_eq!(
+            expected_sum(sums.as_bytes(), win_name).unwrap(),
+            "b".repeat(64)
+        );
+        assert!(expected_sum(sums.as_bytes(), "missing").is_err());
         let dup = format!("{}  x\n{}  x\n", "a".repeat(64), "b".repeat(64));
         assert!(expected_sum(dup.as_bytes(), "x").is_err());
         let malformed = format!("zz  {name}\n");
         assert!(expected_sum(malformed.as_bytes(), name).is_err());
-    }
-
-    #[test]
-    fn member_paths_are_screened() {
-        assert!(!member_is_dangerous(Path::new(
-            "agyva-0.2.0-x86_64-unknown-linux-gnu/agyva"
-        )));
-        assert!(member_is_dangerous(Path::new("../agyva")));
-        assert!(member_is_dangerous(Path::new("/etc/agyva")));
-        assert!(member_is_dangerous(Path::new("stem/../../agyva")));
-    }
-
-    #[test]
-    fn extraction_accepts_only_the_exact_executable() {
-        use tar::Builder;
-
-        let mut buf = Vec::new();
-        {
-            let mut b = Builder::new(&mut buf);
-            let mut h = tar::Header::new_gnu();
-            h.set_size(5);
-            h.set_mode(0o755);
-            h.set_entry_type(tar::EntryType::Regular);
-            b.append_data(
-                &mut h,
-                "agyva-0.2.0-x86_64-unknown-linux-gnu/agyva",
-                &b"hello"[..],
-            )
-            .unwrap();
-            b.finish().unwrap();
-        }
-        let archive = gz(&buf);
-        let got = extract_binary(&archive, "0.2.0", TEST_TARGET).unwrap();
-        assert_eq!(&**got, b"hello");
-
-        // Build a one- or two-member archive of regular files.
-        fn regular_archive(members: &[(&str, u32)]) -> Vec<u8> {
-            let mut buf = Vec::new();
-            {
-                let mut b = Builder::new(&mut buf);
-                for (name, mode) in members {
-                    let mut h = tar::Header::new_gnu();
-                    h.set_size(5);
-                    h.set_mode(*mode);
-                    h.set_entry_type(tar::EntryType::Regular);
-                    b.append_data(&mut h, *name, &b"hello"[..]).unwrap();
-                }
-                b.finish().unwrap();
-            }
-            gz(&buf)
-        }
-
-        // Wrong stem: the wanted member is absent.
-        assert!(
-            extract_binary(
-                &regular_archive(&[("other-stem/agyva", 0o755)]),
-                "0.2.0",
-                TEST_TARGET
-            )
-            .is_err()
-        );
-        // Non-executable mode.
-        assert!(
-            extract_binary(
-                &regular_archive(&[("agyva-0.2.0-x86_64-unknown-linux-gnu/agyva", 0o644)]),
-                "0.2.0",
-                TEST_TARGET
-            )
-            .is_err()
-        );
-        // Duplicate members.
-        assert!(
-            extract_binary(
-                &regular_archive(&[
-                    ("agyva-0.2.0-x86_64-unknown-linux-gnu/agyva", 0o755),
-                    ("agyva-0.2.0-x86_64-unknown-linux-gnu/agyva", 0o755),
-                ]),
-                "0.2.0",
-                TEST_TARGET
-            )
-            .is_err()
-        );
-
-        // A traversal member anywhere is refused even when the good member
-        // is present.
-        let mut buf = Vec::new();
-        {
-            let mut b = Builder::new(&mut buf);
-            let mut h = tar::Header::new_gnu();
-            h.set_size(5);
-            h.set_mode(0o755);
-            h.set_entry_type(tar::EntryType::Regular);
-            b.append_data(
-                &mut h,
-                "agyva-0.2.0-x86_64-unknown-linux-gnu/agyva",
-                &b"hello"[..],
-            )
-            .unwrap();
-            let mut h2 = tar::Header::new_gnu();
-            h2.set_size(5);
-            h2.set_mode(0o755);
-            h2.set_entry_type(tar::EntryType::Symlink);
-            h2.set_link_name("../target/agyva").unwrap();
-            b.append_data(
-                &mut h2,
-                "agyva-0.2.0-x86_64-unknown-linux-gnu/link",
-                &b""[..],
-            )
-            .unwrap();
-            b.finish().unwrap();
-        }
-        assert!(extract_binary(&gz(&buf), "0.2.0", TEST_TARGET).is_err());
     }
 
     #[test]
@@ -1116,54 +894,19 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
-    use tar::Builder;
-
-    /// `scripts/release.sh` tars a staged tree, so the archive holds the
-    /// root directory entry, a nested `docs/` entry and regular files.
-    #[test]
-    fn release_script_shaped_archive_extracts() {
-        let stem = "agyva-0.2.0-x86_64-unknown-linux-gnu";
-        let mut buf = Vec::new();
-        {
-            let mut b = Builder::new(&mut buf);
-            for dir in [format!("{stem}/"), format!("{stem}/docs/")] {
-                let mut h = tar::Header::new_gnu();
-                h.set_entry_type(tar::EntryType::Directory);
-                h.set_size(0);
-                h.set_mode(0o755);
-                b.append_data(&mut h, dir, &[][..]).unwrap();
-            }
-            for (name, mode, body) in [
-                ("README.md", 0o644, &b"readme"[..]),
-                ("docs/security.md", 0o644, &b"doc"[..]),
-                ("agyva", 0o755, &b"binary"[..]),
-            ] {
-                let mut h = tar::Header::new_gnu();
-                h.set_entry_type(tar::EntryType::Regular);
-                h.set_size(body.len() as u64);
-                h.set_mode(mode);
-                b.append_data(&mut h, format!("{stem}/{name}"), body)
-                    .unwrap();
-            }
-            b.finish().unwrap();
-        }
-        let got =
-            extract_binary(&gz(&buf), "0.2.0", TEST_TARGET).expect("directory entries tolerated");
-        assert_eq!(&**got, b"binary");
-    }
 
     #[test]
     fn a_malformed_api_digest_refuses_instead_of_being_ignored() {
-        let name = "agyva-9.9.9-x86_64-unknown-linux-gnu.tar.gz";
+        let name = "agyva-9.9.9-x86_64-unknown-linux-gnu";
         let release = |digest: Option<serde_json::Value>| -> Release {
-            let mut archive = serde_json::json!([
+            let mut assets = serde_json::json!([
                 {"name": name, "browser_download_url": "https://objects.githubusercontent.com/a"},
                 {"name": "SHA256SUMS", "browser_download_url": "https://objects.githubusercontent.com/b"},
             ]);
             if let Some(d) = digest {
-                archive[0]["digest"] = d;
+                assets[0]["digest"] = d;
             }
-            serde_json::from_slice(&release_json("v9.9.9", archive)).unwrap()
+            serde_json::from_slice(&release_json("v9.9.9", assets)).unwrap()
         };
         let version: Version = "9.9.9".parse().unwrap();
         for digest in ["md5:", "sha256:abc", "sha512:0000"] {
@@ -1183,34 +926,26 @@ mod tests {
     }
 
     #[test]
-    fn the_whole_decompressed_stream_is_bounded() {
-        // A gzip bomb: highly compressible zeros far beyond the ceiling.
-        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-        let chunk = vec![0u8; 1 << 20];
-        for _ in 0..129 {
-            e.write_all(&chunk).unwrap();
-        }
-        let archive = e.finish().unwrap();
-        assert!(archive.len() < 32 * 1024 * 1024, "the bomb stays small");
-        assert!(extract_binary(&archive, "0.2.0", TEST_TARGET).is_err());
-    }
-
-    #[test]
-    fn supported_target_and_executable_names_cover_release_platforms() {
+    fn supported_target_and_asset_names_cover_release_platforms() {
+        let version: Version = "0.2.0".parse().unwrap();
         let unix_targets = [
             "x86_64-unknown-linux-gnu",
             "aarch64-unknown-linux-gnu",
-            "x86_64-unknown-linux-musl",
-            "aarch64-unknown-linux-musl",
             "x86_64-apple-darwin",
             "aarch64-apple-darwin",
         ];
         for t in unix_targets {
-            assert_eq!(executable_name_for_target(t), "agyva");
+            assert_eq!(
+                asset_name_for_target(&version, t),
+                format!("agyva-0.2.0-{t}")
+            );
         }
         let windows_targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"];
         for t in windows_targets {
-            assert_eq!(executable_name_for_target(t), "agyva.exe");
+            assert_eq!(
+                asset_name_for_target(&version, t),
+                format!("agyva-0.2.0-{t}.exe")
+            );
         }
 
         let current = supported_target();
@@ -1218,10 +953,6 @@ mod tests {
         assert_eq!(current, Some("x86_64-unknown-linux-gnu"));
         #[cfg(all(target_os = "linux", target_arch = "aarch64", target_env = "gnu"))]
         assert_eq!(current, Some("aarch64-unknown-linux-gnu"));
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "musl"))]
-        assert_eq!(current, Some("x86_64-unknown-linux-musl"));
-        #[cfg(all(target_os = "linux", target_arch = "aarch64", target_env = "musl"))]
-        assert_eq!(current, Some("aarch64-unknown-linux-musl"));
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
         assert_eq!(current, Some("x86_64-apple-darwin"));
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -1230,39 +961,90 @@ mod tests {
         assert_eq!(current, Some("x86_64-pc-windows-msvc"));
         #[cfg(all(target_os = "windows", target_arch = "aarch64", target_env = "msvc"))]
         assert_eq!(current, Some("aarch64-pc-windows-msvc"));
+        #[cfg(not(any(
+            all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+            all(target_os = "linux", target_arch = "aarch64", target_env = "gnu"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+            all(target_os = "windows", target_arch = "aarch64", target_env = "msvc"),
+        )))]
+        assert_eq!(current, None);
     }
 
     #[test]
-    fn extraction_handles_windows_exe_targets() {
+    fn windows_targets_require_exe_asset_name_in_release_plan() {
+        let version: Version = "0.2.0".parse().unwrap();
         for target in ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] {
-            let stem = format!("agyva-0.2.0-{target}");
-            let mut buf = Vec::new();
-            {
-                let mut b = Builder::new(&mut buf);
-                let mut h = tar::Header::new_gnu();
-                h.set_size(4);
-                h.set_mode(0o644);
-                h.set_entry_type(tar::EntryType::Regular);
-                b.append_data(&mut h, format!("{stem}/agyva.exe"), &b"pe32"[..])
-                    .unwrap();
-                b.finish().unwrap();
-            }
-            let got = extract_binary(&gz(&buf), "0.2.0", target).expect("extracts agyva.exe");
-            assert_eq!(&**got, b"pe32");
+            let exe_name = format!("agyva-0.2.0-{target}.exe");
+            let good_release: Release = serde_json::from_slice(&release_json(
+                "v0.2.0",
+                serde_json::json!([
+                    {"name": exe_name, "browser_download_url": "https://objects.githubusercontent.com/win"},
+                    {"name": "SHA256SUMS", "browser_download_url": "https://objects.githubusercontent.com/sums"},
+                ]),
+            ))
+            .unwrap();
+            let plan = plan_from_release(&good_release, &version, target).expect("finds .exe");
+            assert_eq!(plan.binary_url, "https://objects.githubusercontent.com/win");
 
-            // A Unix-named member is not accepted for a Windows target.
-            let mut bad_buf = Vec::new();
-            {
-                let mut b = Builder::new(&mut bad_buf);
-                let mut h = tar::Header::new_gnu();
-                h.set_size(4);
-                h.set_mode(0o755);
-                h.set_entry_type(tar::EntryType::Regular);
-                b.append_data(&mut h, format!("{stem}/agyva"), &b"elf!"[..])
-                    .unwrap();
-                b.finish().unwrap();
-            }
-            assert!(extract_binary(&gz(&bad_buf), "0.2.0", target).is_err());
+            let unix_only_release: Release = serde_json::from_slice(&release_json(
+                "v0.2.0",
+                serde_json::json!([
+                    {"name": format!("agyva-0.2.0-{target}"), "browser_download_url": "https://objects.githubusercontent.com/unix"},
+                    {"name": "SHA256SUMS", "browser_download_url": "https://objects.githubusercontent.com/sums"},
+                ]),
+            ))
+            .unwrap();
+            assert!(plan_from_release(&unix_only_release, &version, target).is_err());
         }
+    }
+
+    #[test]
+    fn empty_and_oversize_binary_are_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("agyva");
+        fs::write(&exe, b"keep").unwrap();
+
+        let asset = format!("agyva-9.9.9-{TEST_TARGET}");
+        let release = |digest: &str| {
+            release_json(
+                "v9.9.9",
+                serde_json::json!([
+                    {"name": asset, "digest": format!("sha256:{digest}"), "browser_download_url": "https://example.invalid/bin"},
+                    {"name": "SHA256SUMS", "browser_download_url": "https://example.invalid/sums"},
+                ]),
+            )
+        };
+
+        // Empty binary is refused even if SHA256SUMS and api_digest match empty bytes.
+        let empty_sum = hex_digest(b"");
+        let empty_transport = Mapping(vec![
+            (UPDATE_REPO_API, release(&empty_sum)),
+            ("https://example.invalid/bin", Vec::new()),
+            (
+                "https://example.invalid/sums",
+                format!("{empty_sum}  {asset}\n").into_bytes(),
+            ),
+        ]);
+        let err = run_update_for_target(false, &empty_transport, Some(&exe), Some(TEST_TARGET))
+            .unwrap_err();
+        assert!(err.message().contains("empty"), "{}", err.message());
+        assert_eq!(fs::read(&exe).unwrap(), b"keep");
+
+        // Oversize binary is refused before touching exe.
+        let oversize = vec![0u8; MAX_BINARY_BYTES as usize + 1];
+        let oversize_transport = Mapping(vec![
+            (UPDATE_REPO_API, release(&hex_digest(&oversize))),
+            ("https://example.invalid/bin", oversize),
+            (
+                "https://example.invalid/sums",
+                format!("{}  {asset}\n", "a".repeat(64)).into_bytes(),
+            ),
+        ]);
+        let err = run_update_for_target(false, &oversize_transport, Some(&exe), Some(TEST_TARGET))
+            .unwrap_err();
+        assert!(err.message().contains("too large"), "{}", err.message());
+        assert_eq!(fs::read(&exe).unwrap(), b"keep");
     }
 }

@@ -33,10 +33,10 @@ Three labels are used throughout:
 
 ## Platform support
 
-Linux (x86-64 and ARM64, glibc and musl) with the freedesktop Secret Service
+Linux (x86-64 and ARM64, glibc) with the freedesktop Secret Service
 (GNOME Keyring, KeePassXC, KWallet's bridge) is the locally verified target.
 macOS (Apple Keychain, `x86_64` and `aarch64`) and Windows (Credential Manager,
-`x86_64` MSVC; `aarch64` MSVC in updater) are implemented and CI-configured,
+`x86_64` and `aarch64` MSVC) are implemented and CI-configured,
 though unverified locally on macOS/Windows hardware. The file backend works
 wherever `agy` keeps its token in the file. Without an OS keyring provider
 (headless server, container, SSH without a session bus), agyva's own vault uses

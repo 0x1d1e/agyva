@@ -37,9 +37,9 @@ Cross-platform expansion, custom LLM endpoints with local protocol bridge, proje
 
 ### Changed
 
-- **Broader platform support**:
-  - Keyring integration supports Linux/BSD Secret Service, macOS Apple Keychain, and Windows Credential Manager; `updater`, `fsutil`, `discovery` (`PATHEXT` / `.exe`), and `sessions` (`agy.exe`) support cross-platform targets (`x86_64`/`aarch64` Linux gnu & musl, macOS, Windows).
-  - CI (`.github/workflows/ci.yml`) adds `macos-latest` and `windows-latest` build/test jobs; release (`.github/workflows/release.yml`) builds 7 targets (`linux-gnu`, `linux-musl`, `apple-darwin`, `x86_64-pc-windows-msvc`); `install.sh` supports Linux (glibc and musl) and macOS.
+- **Cross-platform support and raw binary releases**:
+  - Keyring integration supports Linux Secret Service, macOS Apple Keychain, and Windows Credential Manager; `updater`, `fsutil`, `discovery` (`PATHEXT` / `.exe`), and `sessions` (`agy.exe`) support cross-platform targets (`x86_64`/`aarch64` Linux `gnu`, macOS, Windows MSVC).
+  - CI (`.github/workflows/ci.yml`) adds `macos-latest` and `windows-latest` build/test jobs; release (`.github/workflows/release.yml`) builds 6 targets (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`) as standalone raw binaries with `SHA256SUMS`; `install.sh` and `agyva update` download and verify raw binaries directly instead of `.tar.gz` archives.
   - Verification note: Linux targets and sandboxed suites are verified locally; macOS Apple Keychain and Windows Credential Manager backends are implemented and CI-configured, not locally tested on macOS or Windows hardware.
 
 ## [0.1.2] - 2026-11-21

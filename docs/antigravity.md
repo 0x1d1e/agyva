@@ -13,7 +13,7 @@ Linux (Secret Service or file) is the locally verified target. macOS (Apple
 Keychain) and Windows (Windows Credential Manager) keyring backends are
 implemented and tested in CI, though unverified locally on macOS or Windows
 hardware. The default `backend = auto` discovers agy’s credential store, using
-the platform OS keyring (freedesktop Secret Service over D-Bus on Linux/BSD,
+the platform OS keyring (freedesktop Secret Service over D-Bus on Linux,
 Apple Keychain on macOS, Windows Credential Manager on Windows) or the native
 token file. Common Linux Secret Service providers include GNOME Keyring,
 KeePassXC and KWallet with its Secret Service bridge. Agyva’s byte compatibility
