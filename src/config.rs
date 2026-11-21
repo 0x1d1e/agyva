@@ -70,6 +70,22 @@ pub const KEYS: &[(&str, &str)] = &[
         "auto_switch_candidate_max_age_secs",
         "maximum age in seconds for standby auto-switch candidate cache (60-604800)",
     ),
+    (
+        "warn_percent",
+        "remaining quota warning threshold percentage (0-100)",
+    ),
+    (
+        "critical_percent",
+        "remaining quota critical threshold percentage (0-100, <= warn_percent)",
+    ),
+    (
+        "default_profile",
+        "default global profile name (or empty to unset)",
+    ),
+    (
+        "statusline_format",
+        "statusline output format: compact | full | json",
+    ),
 ];
 
 macro_rules! string_enum {
@@ -94,10 +110,46 @@ macro_rules! string_enum {
     };
 }
 
-string_enum!(
-    /// Which native store holds agy's live credential.
-    BackendKind { Auto => "auto", SecretService => "secret-service", File => "file", Memory => "memory" }
-);
+/// Which native store holds agy's live credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BackendKind {
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "secret-service")]
+    SecretService,
+    #[serde(rename = "file")]
+    File,
+    #[serde(rename = "memory")]
+    Memory,
+}
+
+impl BackendKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::SecretService => "secret-service",
+            Self::File => "file",
+            Self::Memory => "memory",
+        }
+    }
+}
+
+impl FromStr for BackendKind {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, String> {
+        match s {
+            "auto" => Ok(Self::Auto),
+            "secret-service" | "keyring" | "keychain" | "credential-manager" => {
+                Ok(Self::SecretService)
+            }
+            "file" => Ok(Self::File),
+            "memory" => Ok(Self::Memory),
+            other => Err(format!(
+                "`{other}` is not one of: auto, secret-service, keyring, keychain, credential-manager, file, memory"
+            )),
+        }
+    }
+}
 string_enum!(
     /// Where the vault encryption key is kept.
     VaultKeyMode { Auto => "auto", Keyring => "keyring", Passphrase => "passphrase" }
@@ -106,7 +158,7 @@ string_enum!(
     ColorChoice { Auto => "auto", Always => "always", Never => "never" }
 );
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub backend: BackendKind,
@@ -128,6 +180,10 @@ pub struct Config {
     pub auto_switch_ack: bool,
     pub auto_switch_cooldown_secs: u64,
     pub auto_switch_candidate_max_age_secs: u64,
+    pub warn_percent: f64,
+    pub critical_percent: f64,
+    pub default_profile: Option<String>,
+    pub statusline_format: String,
 }
 
 impl Default for Config {
@@ -149,6 +205,10 @@ impl Default for Config {
             auto_switch_ack: false,
             auto_switch_cooldown_secs: 900,
             auto_switch_candidate_max_age_secs: 21_600,
+            warn_percent: 25.0,
+            critical_percent: 10.0,
+            default_profile: None,
+            statusline_format: "compact".to_owned(),
         }
     }
 }
@@ -225,6 +285,31 @@ impl Config {
                 "auto_switch_candidate_max_age_secs must be between 60 and 604800",
             ));
         }
+        if !self.warn_percent.is_finite() || !(0.0..=100.0).contains(&self.warn_percent) {
+            return Err(Error::usage(
+                "warn_percent must be finite and between 0 and 100",
+            ));
+        }
+        if !self.critical_percent.is_finite() || !(0.0..=100.0).contains(&self.critical_percent) {
+            return Err(Error::usage(
+                "critical_percent must be finite and between 0 and 100",
+            ));
+        }
+        if self.critical_percent > self.warn_percent {
+            return Err(Error::usage(
+                "critical_percent must be less than or equal to warn_percent",
+            ));
+        }
+        if let Some(p) = &self.default_profile
+            && p.trim().is_empty()
+        {
+            return Err(Error::usage("default_profile cannot be empty"));
+        }
+        if !matches!(self.statusline_format.as_str(), "compact" | "full" | "json") {
+            return Err(Error::usage(
+                "statusline_format must be one of: compact, full, json",
+            ));
+        }
         Ok(())
     }
 
@@ -249,6 +334,10 @@ impl Config {
             "auto_switch_candidate_max_age_secs" => {
                 self.auto_switch_candidate_max_age_secs.to_string()
             }
+            "warn_percent" => self.warn_percent.to_string(),
+            "critical_percent" => self.critical_percent.to_string(),
+            "default_profile" => self.default_profile.clone().unwrap_or_default(),
+            "statusline_format" => self.statusline_format.clone(),
             _ => return None,
         })
     }
@@ -311,6 +400,20 @@ impl Config {
                 next.auto_switch_candidate_max_age_secs =
                     value.parse().map_err(|_| bad("expected a number".into()))?;
             }
+            "warn_percent" => {
+                next.warn_percent = value.parse().map_err(|_| bad("expected a number".into()))?;
+            }
+            "critical_percent" => {
+                next.critical_percent =
+                    value.parse().map_err(|_| bad("expected a number".into()))?;
+            }
+            "default_profile" => {
+                let trimmed = value.trim();
+                next.default_profile = (!trimmed.is_empty()).then(|| trimmed.to_owned());
+            }
+            "statusline_format" => {
+                next.statusline_format = value.trim().to_owned();
+            }
             _ => {
                 let known: Vec<&str> = KEYS.iter().map(|(k, _)| *k).collect();
                 return Err(Error::usage(format!("unknown config key `{key}`"))
@@ -318,6 +421,46 @@ impl Config {
             }
         }
         next.validate().map_err(|e| bad(e.message().to_owned()))?;
+        *self = next;
+        Ok(())
+    }
+
+    /// Reset a single config key back to its default value.
+    pub fn reset_key(&mut self, key: &str) -> Result<()> {
+        let def = Self::default();
+        let mut next = self.clone();
+        match key {
+            "backend" => next.backend = def.backend,
+            "vault_key" => next.vault_key = def.vault_key,
+            "color" => next.color = def.color,
+            "allow_untested_agy" => next.allow_untested_agy = def.allow_untested_agy,
+            "check_updates" => next.check_updates = def.check_updates,
+            "checkpoints_keep" => next.checkpoints_keep = def.checkpoints_keep,
+            "lock_timeout_secs" => next.lock_timeout_secs = def.lock_timeout_secs,
+            "policy_acknowledged" => next.policy_acknowledged = def.policy_acknowledged,
+            "quota_fresh_secs" => next.quota_fresh_secs = def.quota_fresh_secs,
+            "quota_min_refresh_secs" => next.quota_min_refresh_secs = def.quota_min_refresh_secs,
+            "models_cache_secs" => next.models_cache_secs = def.models_cache_secs,
+            "watch_interval_secs" => next.watch_interval_secs = def.watch_interval_secs,
+            "desktop_notifications" => next.desktop_notifications = def.desktop_notifications,
+            "auto_switch_ack" => next.auto_switch_ack = def.auto_switch_ack,
+            "auto_switch_cooldown_secs" => {
+                next.auto_switch_cooldown_secs = def.auto_switch_cooldown_secs
+            }
+            "auto_switch_candidate_max_age_secs" => {
+                next.auto_switch_candidate_max_age_secs = def.auto_switch_candidate_max_age_secs
+            }
+            "warn_percent" => next.warn_percent = def.warn_percent,
+            "critical_percent" => next.critical_percent = def.critical_percent,
+            "default_profile" => next.default_profile = def.default_profile,
+            "statusline_format" => next.statusline_format = def.statusline_format,
+            _ => {
+                let known: Vec<&str> = KEYS.iter().map(|(k, _)| *k).collect();
+                return Err(Error::usage(format!("unknown config key `{key}`"))
+                    .hint(format!("valid keys: {}", known.join(", "))));
+            }
+        }
+        next.validate()?;
         *self = next;
         Ok(())
     }
@@ -385,5 +528,31 @@ mod tests {
             c.set("auto_switch_candidate_max_age_secs", "604801")
                 .is_err()
         );
+
+        for alias in ["keyring", "keychain", "credential-manager"] {
+            c.set("backend", alias).unwrap();
+            assert_eq!(c.backend, BackendKind::SecretService);
+            assert_eq!(c.get("backend").as_deref(), Some("secret-service"));
+        }
+
+        c.set("warn_percent", "30").unwrap();
+        c.set("critical_percent", "15").unwrap();
+        assert!(c.set("critical_percent", "40").is_err());
+        assert!(c.set("warn_percent", "-1").is_err());
+        assert!(c.set("warn_percent", "101").is_err());
+        assert!(c.set("warn_percent", "nan").is_err());
+        c.reset_key("warn_percent").unwrap();
+        assert_eq!(c.warn_percent, 25.0);
+
+        c.set("default_profile", "work").unwrap();
+        assert_eq!(c.default_profile.as_deref(), Some("work"));
+        c.reset_key("default_profile").unwrap();
+        assert_eq!(c.default_profile, None);
+
+        c.set("statusline_format", "full").unwrap();
+        assert!(c.set("statusline_format", "invalid").is_err());
+        c.reset_key("statusline_format").unwrap();
+        assert_eq!(c.statusline_format, "compact");
+        assert!(c.reset_key("unknown_key").is_err());
     }
 }

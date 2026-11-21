@@ -706,7 +706,11 @@ pub fn update_endpoint(
 
     if patch.api_key.is_some() || patch.secret_headers.is_some() {
         let snap_path = secret_file(dirs, &id);
-        let mut secret = read_endpoint_secret(vault, &snap_path, &id).unwrap_or_default();
+        let mut secret = if snap_path.exists() {
+            read_endpoint_secret(vault, &snap_path, &id)?
+        } else {
+            EndpointSecret::default()
+        };
         if let Some(k) = patch.api_key.as_ref() {
             secret.api_key = k.clone();
         }

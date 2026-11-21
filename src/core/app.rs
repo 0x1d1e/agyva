@@ -13,6 +13,7 @@ use crate::config::{Config, VaultKeyMode};
 use crate::core::checkpoint::CheckpointStore;
 use crate::core::error::{Error, Result};
 use crate::core::failpoint::Failpoints;
+use crate::core::protocol::{HttpTransport, UreqTransport};
 use crate::core::provider::QuotaProvider;
 use crate::core::registry::Registry;
 use crate::paths::{AgyPaths, Dirs, Env};
@@ -62,6 +63,7 @@ pub struct App {
     /// vice versa.
     pub(crate) archive_passphrases: Arc<dyn PassphraseSource>,
     pub(crate) provider_override: Option<Arc<dyn QuotaProvider>>,
+    pub(crate) transport_override: Option<Arc<dyn HttpTransport>>,
     /// How far session detection may look (see [`crate::agy::sessions::SessionScan`]).
     /// Production scans the host process table; the test harness narrows it
     /// to its own AGY home so a stray `agy` on the machine cannot pose as a
@@ -106,6 +108,7 @@ impl App {
             had_env_passphrase,
             kdf: None,
             provider_override: None,
+            transport_override: None,
             session_scan: crate::agy::sessions::SessionScan::default(),
             compat_override: None,
             native_override: None,
@@ -199,6 +202,20 @@ impl App {
     pub fn with_provider(mut self, p: Arc<dyn QuotaProvider>) -> Self {
         self.provider_override = Some(p);
         self
+    }
+
+    /// Replace the HTTP transport for endpoint probes/models (tests).
+    #[must_use]
+    pub fn with_transport(mut self, t: Arc<dyn HttpTransport>) -> Self {
+        self.transport_override = Some(t);
+        self
+    }
+
+    /// HTTP transport for custom endpoint requests.
+    pub fn http_transport(&self) -> Arc<dyn HttpTransport> {
+        self.transport_override
+            .clone()
+            .unwrap_or_else(|| Arc::new(UreqTransport))
     }
 
     #[must_use]

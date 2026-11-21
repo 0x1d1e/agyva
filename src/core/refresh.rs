@@ -22,6 +22,7 @@ use crate::core::health::{AccountHealth, Classification, HealthRecord, HealthSou
 use crate::core::provider::{AgyUsageProvider, NoProvider, QuotaProvider, Ran, Reading};
 use crate::core::quota::{ModelQuota, Unavailable, UnavailableReason};
 use crate::core::quota_cache::{CachedQuota, QuotaCache};
+use crate::core::quota_history::QuotaHistory;
 use crate::core::suspended::SuspendedMarkers;
 use crate::storage::lock::StateLock;
 
@@ -112,6 +113,10 @@ fn unavailable_for(class: &Classification, ran: &Ran, parse_note: &str) -> Unava
 impl App {
     pub fn quota_cache(&self) -> QuotaCache {
         QuotaCache::new(&self.dirs)
+    }
+
+    pub fn quota_history(&self) -> QuotaHistory {
+        QuotaHistory::new(&self.dirs)
     }
 
     pub fn suspended_markers(&self) -> SuspendedMarkers {
@@ -325,6 +330,12 @@ impl App {
         });
         if let Err(e) = write {
             tracing::warn!("could not update the quota cache: {}", e.message());
+        }
+        if failure.is_none()
+            && let Some(g) = &groups
+            && let Err(e) = self.quota_history().record_refreshed(&active, g, now, &ids)
+        {
+            tracing::warn!("could not update the quota history: {}", e.message());
         }
         let live = Some(LiveReading {
             health: effective,

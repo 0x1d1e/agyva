@@ -6,19 +6,29 @@
 
 use std::path::PathBuf;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::agy::companion::Companion;
 use crate::agy::credentials::RawCredential;
-use crate::core::error::{Error, Result};
+use crate::core::error::{Error, ErrorKind, Result};
 use crate::core::ids;
 use crate::storage::fsutil;
 use crate::storage::vault::Vault;
 
 pub const CHECKPOINT_SCHEMA: u32 = 1;
 const PINNED_SUFFIX: &str = ".keep.ckpt";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CheckpointMeta {
+    pub name: String,
+    pub txn_id: Option<String>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub pinned: bool,
+    pub size_bytes: u64,
+    pub valid: bool,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Checkpoint {
@@ -132,6 +142,64 @@ impl CheckpointStore {
             .collect())
     }
 
+    /// Parse metadata for all checkpoint files in `checkpoints/`, sorted newest first.
+    /// Malformed filenames that fail `ids::is_checkpoint_name` are ignored safely;
+    /// valid filenames whose timestamp/txn_id cannot be parsed are flagged `valid: false`.
+    pub fn list_meta(&self) -> Result<Vec<CheckpointMeta>> {
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(Error::io(format!("listing {}", self.dir.display()), e)),
+        };
+        let mut out = Vec::new();
+        for entry in entries {
+            let entry =
+                entry.map_err(|e| Error::io(format!("reading {}", self.dir.display()), e))?;
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "ckpt") {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            if !ids::is_checkpoint_name(&name) {
+                tracing::warn!(checkpoint = %name, "ignoring malformed checkpoint filename");
+                continue;
+            }
+            let size_bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            out.push(parse_checkpoint_meta(&name, size_bytes));
+        }
+        out.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| b.name.cmp(&a.name))
+        });
+        Ok(out)
+    }
+
+    /// Decrypt a checkpoint by file name without requiring an external journal.
+    pub fn read_by_name(&self, vault: &Vault, name: &str) -> Result<Checkpoint> {
+        if !ids::is_checkpoint_name(name) {
+            return Err(Error::usage(format!("invalid checkpoint name `{name}`")));
+        }
+        let path = self.dir.join(name);
+        if !path.exists() {
+            return Err(Error::new(
+                ErrorKind::NotFound,
+                format!("checkpoint `{name}` not found"),
+            )
+            .hint("run `agyva checkpoints list` to see available checkpoints"));
+        }
+        let meta = parse_checkpoint_meta(name, 0);
+        let txn_id = meta.txn_id.ok_or_else(|| {
+            Error::format(format!(
+                "checkpoint `{name}` has a malformed transaction id"
+            ))
+        })?;
+        self.read(vault, name, &txn_id)
+    }
+
     /// Delete a checkpoint file (missing is fine).
     pub fn remove(&self, name: &str) -> Result<()> {
         if !ids::is_checkpoint_name(name) {
@@ -146,23 +214,77 @@ impl CheckpointStore {
     /// Keep the newest `keep` ordinary checkpoints (never `protect`), delete
     /// the rest. Pinned checkpoints are neither counted nor deleted.
     pub fn prune(&self, keep: usize, protect: Option<&str>) -> Result<usize> {
-        let names: Vec<String> = self
-            .list()?
-            .into_iter()
-            .filter(|n| !Self::is_pinned(n))
-            .collect();
-        let excess = names.len().saturating_sub(keep);
-        let mut removed = 0;
-        for name in names
+        Ok(self.prune_returning(keep, false, protect)?.len())
+    }
+
+    /// Like [`prune`](Self::prune), optionally including pinned checkpoints,
+    /// and returning the names of removed checkpoint files.
+    pub fn prune_returning(
+        &self,
+        keep: usize,
+        include_pinned: bool,
+        protect: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let names = self.list()?;
+        let ordinary: Vec<String> = names
             .iter()
+            .filter(|n| !Self::is_pinned(n))
+            .cloned()
+            .collect();
+        let excess = ordinary.len().saturating_sub(keep);
+        let mut to_remove: Vec<String> = ordinary
+            .into_iter()
             .take(excess)
             .filter(|n| Some(n.as_str()) != protect)
-        {
-            let path = self.dir.join(name);
+            .collect();
+        if include_pinned {
+            for n in names {
+                if Self::is_pinned(&n) && Some(n.as_str()) != protect {
+                    to_remove.push(n);
+                }
+            }
+        }
+        let mut removed = Vec::with_capacity(to_remove.len());
+        for name in to_remove {
+            let path = self.dir.join(&name);
             fsutil::remove_durable(&path)
                 .map_err(|e| Error::io(format!("removing {}", path.display()), e))?;
-            removed += 1;
+            removed.push(name);
         }
         Ok(removed)
+    }
+}
+
+pub fn parse_checkpoint_meta(name: &str, size_bytes: u64) -> CheckpointMeta {
+    let pinned = CheckpointStore::is_pinned(name);
+    let stem = name
+        .strip_suffix(PINNED_SUFFIX)
+        .or_else(|| name.strip_suffix(".ckpt"));
+    let parsed = stem.and_then(|s| s.rsplit_once('-')).and_then(|(ts, txn)| {
+        if !ids::is_txn_id(txn) {
+            return None;
+        }
+        let dt = NaiveDateTime::parse_from_str(ts, "%Y%m%dT%H%M%S%.fZ")
+            .ok()?
+            .and_utc();
+        Some((dt, txn.to_owned()))
+    });
+    match parsed {
+        Some((dt, txn)) => CheckpointMeta {
+            name: name.to_owned(),
+            txn_id: Some(txn),
+            created_at: Some(dt),
+            pinned,
+            size_bytes,
+            valid: true,
+        },
+        None => CheckpointMeta {
+            name: name.to_owned(),
+            txn_id: None,
+            created_at: None,
+            pinned,
+            size_bytes,
+            valid: false,
+        },
     }
 }

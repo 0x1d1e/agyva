@@ -1,13 +1,20 @@
-//! `agyva doctor`: diagnostics. Read-only; never modifies state.
+//! `agyva doctor`: diagnostics (`doctor()` is read-only; `doctor_fix()` applies safe fixes).
 
+use std::io::Read;
 use std::path::Path;
 
+use fs4::{FileExt, TryLockError};
 use serde::Serialize;
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 use crate::agy::credentials::parse_credential;
 use crate::agy::sessions;
 use crate::core::account::read_snapshot;
 use crate::core::app::App;
+use crate::core::endpoints;
+use crate::core::error::{Error, Result};
+use crate::core::profile;
+use crate::core::quota_history;
 use crate::core::view::VIEW_SCHEMA;
 use crate::storage::fsutil;
 
@@ -34,6 +41,13 @@ pub struct DoctorReport {
     pub healthy: bool,
     pub recovery_pending: bool,
     pub checks: Vec<Check>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DoctorFixReport {
+    pub schema_version: u32,
+    pub actions: Vec<String>,
+    pub report: DoctorReport,
 }
 
 pub(crate) struct Collector(Vec<Check>);
@@ -125,6 +139,9 @@ impl App {
             self.check_snapshots(&mut c, reg);
             self.check_live(&mut c, reg);
         }
+        self.check_endpoints(&mut c);
+        self.check_profiles(&mut c);
+        self.check_cache_dir(&mut c);
 
         let compat = self.compat();
         let level = if compat.is_supported() {
@@ -182,19 +199,28 @@ impl App {
 
     fn check_permissions(&self, c: &mut Collector) {
         let mut problems = Vec::new();
+        let endpoints_dir = endpoints::secrets_dir(&self.dirs);
         for d in [
             &self.dirs.config,
             &self.dirs.state,
+            &self.dirs.cache,
             &self.dirs.accounts_dir(),
+            &endpoints_dir,
         ] {
             if d.exists() {
                 problems.extend(perm_problems(d, fsutil::PRIVATE_DIR_MODE));
             }
         }
-        let mut files = vec![self.dirs.registry_file(), self.dirs.vault_meta_file()];
+        let mut files = vec![
+            self.dirs.registry_file(),
+            self.dirs.vault_meta_file(),
+            endpoints::registry_file(&self.dirs),
+            profile::profiles_file(&self.dirs),
+        ];
         files.extend(
             fsutil::list_with_extension(&self.dirs.accounts_dir(), "snap").unwrap_or_default(),
         );
+        files.extend(fsutil::list_with_extension(&endpoints_dir, "snap").unwrap_or_default());
         files.extend(
             fsutil::list_with_extension(&self.dirs.checkpoint_dir(), "ckpt").unwrap_or_default(),
         );
@@ -208,8 +234,124 @@ impl App {
                 "permissions",
                 Level::Warn,
                 problems.join("; "),
-                Some("run `chmod 700` on directories and `chmod 600` on files"),
+                Some("run `agyva doctor --fix` (or chmod 700 on dirs and 600 on files)"),
             );
+        }
+    }
+
+    fn check_endpoints(&self, c: &mut Collector) {
+        let path = endpoints::registry_file(&self.dirs);
+        if !path.exists() {
+            c.ok("endpoints", "no custom endpoints configured");
+            return;
+        }
+        match endpoints::EndpointRegistry::load(&path) {
+            Err(e) => c.add(
+                "endpoints",
+                Level::Fail,
+                e.message().to_owned(),
+                e.hint_text(),
+            ),
+            Ok(reg) => {
+                let missing: Vec<&str> = reg
+                    .endpoints
+                    .iter()
+                    .filter(|ep| !endpoints::secret_file(&self.dirs, &ep.id).exists())
+                    .map(|ep| ep.alias.as_str())
+                    .collect();
+                if missing.is_empty() {
+                    c.ok(
+                        "endpoints",
+                        format!(
+                            "{} saved endpoint(s), all secret snapshots present",
+                            reg.endpoints.len()
+                        ),
+                    );
+                } else {
+                    c.add(
+                        "endpoints",
+                        Level::Fail,
+                        format!(
+                            "secret snapshot missing for endpoint(s): {}",
+                            missing.join(", ")
+                        ),
+                        Some("update or re-add the affected endpoint API key"),
+                    );
+                }
+            }
+        }
+    }
+
+    fn check_profiles(&self, c: &mut Collector) {
+        let path = profile::profiles_file(&self.dirs);
+        if let Err(e) = profile::load_global_profiles(&path) {
+            c.add(
+                "profile",
+                Level::Fail,
+                e.message().to_owned(),
+                e.hint_text(),
+            );
+            return;
+        }
+        let Ok(cwd) = std::env::current_dir() else {
+            c.ok("profile", "global profiles valid");
+            return;
+        };
+        match profile::resolve_profile_with_default(
+            &self.dirs,
+            &cwd,
+            None,
+            self.config.default_profile.as_deref(),
+        ) {
+            Ok(Some(active)) => {
+                let label = active.name.as_deref().unwrap_or("local");
+                c.ok("profile", format!("active profile `{label}` is valid"));
+            }
+            Ok(None) => c.ok("profile", "global profiles valid; no active profile"),
+            Err(e) => c.add(
+                "profile",
+                Level::Fail,
+                e.message().to_owned(),
+                e.hint_text(),
+            ),
+        }
+    }
+
+    fn check_cache_dir(&self, c: &mut Collector) {
+        let cache = &self.dirs.cache;
+        if !cache.exists() {
+            if self.dirs.config.exists() || self.dirs.state.exists() {
+                c.add(
+                    "cache",
+                    Level::Info,
+                    format!("cache directory {} not created yet", cache.display()),
+                    Some("run `agyva doctor --fix` to pre-create it"),
+                );
+            } else {
+                c.ok("cache", "cache directory will be created on demand");
+            }
+            return;
+        }
+        if !cache.is_dir() {
+            c.add(
+                "cache",
+                Level::Fail,
+                format!("{} exists but is not a directory", cache.display()),
+                None,
+            );
+            return;
+        }
+        match std::fs::read_dir(cache) {
+            Ok(_) => c.ok(
+                "cache",
+                format!("cache directory healthy ({})", cache.display()),
+            ),
+            Err(e) => c.add(
+                "cache",
+                Level::Fail,
+                format!("cache directory {} is unreadable: {e}", cache.display()),
+                Some("check directory permissions or run `agyva doctor --fix`"),
+            ),
         }
     }
 
@@ -351,8 +493,141 @@ impl App {
         ]
         .iter()
         .filter_map(|d| std::fs::read_dir(d).ok())
-        .flat_map(|rd| rd.filter_map(Result::ok))
+        .flat_map(|rd| rd.filter_map(std::result::Result::ok))
         .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
         .count()
+    }
+
+    /// Apply non-destructive safe fixes:
+    /// - ensure 0700 permissions on existing private directories (and create
+    ///   missing directories if already initialized),
+    /// - ensure 0600 permissions on sensitive files under Unix,
+    /// - remove uncontended stale lockfiles whose recorded PID is dead,
+    /// - re-run `doctor()` and return the updated diagnostics.
+    pub fn doctor_fix(&self) -> Result<DoctorFixReport> {
+        let mut actions = Vec::new();
+        let initialized = self.dirs.config.exists() || self.dirs.state.exists();
+        let endpoints_dir = endpoints::secrets_dir(&self.dirs);
+
+        let mut dirs_to_check = vec![
+            self.dirs.config.clone(),
+            self.dirs.state.clone(),
+            self.dirs.cache.clone(),
+            self.dirs.accounts_dir(),
+            self.dirs.journal_dir(),
+            self.dirs.checkpoint_dir(),
+        ];
+        if endpoints::registry_file(&self.dirs).exists() || endpoints_dir.exists() {
+            dirs_to_check.push(endpoints_dir.clone());
+        }
+
+        for dir in &dirs_to_check {
+            if !dir.exists() {
+                if initialized {
+                    fsutil::create_private_dir(dir)
+                        .map_err(|e| Error::io(format!("creating {}", dir.display()), e))?;
+                    actions.push(format!("created directory {}", dir.display()));
+                }
+            } else if dir.is_dir() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if fsutil::mode_of(dir).is_some_and(|m| m != fsutil::PRIVATE_DIR_MODE) {
+                        std::fs::set_permissions(
+                            dir,
+                            std::fs::Permissions::from_mode(fsutil::PRIVATE_DIR_MODE),
+                        )
+                        .map_err(|e| Error::io(format!("chmod 0700 {}", dir.display()), e))?;
+                        actions.push(format!("set mode 0700 on {}", dir.display()));
+                    }
+                }
+            }
+        }
+
+        let mut files = vec![
+            self.dirs.config_file(),
+            self.dirs.registry_file(),
+            self.dirs.vault_meta_file(),
+            endpoints::registry_file(&self.dirs),
+            profile::profiles_file(&self.dirs),
+            self.dirs.quota_cache_file(),
+            quota_history::history_file(&self.dirs),
+            endpoints::cache_file(&self.dirs),
+        ];
+        files.extend(
+            fsutil::list_with_extension(&self.dirs.accounts_dir(), "snap").unwrap_or_default(),
+        );
+        files.extend(fsutil::list_with_extension(&endpoints_dir, "snap").unwrap_or_default());
+        files.extend(
+            fsutil::list_with_extension(&self.dirs.checkpoint_dir(), "ckpt").unwrap_or_default(),
+        );
+        for file in files.into_iter().filter(|f| f.is_file()) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if fsutil::mode_of(&file).is_some_and(|m| m != fsutil::PRIVATE_FILE_MODE) {
+                    std::fs::set_permissions(
+                        &file,
+                        std::fs::Permissions::from_mode(fsutil::PRIVATE_FILE_MODE),
+                    )
+                    .map_err(|e| Error::io(format!("chmod 0600 {}", file.display()), e))?;
+                    actions.push(format!("set mode 0600 on {}", file.display()));
+                }
+            }
+            #[cfg(not(unix))]
+            let _ = file;
+        }
+
+        let lock_paths = [
+            self.dirs.lock_file(),
+            self.dirs.refresh_lock_file(),
+            self.dirs.cache.join("quota.lock"),
+            self.dirs.cache.join("quota-history.lock"),
+            self.dirs.cache.join("endpoint-models.lock"),
+        ];
+        let mut sys = System::new();
+        for lock_path in lock_paths {
+            if !lock_path.is_file() {
+                continue;
+            }
+            let Ok(mut file) = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+            else {
+                continue;
+            };
+            match FileExt::try_lock(&file) {
+                Ok(()) => {
+                    let mut pid_text = String::new();
+                    let _ = Read::by_ref(&mut file)
+                        .take(32)
+                        .read_to_string(&mut pid_text);
+                    let pid = pid_text.trim().parse::<u32>().ok();
+                    let pid_alive = pid.is_some_and(|p| {
+                        let spid = Pid::from_u32(p);
+                        sys.refresh_processes_specifics(
+                            ProcessesToUpdate::Some(&[spid]),
+                            true,
+                            ProcessRefreshKind::nothing(),
+                        );
+                        sys.process(spid).is_some()
+                    });
+                    let _ = FileExt::unlock(&file);
+                    drop(file);
+                    if !pid_alive && std::fs::remove_file(&lock_path).is_ok() {
+                        actions.push(format!("removed stale lockfile {}", lock_path.display()));
+                    }
+                }
+                Err(TryLockError::WouldBlock) | Err(TryLockError::Error(_)) => {}
+            }
+        }
+
+        let report = self.doctor();
+        Ok(DoctorFixReport {
+            schema_version: VIEW_SCHEMA,
+            actions,
+            report,
+        })
     }
 }

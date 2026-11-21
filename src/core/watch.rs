@@ -13,6 +13,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+use crate::config::Config;
 use crate::core::app::App;
 use crate::core::health::AccountHealth;
 use crate::core::quota::UnavailableReason;
@@ -26,6 +27,10 @@ pub struct WatchConfig {
     pub max_cycles: Option<u64>,
     /// Announce a quota window that resets within this long.
     pub reset_window: Duration,
+    /// Optional warning threshold (% remaining).
+    pub warn_percent: Option<f64>,
+    /// Optional critical threshold (% remaining).
+    pub critical_percent: Option<f64>,
 }
 
 impl WatchConfig {
@@ -35,7 +40,20 @@ impl WatchConfig {
             max_backoff: Duration::from_secs(30 * 60),
             max_cycles: None,
             reset_window: Duration::from_secs(10 * 60),
+            warn_percent: None,
+            critical_percent: None,
         }
+    }
+
+    pub fn from_config(interval: Duration, cfg: &Config) -> Self {
+        Self::new(interval).with_thresholds(Some(cfg.warn_percent), Some(cfg.critical_percent))
+    }
+
+    #[must_use]
+    pub fn with_thresholds(mut self, warn: Option<f64>, critical: Option<f64>) -> Self {
+        self.warn_percent = warn;
+        self.critical_percent = critical;
+        self
     }
 }
 
@@ -129,10 +147,33 @@ pub fn backoff_delay(interval: Duration, failures: u32, cap: Duration, unit: f64
     Duration::from_secs_f64(jittered.max(floor).min(cap.as_secs_f64()))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ThresholdLevel {
+    Normal,
+    Warn,
+    Critical,
+}
+
+impl ThresholdLevel {
+    fn classify(remaining: f64, cfg: &WatchConfig) -> Option<Self> {
+        if cfg.warn_percent.is_none() && cfg.critical_percent.is_none() {
+            return None;
+        }
+        if cfg.critical_percent.is_some_and(|c| remaining <= c) {
+            Some(Self::Critical)
+        } else if cfg.warn_percent.is_some_and(|w| remaining <= w) {
+            Some(Self::Warn)
+        } else {
+            Some(Self::Normal)
+        }
+    }
+}
+
 struct Tracker {
     health: BTreeMap<String, AccountHealth>,
     announced: BTreeSet<String>,
     suspended_noted: BTreeSet<String>,
+    thresholds: BTreeMap<String, ThresholdLevel>,
 }
 
 impl Tracker {
@@ -161,6 +202,35 @@ impl Tracker {
             for g in a.groups.iter().filter(|g| !g.disabled) {
                 for (name, w) in [("5h", &g.five_hour), ("weekly", &g.weekly)] {
                     let Some(w) = w else { continue };
+                    if let Some(level) = ThresholdLevel::classify(w.remaining_percent, cfg) {
+                        let tkey = format!("{}|{}|{name}", a.id, g.label());
+                        let prev = self.thresholds.insert(tkey, level);
+                        let changed = prev.is_some_and(|p| p != level)
+                            || (prev.is_none() && level != ThresholdLevel::Normal);
+                        if changed {
+                            let pct = crate::core::format::percent_text(w.remaining_percent);
+                            let msg = match level {
+                                ThresholdLevel::Critical => format!(
+                                    "CRITICAL {}: {} {name} remaining {pct} (<= {:.0}%)",
+                                    a.alias,
+                                    g.label(),
+                                    cfg.critical_percent.unwrap_or(0.0)
+                                ),
+                                ThresholdLevel::Warn => format!(
+                                    "WARN {}: {} {name} remaining {pct} (<= {:.0}%)",
+                                    a.alias,
+                                    g.label(),
+                                    cfg.warn_percent.unwrap_or(0.0)
+                                ),
+                                ThresholdLevel::Normal => format!(
+                                    "RECOVERED {}: {} {name} remaining {pct}",
+                                    a.alias,
+                                    g.label()
+                                ),
+                            };
+                            out.push(WatchEvent::Note { text: msg });
+                        }
+                    }
                     let Some(reset) = w.reset_at else { continue };
                     if w.remaining_percent < 100.0 && reset > now && reset - now <= window {
                         let key = format!("{}|{}|{name}|{}", a.id, g.label(), reset.timestamp());
@@ -227,6 +297,7 @@ pub fn run_watch(
         health: BTreeMap::new(),
         announced: BTreeSet::new(),
         suspended_noted: BTreeSet::new(),
+        thresholds: BTreeMap::new(),
     };
     sink.emit(
         clock.now(),

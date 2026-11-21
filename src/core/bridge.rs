@@ -461,7 +461,7 @@ fn read_chunked_body(
             let _ = reader.read_line(&mut line);
             break;
         }
-        if out.len() + size > MAX_BODY_BYTES {
+        if size > MAX_BODY_BYTES - out.len() {
             return Err("chunked request body exceeds maximum size".into());
         }
         let start = out.len();
@@ -1489,7 +1489,12 @@ fn stream_upstream_to_client(
                         }
                     }
                 } else if !saw_sse_or_ndjson {
-                    buffered_json.push_str(trimmed);
+                    if trimmed.len() <= MAX_BODY_BYTES - buffered_json.len() {
+                        buffered_json.push_str(trimmed);
+                    } else {
+                        buffered_json.clear();
+                        break;
+                    }
                 }
             }
             Err(_) => break,

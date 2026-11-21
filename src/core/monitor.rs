@@ -16,9 +16,15 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+use crate::config::Config;
 use crate::core::app::App;
+use crate::core::endpoints;
+use crate::core::profile;
+use crate::core::quota_history::BurnRateView;
 use crate::core::route::RoutePlan;
 use crate::core::route_apply::RouteHistory;
+use crate::core::usage::AccountUsage;
+use crate::core::view::VIEW_SCHEMA;
 use crate::core::watch::{Clock, Jitter, Probe, Sink, WatchConfig, run_watch};
 
 /// Evaluation (cache-only ranking) defaults to 15s; the user may raise or
@@ -50,10 +56,89 @@ pub struct MonitorProbe<'a> {
     /// What automation did on this cycle (an error, or the applied alias);
     /// `None` when automation is off or had nothing to say.
     last_auto: Option<String>,
+    /// Enriched snapshot of the most recent cycle (with burn rates & context).
+    last_snapshot: Option<MonitorSnapshot>,
     /// Exponential backoff deadline after an `auto_switch_for` error.
     auto_backoff_until: Option<DateTime<Utc>>,
     /// Consecutive `auto_switch_for` errors for backoff scaling.
     auto_failures: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct MonitorConfig {
+    pub eval_interval: Duration,
+    pub refresh_interval: Duration,
+    pub warn_percent: Option<f64>,
+    pub critical_percent: Option<f64>,
+    pub max_cycles: Option<u64>,
+}
+
+impl Default for MonitorConfig {
+    fn default() -> Self {
+        Self {
+            eval_interval: DEFAULT_EVAL_INTERVAL,
+            refresh_interval: DEFAULT_REFRESH_INTERVAL,
+            warn_percent: None,
+            critical_percent: None,
+            max_cycles: None,
+        }
+    }
+}
+
+impl MonitorConfig {
+    pub fn from_app(app: &App, eval_interval: Duration, refresh_interval: Duration) -> Self {
+        Self {
+            eval_interval,
+            refresh_interval,
+            warn_percent: Some(app.config.warn_percent),
+            critical_percent: Some(app.config.critical_percent),
+            max_cycles: None,
+        }
+    }
+
+    pub fn to_watch_config(&self) -> WatchConfig {
+        let mut cfg = WatchConfig::new(self.eval_interval)
+            .with_thresholds(self.warn_percent, self.critical_percent);
+        cfg.max_cycles = self.max_cycles;
+        cfg
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MonitorRow {
+    pub id: String,
+    pub alias: String,
+    pub active: bool,
+    pub eligible: bool,
+    pub remaining_percent: Option<f64>,
+    pub rate_remaining_percent: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burn_rate: Option<BurnRateView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_exhaustion_secs: Option<u64>,
+    pub renewals: [Option<DateTime<Utc>>; 2],
+    pub why: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MonitorSnapshot {
+    pub schema_version: u32,
+    pub generated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub for_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommendation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticky_pick: Option<Picked>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_auto: Option<String>,
+    pub rows: Vec<MonitorRow>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -82,6 +167,7 @@ impl<'a> MonitorProbe<'a> {
             last_plan: None,
             last_pick: None,
             last_auto: None,
+            last_snapshot: None,
             auto_backoff_until: None,
             auto_failures: 0,
         }
@@ -101,6 +187,80 @@ impl<'a> MonitorProbe<'a> {
     /// anything to report (applied switch or an error).
     pub fn last_auto(&self) -> Option<&str> {
         self.last_auto.as_deref()
+    }
+
+    /// The enriched monitor snapshot from the most recent cycle.
+    pub fn last_snapshot(&self) -> Option<&MonitorSnapshot> {
+        self.last_snapshot.as_ref()
+    }
+
+    fn build_snapshot(
+        &self,
+        plan: &RoutePlan,
+        usages: &[AccountUsage],
+        now: DateTime<Utc>,
+    ) -> MonitorSnapshot {
+        let active_endpoint = endpoints::load_registry(&self.app.dirs)
+            .ok()
+            .and_then(|reg| {
+                reg.active_endpoint
+                    .as_deref()
+                    .and_then(|id| reg.find(id).map(|ep| ep.alias.clone()))
+            });
+        let active_profile = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| {
+                profile::resolve_profile_with_default(
+                    &self.app.dirs,
+                    &cwd,
+                    None,
+                    self.app.config.default_profile.as_deref(),
+                )
+                .ok()
+                .flatten()
+            })
+            .map(|p| p.name.unwrap_or_else(|| "local".to_owned()));
+
+        let rows = plan
+            .accounts
+            .iter()
+            .map(|row| {
+                let burn_rate = usages.iter().find(|u| u.id == row.id).and_then(|u| {
+                    let (five, week) = u.lowest();
+                    [five, week]
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|w| w.burn_rate.clone())
+                        .min_by_key(|b| b.eta_exhaustion_secs.unwrap_or(u64::MAX))
+                });
+                let eta_exhaustion_secs = burn_rate.as_ref().and_then(|b| b.eta_exhaustion_secs);
+                MonitorRow {
+                    id: row.id.clone(),
+                    alias: row.alias.clone(),
+                    active: row.active,
+                    eligible: row.eligible,
+                    remaining_percent: row.remaining_percent,
+                    rate_remaining_percent: row.rate_remaining_percent,
+                    burn_rate,
+                    eta_exhaustion_secs,
+                    renewals: row.renewals,
+                    why: row.why.clone(),
+                }
+            })
+            .collect();
+
+        MonitorSnapshot {
+            schema_version: VIEW_SCHEMA,
+            generated_at: now,
+            group: self.group.clone(),
+            for_model: self.for_model.clone(),
+            active_endpoint,
+            active_profile,
+            recommendation: plan.recommendation.clone(),
+            sticky_pick: self.last_pick.clone(),
+            last_auto: self.last_auto.clone(),
+            rows,
+        }
     }
 }
 
@@ -256,6 +416,7 @@ impl Probe for MonitorProbe<'_> {
                 }
             }
         }
+        self.last_snapshot = Some(self.build_snapshot(&plan, &report.accounts, now));
         self.last_plan = Some(plan);
         report
     }
@@ -265,6 +426,11 @@ impl Probe for MonitorProbe<'_> {
 /// announcements beyond what watch already does.
 pub fn monitor_config(interval: Duration) -> WatchConfig {
     WatchConfig::new(interval)
+}
+
+/// Monitor watch config with threshold alerts sourced from `Config`.
+pub fn monitor_config_for_app(interval: Duration, cfg: &Config) -> WatchConfig {
+    WatchConfig::from_config(interval, cfg)
 }
 
 /// Run the monitor loop to completion (stop flag or max cycles).

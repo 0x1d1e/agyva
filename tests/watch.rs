@@ -248,6 +248,7 @@ fn reset_times_are_announced_once() {
             reset_at: Some(reset),
             observed_at: clock.now.get(),
             source: agyva::core::quota::QuotaSource::AgyUsageCommand,
+            burn_rate: None,
         }),
         weekly: None,
     }];
@@ -308,4 +309,60 @@ fn watch_skips_a_suspended_account_and_never_runs_agy_for_it() {
             ..
         }
     )));
+}
+
+#[test]
+fn threshold_alerts_fire_only_on_state_transitions() {
+    let clock = FakeClock::new();
+    let make_acc = |pct: f64| {
+        let mut a = account("a", AccountHealth::Healthy, true);
+        a.groups = vec![QuotaView {
+            group: "Gemini".into(),
+            model: None,
+            disabled: false,
+            exhausted: pct <= 0.0,
+            five_hour: Some(WindowView {
+                remaining_percent: pct,
+                reset_at: None,
+                observed_at: clock.now.get(),
+                source: agyva::core::quota::QuotaSource::AgyUsageCommand,
+                burn_rate: None,
+            }),
+            weekly: None,
+        }];
+        a
+    };
+    let mut probe = Script(
+        [
+            ok(make_acc(50.0)), // normal -> silent
+            ok(make_acc(20.0)), // crosses warn (25%) -> WARN
+            ok(make_acc(18.0)), // still warn -> no spam
+            ok(make_acc(8.0)),  // crosses critical (10%) -> CRITICAL
+            ok(make_acc(5.0)),  // still critical -> no spam
+            ok(make_acc(80.0)), // recovers -> RECOVERED
+        ]
+        .into(),
+    );
+    let mut sink = Events::default();
+    let cfg = cfg(60, 6).with_thresholds(Some(25.0), Some(10.0));
+    run_watch(
+        &cfg,
+        &clock,
+        &mut Fixed(0.0),
+        &mut probe,
+        &mut sink,
+        &AtomicBool::new(false),
+    );
+    let notes: Vec<&str> = sink
+        .0
+        .iter()
+        .filter_map(|e| match e {
+            WatchEvent::Note { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notes.len(), 3, "{notes:?}");
+    assert!(notes[0].starts_with("WARN "));
+    assert!(notes[1].starts_with("CRITICAL "));
+    assert!(notes[2].starts_with("RECOVERED "));
 }

@@ -6,7 +6,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
-use crate::core::error::{Error, Result};
+use crate::core::error::{Error, ErrorKind, Result};
 use crate::storage::fsutil;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,10 +110,16 @@ impl RoutingFile {
             std::str::from_utf8(&bytes).map_err(|_| Error::usage("routing.toml must be UTF-8"))?;
         let file: Self =
             toml::from_str(text).map_err(|e| Error::usage(format!("invalid routing.toml: {e}")))?;
-        if file.schema_version != 1 {
+        file.validate()?;
+        Ok(file)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != 1 {
             return Err(Error::usage("unsupported routing.toml schema_version"));
         }
-        for (name, group) in &file.groups {
+        for (name, group) in &self.groups {
+            validate_group_name(name)?;
             for (field, value) in [
                 (
                     "five_hour_threshold_percent",
@@ -138,7 +144,19 @@ impl RoutingFile {
                 )));
             }
         }
-        Ok(file)
+        Ok(())
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        self.validate()?;
+        if let Some(dir) = path.parent() {
+            fsutil::create_private_dir(dir)
+                .map_err(|e| Error::io(format!("creating {}", dir.display()), e))?;
+        }
+        let text = toml::to_string_pretty(self)
+            .map_err(|e| Error::format(format!("cannot encode routing.toml: {e}")))?;
+        fsutil::atomic_write(path, text.as_bytes())
+            .map_err(|e| Error::io(format!("writing {}", path.display()), e))
     }
 
     pub fn group(&self, name: Option<&str>) -> Result<RouteGroup> {
@@ -150,6 +168,64 @@ impl RoutingFile {
             None => Ok(RouteGroup::default()),
         }
     }
+}
+
+fn validate_group_name(name: &str) -> Result<()> {
+    let trimmed = name.trim();
+    if trimmed.is_empty()
+        || trimmed != name
+        || name.chars().any(char::is_control)
+        || name.contains('/')
+        || name.contains('\\')
+    {
+        return Err(Error::usage(format!("invalid routing group name `{name}`")));
+    }
+    Ok(())
+}
+
+/// Insert or replace a named routing group in `path` and persist atomically.
+pub fn upsert_group(path: &Path, name: &str, group: RouteGroup) -> Result<RoutingFile> {
+    validate_group_name(name)?;
+    let mut file = RoutingFile::load(path)?;
+    file.groups.insert(name.to_owned(), group);
+    file.save(path)?;
+    Ok(file)
+}
+
+/// Remove a named routing group from `path` and persist atomically.
+pub fn remove_group(path: &Path, name: &str) -> Result<RoutingFile> {
+    validate_group_name(name)?;
+    let mut file = RoutingFile::load(path)?;
+    if file.groups.remove(name).is_none() {
+        return Err(Error::new(
+            ErrorKind::NotFound,
+            format!("unknown routing group `{name}`"),
+        )
+        .hint("check routing.toml for defined group names"));
+    }
+    file.save(path)?;
+    Ok(file)
+}
+
+/// Initialize a default `routing.toml` with a `default` group seeded with `account_aliases`.
+/// Refuses to overwrite an existing `routing.toml`.
+pub fn init_default(path: &Path, account_aliases: &[String]) -> Result<RoutingFile> {
+    if path.exists() {
+        return Err(
+            Error::conflict(format!("{} already exists", path.display()))
+                .hint("edit it directly or use `agyva route add` to update a group"),
+        );
+    }
+    let mut file = RoutingFile::default();
+    file.groups.insert(
+        "default".to_owned(),
+        RouteGroup {
+            accounts: account_aliases.to_vec(),
+            ..RouteGroup::default()
+        },
+    );
+    file.save(path)?;
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -190,5 +266,34 @@ mod tests {
             std::fs::write(&path, bad).unwrap();
             assert!(RoutingFile::load(&path).is_err(), "expected err for {bad}");
         }
+    }
+
+    #[test]
+    fn mutators_roundtrip_and_validate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("routing.toml");
+        let file = init_default(&path, &["alice".into(), "bob".into()]).unwrap();
+        assert_eq!(file.groups["default"].accounts, vec!["alice", "bob"]);
+        assert_eq!(
+            init_default(&path, &[]).unwrap_err().kind(),
+            ErrorKind::Conflict
+        );
+
+        let work = RouteGroup {
+            accounts: vec!["alice".into()],
+            ranking: Ranking::Priority,
+            auto_switch: true,
+            ..RouteGroup::default()
+        };
+        let file = upsert_group(&path, "work", work).unwrap();
+        assert!(file.groups.contains_key("work"));
+        assert!(file.groups.contains_key("default"));
+
+        let file = remove_group(&path, "work").unwrap();
+        assert!(!file.groups.contains_key("work"));
+        assert_eq!(
+            remove_group(&path, "missing").unwrap_err().kind(),
+            ErrorKind::NotFound
+        );
     }
 }

@@ -16,6 +16,7 @@ use crate::core::quota::{
     UnavailableReason,
 };
 use crate::core::quota_cache::CacheEntry;
+use crate::core::quota_history::{BurnRateView, GroupWindowHistory, compute_burn_rate};
 use crate::core::refresh::{RefreshOutcome, RefreshStatus};
 use crate::core::registry::Registry;
 use crate::core::view::VIEW_SCHEMA;
@@ -29,6 +30,8 @@ pub struct WindowView {
     pub reset_at: Option<DateTime<Utc>>,
     pub observed_at: DateTime<Utc>,
     pub source: QuotaSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burn_rate: Option<BurnRateView>,
 }
 
 impl From<&QuotaWindow> for WindowView {
@@ -38,6 +41,7 @@ impl From<&QuotaWindow> for WindowView {
             reset_at: w.reset_at,
             observed_at: w.observed_at,
             source: w.source,
+            burn_rate: None,
         }
     }
 }
@@ -171,6 +175,7 @@ pub(crate) fn account_usage(
     reg: &Registry,
     id: &str,
     entry: Option<&CacheEntry>,
+    history: Option<&std::collections::BTreeMap<String, GroupWindowHistory>>,
     outcome: Option<&RefreshOutcome>,
     now: DateTime<Utc>,
 ) -> Option<AccountUsage> {
@@ -233,7 +238,7 @@ pub(crate) fn account_usage(
         .filter(|o| matches!(o.status, RefreshStatus::Refreshed))
         .and_then(|o| o.live.as_ref())
         .and_then(|l| l.groups.as_ref());
-    let (groups, observed_at) = match live_groups {
+    let (mut groups, observed_at): (Vec<QuotaView>, _) = match live_groups {
         Some(groups) => (
             groups.iter().map(|g| QuotaView::of(g, source)).collect(),
             Some(now),
@@ -247,6 +252,18 @@ pub(crate) fn account_usage(
             entry.quota.as_ref().map(|q| q.observed_at),
         ),
     };
+    if let Some(acct_hist) = history {
+        for g in &mut groups {
+            if let Some(gh) = acct_hist.get(&g.label()) {
+                if let Some(w) = &mut g.five_hour {
+                    w.burn_rate = compute_burn_rate(&gh.five_hour, w.reset_at, now);
+                }
+                if let Some(w) = &mut g.weekly {
+                    w.burn_rate = compute_burn_rate(&gh.weekly, w.reset_at, now);
+                }
+            }
+        }
+    }
     Some(AccountUsage {
         number: reg
             .accounts
@@ -278,11 +295,20 @@ impl App {
     ) -> Result<Vec<AccountUsage>> {
         let reg = self.load_registry()?;
         let cache = self.quota_cache().load();
+        let history = self.quota_history().load();
         Ok(reg
             .accounts
             .iter()
             .filter_map(|a| {
-                account_usage(self, &reg, &a.id, cache.accounts.get(&a.id), outcome, now)
+                account_usage(
+                    self,
+                    &reg,
+                    &a.id,
+                    cache.accounts.get(&a.id),
+                    history.accounts.get(&a.id),
+                    outcome,
+                    now,
+                )
             })
             .collect())
     }
