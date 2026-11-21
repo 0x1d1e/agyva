@@ -25,6 +25,7 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zbus_names unmaintained; transitive via zbus, no vulnerability; reviewed 2026-11-15, re-check by 2027-05-15" },
     { id = "RUSTSEC-2026-0371", reason = "zvariant unmaintained; transitive via zbus, no vulnerability; reviewed 2026-11-15, re-check by 2027-05-15" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive unmaintained; transitive via zbus, no vulnerability; reviewed 2026-11-15, re-check by 2027-05-15" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; direct dependency with no vulnerability and no drop-in upgrade; reviewed 2026-11-21, re-check by 2027-05-21" },
 ]
 
 [licenses]

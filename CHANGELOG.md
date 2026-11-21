@@ -10,6 +10,29 @@ tagged; release artifacts are built by pushing a `v*` tag (see
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-21
+
+Auto-switch deadlocks and safety fixes, updater and session hardening, `agyva rekey`, and release installer.
+
+### Added
+
+- `agyva rekey` rotates the local vault key and re-wraps saved snapshots and checkpoints without re-adding accounts.
+- `install.sh` downloads, verifies (`SHA256SUMS`), and installs release archives; `scripts/release.sh` accepts `--target <triple>`.
+- Configurable auto-switch thresholds (`five_hour_threshold_percent`, `weekly_threshold_percent`), hysteresis (`hysteresis_percent`), per-group `cooldown_secs`, global `auto_switch_cooldown_secs`, and `auto_switch_candidate_max_age_secs`.
+- `#![forbid(unsafe_code)]` crate-wide in `src/lib.rs`.
+
+### Fixed
+
+- Auto-switch now triggers when active quota hits threshold with sufficient candidate margin (hysteresis), decouples standby candidate freshness from live active refresh, persists fail-closed cooldown state, and serializes state updates with atomic file locking.
+- `agyva monitor` applies backoff on repeated refresh failures and deduplicates repeated `RouteHistory` auto-switch hold/defer entries.
+- Self-updater restricts startup checks and installs to supported Linux targets (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`) and caches passive update checks in `<cache>/update-check.json` (24 h on success, 1 h on failure).
+- Session detection scopes process checks to the current UID and uses `flock`-aware lock detection.
+
+### Changed
+
+- Export archives now derive keys with a 64 MiB Argon2id profile (`t=3`, `p=1`), while `import` remains compatible down to the 19 MiB (`t=2`, `p=1`) floor.
+- Release workflow (`.github/workflows/release.yml`) splits `build` (`contents: read`) from `publish` (`contents: write`) and re-verifies checksums before drafting the release.
+
 ## [0.1.1] - 2026-11-16
 
 Routing, route automation, transfer and self-update, building on `0.1.0`.

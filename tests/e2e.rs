@@ -335,7 +335,11 @@ fn help_completions_config_and_version() {
         unknown.all()
     );
     assert!(unknown.err.contains("error:") && unknown.err.contains("hint:"));
-    assert!(sb.run(&["version"]).out.starts_with("agyva 0.1.1"));
+    assert!(
+        sb.run(&["version"])
+            .out
+            .starts_with(concat!("agyva ", env!("CARGO_PKG_VERSION")))
+    );
     assert!(
         sb.run(&["config", "path"])
             .out
