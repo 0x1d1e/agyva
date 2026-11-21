@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -220,10 +221,19 @@ impl App {
                 &plain,
             )?;
             let path = staging.join(format!("{}.snap", entry.record.id));
-            fs::write(&path, &sealed)
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(fsutil::PRIVATE_FILE_MODE);
+            }
+            let mut file = options
+                .open(&path)
                 .map_err(|e| Error::io(format!("writing {}", path.display()), e))?;
-            fs::File::open(&path)
-                .and_then(|f| f.sync_all())
+            file.write_all(&sealed)
+                .map_err(|e| Error::io(format!("writing {}", path.display()), e))?;
+            file.sync_all()
                 .map_err(|e| Error::io(format!("syncing {}", path.display()), e))?;
             staged.insert(entry.record.id.clone(), path);
         }
