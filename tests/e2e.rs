@@ -41,11 +41,30 @@ impl Sandbox {
             std::fs::write(&agy, "#!/bin/sh\necho 'agy 1.5.9'\n").expect("fake agy");
             std::fs::set_permissions(&agy, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         }
+        #[cfg(windows)]
+        {
+            std::fs::write(
+                tmp.path().join("agy.cmd"),
+                "@echo off\r\nif \"%~1\"==\"--version\" echo agy 1.5.9\r\n",
+            )
+            .expect("fake agy");
+        }
         Self { tmp }
     }
 
     fn p(&self, rel: &str) -> PathBuf {
         self.tmp.path().join(rel)
+    }
+
+    fn fake_agy_bin(&self) -> PathBuf {
+        #[cfg(windows)]
+        {
+            self.p("agy.cmd")
+        }
+        #[cfg(not(windows))]
+        {
+            self.p("agy")
+        }
     }
 
     #[cfg(unix)]
@@ -79,12 +98,18 @@ impl Sandbox {
         c.args(args).env_clear();
         #[cfg(unix)]
         c.env("PATH", "/usr/bin:/bin");
+        #[cfg(windows)]
+        for k in ["COMSPEC", "SystemRoot"] {
+            if let Some(v) = std::env::var_os(k) {
+                c.env(k, v);
+            }
+        }
         c.env("HOME", self.p("home"))
             .env("AGYVA_CONFIG_DIR", self.p("cfg"))
             .env("AGYVA_STATE_DIR", self.p("state"))
             .env("AGYVA_CACHE_DIR", self.p("cache"))
             .env("AGYVA_AGY_HOME", self.p("agyhome"))
-            .env("AGYVA_AGY_BIN", self.p("agy"))
+            .env("AGYVA_AGY_BIN", self.fake_agy_bin())
             .env("AGYVA_BACKEND", "file")
             .env("AGYVA_TEST_MODE", "1")
             .env("AGYVA_UPDATE_CHECK", "0")
@@ -329,7 +354,7 @@ fn help_completions_config_and_version() {
         assert!(help.out.contains(task), "missing {task}: {}", help.out);
     }
     assert!(!help.out.contains('\u{1b}'));
-    for shell in ["fish", "bash", "zsh"] {
+    for shell in ["fish", "bash", "zsh", "powershell", "elvish"] {
         let r = sb.run(&["completions", shell]);
         assert_eq!(r.code, 0);
         assert!(r.out.contains("agyva"), "{shell}");
