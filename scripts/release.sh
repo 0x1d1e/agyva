@@ -69,9 +69,9 @@ else
 fi
 
 rm -rf dist
-stage="dist/$name"
+stage_root="dist/.stage"
+stage="$stage_root/$name"
 mkdir -p "$stage/docs"
-install -m755 "$bin_path" "dist/$name"
 install -m755 "$bin_path" "$stage/agyva"
 install -m644 README.md LICENSE "$stage/"
 install -m644 docs/*.md "$stage/docs/"
@@ -82,12 +82,16 @@ install -Dm644 docs/capture-data/accounts.json "$stage/docs/capture-data/account
 
 (
   cd dist
-  tar --sort=name --mtime="@$epoch" --owner=0 --group=0 --numeric-owner \
+  tar -C .stage --sort=name --mtime="@$epoch" --owner=0 --group=0 --numeric-owner \
       --format=gnu -cf - "$name" | gzip -n -9 > "$name.tar.gz"
+)
+rm -rf "$stage_root"
+install -m755 "$bin_path" "dist/$name"
+(
+  cd dist
   sha256sum "$name.tar.gz" "$name" > SHA256SUMS
   sha256sum -c SHA256SUMS
 )
-rm -rf "$stage"
 
 echo
 echo "binary:  $PWD/dist/$name"
