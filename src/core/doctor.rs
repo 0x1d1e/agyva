@@ -689,15 +689,33 @@ impl App {
         ];
         let mut sys = System::new();
         for lock_path in lock_paths {
-            if !lock_path.is_file() {
-                continue;
+            // `is_file` is false for a missing path and for access denied.
+            // A missing lock is nothing to remove. Access denied is a failed
+            // fix: the stale lock would otherwise survive a successful report.
+            match std::fs::metadata(&lock_path) {
+                Ok(meta) if meta.is_file() => {}
+                Ok(_) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    return Err(Error::io(
+                        format!("checking lockfile {}", lock_path.display()),
+                        e,
+                    ));
+                }
             }
-            let Ok(mut file) = std::fs::OpenOptions::new()
+            let mut file = match std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
                 .open(&lock_path)
-            else {
-                continue;
+            {
+                Ok(file) => file,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    return Err(Error::io(
+                        format!("opening lockfile {}", lock_path.display()),
+                        e,
+                    ));
+                }
             };
             match FileExt::try_lock(&file) {
                 Ok(()) => {
@@ -717,11 +735,26 @@ impl App {
                     });
                     let _ = FileExt::unlock(&file);
                     drop(file);
-                    if !pid_alive && std::fs::remove_file(&lock_path).is_ok() {
-                        actions.push(format!("removed stale lockfile {}", lock_path.display()));
+                    if pid_alive {
+                        continue;
+                    }
+                    match std::fs::remove_file(&lock_path) {
+                        Ok(()) => {
+                            actions.push(format!("removed stale lockfile {}", lock_path.display()));
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => {
+                            return Err(Error::io(
+                                format!("removing stale lockfile {}", lock_path.display()),
+                                e,
+                            ));
+                        }
                     }
                 }
-                Err(TryLockError::WouldBlock) | Err(TryLockError::Error(_)) => {}
+                Err(TryLockError::WouldBlock) => {}
+                Err(TryLockError::Error(e)) => {
+                    return Err(Error::io(format!("locking {}", lock_path.display()), e));
+                }
             }
         }
 

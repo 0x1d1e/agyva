@@ -35,8 +35,11 @@ const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
 const SE_DACL_PRESENT: u16 = 0x0004;
 const SE_DACL_PROTECTED: u16 = 0x1000;
 const FILE_ALL_ACCESS: u32 = 0x001F_01FF;
+const GENERIC_ALL: u32 = 0x1000_0000;
 const SET_ACCESS: i32 = 2;
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+const OBJECT_INHERIT_ACE: u32 = 0x1;
+const CONTAINER_INHERIT_ACE: u32 = 0x2;
 const INHERITED_ACE: u8 = 0x10;
 
 fn wide_path(path: &Path) -> Vec<u16> {
@@ -78,11 +81,12 @@ fn file_id(path: &Path) -> io::Result<(u32, u64)> {
 pub fn restrict_to_current_user(path: &Path) -> io::Result<()> {
     let sid = current_user_sid()?;
     let wide = wide_path(path);
+    let (permissions, inheritance) = dacl_entry(path)?;
     let mut acl = ptr::null_mut();
     let mut entry = EXPLICIT_ACCESS_W {
-        grfAccessPermissions: FILE_ALL_ACCESS,
+        grfAccessPermissions: permissions,
         grfAccessMode: SET_ACCESS,
-        grfInheritance: 0,
+        grfInheritance: inheritance,
         Trustee: TRUSTEE_W {
             pMultipleTrustee: ptr::null_mut(),
             MultipleTrusteeOperation: 0,
@@ -119,6 +123,40 @@ pub fn restrict_to_current_user(path: &Path) -> io::Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Mask and inheritance for one user-only allow ACE.
+///
+/// `FILE_ALL_ACCESS` (`0x001F01FF`) already includes the directory rights
+/// (`FILE_LIST_DIRECTORY`, `FILE_TRAVERSE`, `FILE_DELETE_CHILD`). It is a
+/// usable directory mask. `SetEntriesInAclW` does not convert, interpret, or
+/// validate the access-mask bits. `GENERIC_ALL` is stored as given. Neither
+/// that call nor `SetNamedSecurityInfoW` maps it onto the directory.
+///
+/// The child denial is propagation. `SetNamedSecurityInfoW` propagates
+/// inheritable ACEs to existing children. Removing an inheritable ACE removes
+/// those copies. If that removes every ACE, the child is left an empty DACL,
+/// which denies access. `create_private_dir` does not protect the directory,
+/// so `quota.lock` is created with only inherited ACEs. `grfInheritance == 0`
+/// is not copied to children, so those ACEs are removed and not replaced.
+/// `OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE` is the fix because that ACE is
+/// copied onto the existing child. Files have no children; they keep
+/// `FILE_ALL_ACCESS` with no inherit flags.
+fn dacl_entry(path: &Path) -> io::Result<(u32, u32)> {
+    let meta = std::fs::metadata(path).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "reading {} before setting a user-only ACL: {e}",
+                path.display()
+            ),
+        )
+    })?;
+    if meta.is_dir() {
+        Ok((GENERIC_ALL, OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE))
+    } else {
+        Ok((FILE_ALL_ACCESS, 0))
+    }
 }
 
 pub fn acl_status(path: &Path) -> PrivateAcl {
@@ -211,6 +249,11 @@ fn inspect_dacl(
                 path.display()
             )));
         }
+        // Object/container inherit (0x1/0x2) mark an explicit ACE as
+        // inheritable. That is not INHERITED_ACE (0x10), which means the ACE
+        // was copied from a parent. An inheritable allow for this user is
+        // still user-only. A copied ACE, a non-allow ACE, or any other SID
+        // is not: the caller must replace it with an explicit protected DACL.
         if ace_flags & INHERITED_ACE != 0 || ace_type != ACCESS_ALLOWED_ACE_TYPE {
             return Ok(PrivateAcl::Shared(format!(
                 "{} DACL is not limited to the current user",
@@ -288,4 +331,31 @@ fn current_user_sid() -> io::Result<SidBuf> {
         return Err(os_error("copying the process user SID"));
     }
     Ok(SidBuf(sid))
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restrict_directory_keeps_existing_child_readable_and_removable() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = dir.path().join("child.txt");
+        std::fs::write(&child, b"kept").unwrap();
+
+        restrict_to_current_user(dir.path()).unwrap();
+
+        assert_eq!(std::fs::read(&child).unwrap(), b"kept");
+        let listed = std::fs::read_dir(dir.path())
+            .unwrap()
+            .collect::<io::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(listed.len(), 1, "directory listing still works");
+        std::fs::remove_file(&child).unwrap();
+        assert!(!child.exists(), "existing child can be deleted");
+        assert!(
+            matches!(acl_status(dir.path()), PrivateAcl::UserOnly),
+            "inheritable allow for the current user stays user-only"
+        );
+    }
 }
