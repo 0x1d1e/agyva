@@ -14,16 +14,13 @@ use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::ptr;
 
-use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, LocalFree, ERROR_SUCCESS, HANDLE,
-};
+use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, GetLastError, HANDLE, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
-    GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W,
-    TRUSTEE_W,
+    EXPLICIT_ACCESS_W, GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{EqualSid, GetSecurityDescriptorControl, GetTokenInformation};
 use windows_sys::Win32::Storage::FileSystem::{
-    GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 

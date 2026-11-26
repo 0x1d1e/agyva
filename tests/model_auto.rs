@@ -85,10 +85,7 @@ fn once(app: &agyva::core::app::App, family: ModelFamily) -> ModelAutoOnce {
 }
 
 fn assert_no_restart_claim(text: &str) {
-    assert!(
-        !text.to_ascii_lowercase().contains("no restart"),
-        "{text}"
-    );
+    assert!(!text.to_ascii_lowercase().contains("no restart"), "{text}");
 }
 
 #[test]
@@ -204,7 +201,11 @@ fn second_once_inside_cooldown_does_not_switch() {
     assert_eq!(first.target.as_deref(), Some("bob"));
     let second = once(&app, ModelFamily::Gemini);
     assert!(!second.switched, "{second:?}");
-    assert!(second.message.contains("cooling down"), "{}", second.message);
+    assert!(
+        second.message.contains("cooling down"),
+        "{}",
+        second.message
+    );
     assert!(second.restart_notice.is_none());
     assert_eq!(rig.live_id(), Some(id_of(BOB)));
 }
@@ -234,14 +235,8 @@ fn missing_family_does_not_invent_a_percent() {
 #[test]
 fn command_parses_model_case_insensitively() {
     use clap::Parser as _;
-    let cli = agyva::cli::Cli::try_parse_from([
-        "agyva",
-        "auto",
-        "--once",
-        "--model",
-        "GEMINI",
-    ])
-    .unwrap();
+    let cli =
+        agyva::cli::Cli::try_parse_from(["agyva", "auto", "--once", "--model", "GEMINI"]).unwrap();
     match cli.command {
         Some(agyva::cli::Command::Auto(args)) => {
             assert!(args.once);
@@ -335,11 +330,7 @@ fn binary_once_switches_and_prints_the_restart_notice() {
             ..Default::default()
         },
     );
-    std::fs::write(
-        p("cache/quota.json"),
-        serde_json::to_vec(&cache).unwrap(),
-    )
-    .unwrap();
+    std::fs::write(p("cache/quota.json"), serde_json::to_vec(&cache).unwrap()).unwrap();
 
     let (code, out, err) = run(&["auto", "--once", "--model", "gemini"]);
     assert_eq!(code, 0, "{out}{err}");

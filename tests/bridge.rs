@@ -715,12 +715,18 @@ fn local_token_rejects_missing_or_wrong_bearer_and_does_not_forward() {
     let missing = raw_request(addr, &chat(None));
     assert!(missing.starts_with("HTTP/1.1 401"), "{missing}");
     assert!(!missing.contains("bridge-local-token"));
-    assert!(upstream.take_calls().is_empty(), "missing token was forwarded");
+    assert!(
+        upstream.take_calls().is_empty(),
+        "missing token was forwarded"
+    );
 
     let wrong = raw_request(addr, &chat(Some("Authorization: Bearer wrong-token")));
     assert!(wrong.starts_with("HTTP/1.1 401"), "{wrong}");
     assert!(!wrong.contains("bridge-local-token"));
-    assert!(upstream.take_calls().is_empty(), "wrong token was forwarded");
+    assert!(
+        upstream.take_calls().is_empty(),
+        "wrong token was forwarded"
+    );
 
     let options = raw_request(
         addr,

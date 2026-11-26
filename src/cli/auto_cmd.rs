@@ -4,15 +4,15 @@
 //! cycle overrides as `watch`, and only when test mode is on, so a real run
 //! does not hammer the quota endpoint.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use chrono::Utc;
 
-use super::commands::{print_json, w};
 use super::Io;
+use super::commands::{print_json, w};
 use crate::core::app::App;
 use crate::core::error::{Error, Result, exit};
 use crate::core::failpoint::ENV_TEST_MODE;
@@ -77,10 +77,9 @@ fn write_human(io: &mut Io<'_>, result: &ModelAutoOnce) -> Result<()> {
 fn cycle_limit(env: &Env) -> Result<Option<u64>> {
     match env.get(ENV_MAX_CYCLES) {
         None => Ok(None),
-        Some(v) => Ok(Some(
-            v.parse::<u64>()
-                .map_err(|_| Error::usage(format!("invalid {ENV_MAX_CYCLES}: {v}")))?,
-        )),
+        Some(v) => Ok(Some(v.parse::<u64>().map_err(|_| {
+            Error::usage(format!("invalid {ENV_MAX_CYCLES}: {v}"))
+        })?)),
     }
 }
 
@@ -96,9 +95,7 @@ fn resolve_interval(env: &Env) -> Result<Duration> {
             Ok(Duration::from_millis(ms))
         }
         Some(_) => {
-            tracing::warn!(
-                "ignoring {ENV_INTERVAL_MS}: it needs {ENV_TEST_MODE}=1 as well"
-            );
+            tracing::warn!("ignoring {ENV_INTERVAL_MS}: it needs {ENV_TEST_MODE}=1 as well");
             Ok(DEFAULT_INTERVAL)
         }
         None => Ok(DEFAULT_INTERVAL),

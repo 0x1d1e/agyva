@@ -121,7 +121,11 @@ struct Candidate {
 impl App {
     /// One evaluation. Live-reads the active account, then may switch through
     /// the journaled `use` path. Standby accounts are cache only.
-    pub fn model_auto_once(&self, family: ModelFamily, now: DateTime<Utc>) -> Result<ModelAutoOnce> {
+    pub fn model_auto_once(
+        &self,
+        family: ModelFamily,
+        now: DateTime<Utc>,
+    ) -> Result<ModelAutoOnce> {
         self.require_no_pending()?;
         let refreshed = self.refresh_active(true)?;
         if !matches!(refreshed.status, RefreshStatus::Refreshed) {
@@ -167,10 +171,7 @@ impl App {
         let Some(candidate) = self.best_candidate(family, active, now)? else {
             return Ok(ModelAutoOnce::hold(
                 family,
-                format!(
-                    "no eligible account for {}; not switching",
-                    family.label()
-                ),
+                format!("no eligible account for {}; not switching", family.label()),
             ));
         };
         // Recheck under the login lock so a manual `use` that landed while
@@ -191,10 +192,7 @@ impl App {
         if outcome.already_active {
             return Ok(ModelAutoOnce::hold(
                 family,
-                format!(
-                    "{} is already active; not switching",
-                    outcome.account.alias
-                ),
+                format!("{} is already active; not switching", outcome.account.alias),
             ));
         }
         let mut warnings = outcome.warnings;
@@ -329,7 +327,10 @@ mod tests {
         assert_eq!(family_remaining(&groups, ModelFamily::Gemini), Some(8.0));
         assert_eq!(family_remaining(&groups, ModelFamily::Claude), None);
         assert_eq!(
-            family_remaining(&[group("Claude Opus", false, Some(10.0), Some(4.0))], ModelFamily::Claude),
+            family_remaining(
+                &[group("Claude Opus", false, Some(10.0), Some(4.0))],
+                ModelFamily::Claude
+            ),
             Some(4.0)
         );
     }

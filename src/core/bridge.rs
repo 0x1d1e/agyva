@@ -473,7 +473,8 @@ fn read_http_request(
 
 fn bearer_matches(headers: &[(String, String)], expected: &str) -> bool {
     let Some(presented) = headers.iter().find_map(|(name, value)| {
-        name.eq_ignore_ascii_case("authorization").then_some(value.as_str())
+        name.eq_ignore_ascii_case("authorization")
+            .then_some(value.as_str())
     }) else {
         return false;
     };

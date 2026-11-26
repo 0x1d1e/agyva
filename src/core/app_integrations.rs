@@ -385,10 +385,7 @@ impl App {
                 still.push(format!("agy settings ({})", keys.join(", ")));
             }
             Ok(_) => {}
-            Err(e) => still.push(format!(
-                "agy settings (could not re-read: {})",
-                e.message()
-            )),
+            Err(e) => still.push(format!("agy settings (could not re-read: {})", e.message())),
         }
         match EndpointRegistry::load(&ep_path) {
             Ok(reg) => {

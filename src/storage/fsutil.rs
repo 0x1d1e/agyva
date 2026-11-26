@@ -117,11 +117,15 @@ pub fn sync_dir(dir: &Path) -> io::Result<()> {
 #[cfg(windows)]
 fn sync_dir_windows(dir: &Path) -> io::Result<()> {
     use std::os::windows::fs::OpenOptionsExt;
-    // FILE_FLAG_BACKUP_SEMANTICS: open a directory handle so FlushFileBuffers
-    // can make the preceding rename durable.
+    // A read-only directory handle makes FlushFileBuffers return ERROR_ACCESS_DENIED.
+    // Write access is required, and the handle must not lock the directory.
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_SHARE_DELETE: u32 = 0x0000_0004;
     let file = OpenOptions::new()
-        .read(true)
+        .write(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(dir)?;
     file.sync_all()

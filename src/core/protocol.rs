@@ -768,7 +768,10 @@ pub(crate) fn reject_redirect(current: &str, next: &str) -> std::result::Result<
         .map_err(|reason| format!("refusing redirect to {next}: {reason}"))
 }
 
-pub(crate) fn resolve_redirect(current: &str, location: &str) -> std::result::Result<String, String> {
+pub(crate) fn resolve_redirect(
+    current: &str,
+    location: &str,
+) -> std::result::Result<String, String> {
     let loc = location.trim();
     if loc.is_empty() || loc.contains(['\n', '\r', ' ']) {
         return Err(format!("invalid redirect Location from {current}"));
@@ -1543,23 +1546,15 @@ mod tests {
 
     #[test]
     fn redirect_refuses_scheme_downgrade_and_nonlocal_http() {
-        let err = reject_redirect(
-            "https://api.example.com/v1",
-            "http://127.0.0.1:9/v1",
-        )
-        .unwrap_err();
+        let err =
+            reject_redirect("https://api.example.com/v1", "http://127.0.0.1:9/v1").unwrap_err();
         assert!(err.contains("scheme downgrade"), "{err}");
-        let err = reject_redirect(
-            "http://127.0.0.1:9/v1",
-            "http://example.com/v1",
-        )
-        .unwrap_err();
-        assert!(err.contains("plaintext http") || err.contains("http://"), "{err}");
-        assert!(reject_redirect(
-            "https://api.example.com/v1",
-            "https://other.example/v1"
-        )
-        .is_ok());
+        let err = reject_redirect("http://127.0.0.1:9/v1", "http://example.com/v1").unwrap_err();
+        assert!(
+            err.contains("plaintext http") || err.contains("http://"),
+            "{err}"
+        );
+        assert!(reject_redirect("https://api.example.com/v1", "https://other.example/v1").is_ok());
     }
 
     #[test]
@@ -1573,20 +1568,45 @@ mod tests {
     #[test]
     fn cross_host_redirect_mock_does_not_forward_secret_headers() {
         use std::io::{Read, Write};
-        use std::net::TcpListener;
+        use std::net::{Shutdown, TcpListener, TcpStream};
         use std::sync::{Arc, Mutex};
         use std::time::Duration;
 
-        let hop = TcpListener::bind("127.0.0.1:0").unwrap();
-        let land = TcpListener::bind("127.0.0.2:0").unwrap();
-        let hop_addr = hop.local_addr().unwrap();
-        let land_addr = land.local_addr().unwrap();
+        // Dropping the socket after write_all RSTs on Windows before ureq reads.
+        fn finish_response(sock: &mut TcpStream, bytes: &[u8]) {
+            sock.write_all(bytes).expect("write mock response");
+            sock.flush().expect("flush mock response");
+            sock.shutdown(Shutdown::Write)
+                .expect("shutdown mock write side");
+            let mut drain = [0u8; 1024];
+            while sock.read(&mut drain).unwrap_or(0) > 0 {}
+        }
+
+        // 127.0.0.2 is not on macOS lo0. [::1] is a different host string and still loopback.
+        fn bind_landing() -> (TcpListener, String) {
+            if let Ok(listener) = TcpListener::bind("127.0.0.2:0") {
+                let port = listener.local_addr().expect("landing addr").port();
+                return (listener, format!("http://127.0.0.2:{port}/land"));
+            }
+            let listener = TcpListener::bind("[::1]:0").expect("bind [::1] landing listener");
+            let port = listener.local_addr().expect("landing addr").port();
+            (listener, format!("http://[::1]:{port}/land"))
+        }
+
+        let hop = TcpListener::bind("127.0.0.1:0").expect("bind hop");
+        let hop_addr = hop.local_addr().expect("hop addr");
+        let (land, land_url) = bind_landing();
+        let hop_url = format!("http://{hop_addr}/start");
+        assert!(
+            !same_host(&hop_url, &land_url),
+            "redirect stayed on the hop host: {hop_url} -> {land_url}"
+        );
         let seen_hop = Arc::new(Mutex::new(String::new()));
         let seen_land = Arc::new(Mutex::new(String::new()));
         let hop_copy = seen_hop.clone();
         let land_copy = seen_land.clone();
         let redirect = format!(
-            "HTTP/1.1 302 Found\r\nLocation: http://{land_addr}/land\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            "HTTP/1.1 302 Found\r\nLocation: {land_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         );
         std::thread::spawn(move || {
             let (mut sock, _) = hop.accept().unwrap();
@@ -1594,7 +1614,7 @@ mod tests {
             let mut buf = vec![0u8; 8192];
             let n = sock.read(&mut buf).unwrap_or(0);
             *hop_copy.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).into_owned();
-            let _ = sock.write_all(redirect.as_bytes());
+            finish_response(&mut sock, redirect.as_bytes());
         });
         std::thread::spawn(move || {
             let (mut sock, _) = land.accept().unwrap();
@@ -1602,7 +1622,8 @@ mod tests {
             let mut buf = vec![0u8; 8192];
             let n = sock.read(&mut buf).unwrap_or(0);
             *land_copy.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).into_owned();
-            let _ = sock.write_all(
+            finish_response(
+                &mut sock,
                 b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
             );
         });
@@ -1610,7 +1631,7 @@ mod tests {
         let response = UreqTransport::new()
             .request(
                 "POST",
-                &format!("http://{hop_addr}/start"),
+                &hop_url,
                 &[
                     ("Authorization".into(), "Bearer sk-live".into()),
                     ("x-api-key".into(), "ant-secret".into()),
@@ -1629,9 +1650,14 @@ mod tests {
 
         let hop_text = seen_hop.lock().unwrap().clone();
         let land_text = seen_land.lock().unwrap().clone();
-        assert!(hop_text.contains("ant-secret"), "first hop lost the key: {hop_text}");
         assert!(
-            land_text.to_ascii_lowercase().contains("accept: application/json"),
+            hop_text.contains("ant-secret"),
+            "first hop lost the key: {hop_text}"
+        );
+        assert!(
+            land_text
+                .to_ascii_lowercase()
+                .contains("accept: application/json"),
             "landing request missing: {land_text}"
         );
         for secret in [
@@ -1649,7 +1675,9 @@ mod tests {
             "X-Secret-Token",
         ] {
             assert!(
-                !land_text.to_ascii_lowercase().contains(&secret.to_ascii_lowercase()),
+                !land_text
+                    .to_ascii_lowercase()
+                    .contains(&secret.to_ascii_lowercase()),
                 "cross-host landing saw {secret}: {land_text}"
             );
         }
