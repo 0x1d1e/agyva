@@ -330,6 +330,13 @@ fn dispatch(app: &App, command: Command, io: &mut Io<'_>, st: Style, quiet: bool
         }
         Command::Watch(a) => return super::watch_cmd::watch(app, io, &a),
         Command::Monitor(a) => return super::monitor_cmd::monitor(app, io, &a),
+        Command::Auto(a) => {
+            let family = match a.model {
+                super::AutoModel::Gemini => crate::core::model_auto::ModelFamily::Gemini,
+                super::AutoModel::Claude => crate::core::model_auto::ModelFamily::Claude,
+            };
+            return super::auto_cmd::auto_cmd(app, io, family, a.once, a.json);
+        }
         Command::Models(a) => {
             let report = app.models_report(a.refresh, chrono::Utc::now())?;
             if a.json {

@@ -33,6 +33,16 @@ If `agy` holds an unsaved login, `use` refuses unless `--force` is passed (which
 
 **Restart `agy` after switching.** Running sessions keep their startup login. Exit 3 requires `agyva recover`.
 
+### Explicit rotator
+
+```sh
+agyva auto --model gemini          # foreground loop, 60s
+agyva auto --model claude --once   # one evaluation
+agyva auto --model gemini --json   # one JSON result (--json implies --once)
+```
+
+`agyva auto` live-reads the active account and switches through the same journaled path as `agyva use` when the selected family's usage is strictly over 90% (remaining under 10%; exactly 10% does not switch). Gemini matches a quota group whose name contains `gemini`; Claude matches `claude`. Disabled groups do not count. Other accounts come from cache only (not older than `auto_switch_candidate_max_age_secs`) and must not be suspended or already over the line. It does not read `routing.toml` and does not require `auto_switch_ack`. Cooldown is 300 seconds; a manual `use` still wins. A running agy keeps the login it already loaded. The command always prints the restart notice, including with `-q`. It does not claim the next message will pick up the new login. Exit 0 means switched or nothing to do; exit 3 is recovery pending, not "no candidate".
+
 ## Custom endpoints, bridge, env, and exec
 
 ```sh
@@ -64,7 +74,7 @@ agyva env --endpoint openai --shell bash
 agyva exec --endpoint openai --bridge -- my-tool --flag
 ```
 
-- **`agyva bridge`:** Synchronous loopback HTTP/1.1 bridge (default `--listen 127.0.0.1:0`, optional `--port`, `--local-token-env <VAR>`). Accepts OpenAI Chat (`/v1/chat/completions`), Anthropic Messages (`/v1/messages`), Gemini (`/v1beta/models/{model}:generateContent`, `:streamGenerateContent`), and model-listing routes (`/v1/models`, `/v1beta/models`, `/api/tags`).
+- **`agyva bridge`:** Synchronous loopback HTTP/1.1 bridge (default `--listen 127.0.0.1:0`, optional `--port`). Accepts OpenAI Chat (`/v1/chat/completions`), Anthropic Messages (`/v1/messages`), Gemini (`/v1beta/models/{model}:generateContent`, `:streamGenerateContent`), and model-listing routes (`/v1/models`, `/v1beta/models`, `/api/tags`). `--local-token-env <VAR>` is enforced: every non-OPTIONS request must send `Authorization: Bearer <value>` or the bridge returns 401 and does not forward. OPTIONS stays unauthenticated and is not forwarded. Omit the flag for today's loopback-only open access.
 - **`agyva env`:** Prints shell exports (`--shell bash|zsh|fish|powershell|dotenv`) for `--endpoint`, `--profile` (or active profile/endpoint), `--model`, and `--bridge-url`.
 - **`agyva exec`:** Injects resolved profile, account (`AGYVA_ACCOUNT`, `AGYVA_ACCOUNT_ID`), and endpoint env vars into `-- <COMMAND> [ARGS...]`. `--bridge` runs an ephemeral `127.0.0.1:0` bridge for the child lifetime.
 
@@ -203,7 +213,7 @@ Off by default. Requires both `auto_switch = true` on the group and `agyva confi
 ```sh
 agyva status          # alias: st
 agyva doctor          # read-only diagnostics
-agyva doctor --fix    # safe repairs: 0700/0600 modes, missing dirs, stale locks
+agyva doctor --fix    # safe repairs: 0700/0600 on Unix, user-only ACL on Windows, missing dirs, stale locks
 agyva recover         # --rollback, --force
 ```
 

@@ -836,15 +836,22 @@ pub fn handle_bridge(app: &App, args: BridgeArgs, io: &mut Io<'_>) -> Result<i32
     if let Some(port) = args.port {
         bind_addr.set_port(port);
     }
-    if let Some(ref token_var) = args.local_token_env
-        && app.env.get(token_var).is_none()
-    {
-        return Err(Error::usage(format!(
-            "environment variable `{token_var}` is not set"
-        )));
-    }
+    let local_token = if let Some(ref token_var) = args.local_token_env {
+        let value = app.env.get(token_var).ok_or_else(|| {
+            Error::usage(format!("environment variable `{token_var}` is not set"))
+        })?;
+        if value.is_empty() {
+            return Err(Error::usage(format!(
+                "environment variable `{token_var}` is empty"
+            )));
+        }
+        Some(Zeroizing::new(value.to_owned()))
+    } else {
+        None
+    };
 
-    let target = app.bridge_target_for_endpoint(&args.endpoint)?;
+    let mut target = app.bridge_target_for_endpoint(&args.endpoint)?;
+    target.local_token = local_token;
     let proto = target.protocol;
     let mut handle = start_bridge(bind_addr, target, app.http_transport())?;
     let base_url = handle.base_url();

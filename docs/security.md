@@ -6,7 +6,7 @@
 
 ## Policy
 
-`agyva` is a **manual** account switcher by default. It switches only on `agyva use` (or TUI confirmation), unless you explicitly opt a routing group into auto-switch. It never retries on quota errors or bypasses limits. Google's [Antigravity FAQ](https://antigravity.google/docs/faq/) states third-party tools and account rotation are unsupported on consumer plans; the first `add` or `use` prints this notice (`policy_acknowledged` in `config.toml`).
+`agyva` is a **manual** account switcher by default. The normal switch is `agyva use` (or TUI confirmation). `agyva auto --model gemini|claude` is the explicit rotator for one model family when that family's usage is over 90%; it does not bypass suspensions or usage limits, and a running agy keeps the login it already loaded (restart agy). A routing group can still opt into monitor auto-switch separately. It never retries on quota errors or bypasses limits. Google's [Antigravity FAQ](https://antigravity.google/docs/faq/) states third-party tools and account rotation are unsupported on consumer plans; the first `add` or `use` prints this notice (`policy_acknowledged` in `config.toml`).
 
 `agyva` does not run its own OAuth client, call private Google endpoints, or spoof User-Agents. After switching, **restart `agy`**; running sessions keep their startup login and `agyva` never kills processes.
 

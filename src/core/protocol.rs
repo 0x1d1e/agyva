@@ -19,6 +19,9 @@ const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_AZURE_API_VERSION: &str = "2024-10-21";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Hops we will follow ourselves. ureq must not follow: it strips only
+/// `Authorization` and would send API-key and secret headers to the next host.
+const MAX_REDIRECTS: u8 = 3;
 
 /// Supported LLM endpoint wire protocols.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -538,16 +541,65 @@ impl UreqTransport {
         body: Option<&[u8]>,
         timeout: Duration,
     ) -> std::result::Result<ureq::http::Response<ureq::Body>, TransportError> {
+        let mut method = method.to_owned();
+        let mut url = url.to_owned();
+        let mut headers = headers.to_vec();
+        let mut body = body.map(|b| b.to_vec());
+        for hop in 0..=MAX_REDIRECTS {
+            let response = self.send_once(&method, &url, &headers, body.as_deref(), timeout)?;
+            let status = response.status().as_u16();
+            if !is_redirect(status) {
+                return Ok(response);
+            }
+            if hop == MAX_REDIRECTS {
+                return Err(TransportError::Refused(format!(
+                    "refusing to follow more than {MAX_REDIRECTS} redirects from {url}"
+                )));
+            }
+            let location = response
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    TransportError::Refused(format!("redirect from {url} has no Location"))
+                })?
+                .to_owned();
+            drop(response);
+            let next = resolve_redirect(&url, &location).map_err(TransportError::Refused)?;
+            reject_redirect(&url, &next).map_err(TransportError::Refused)?;
+            headers = headers_after_redirect(&headers, same_host(&url, &next));
+            if redirect_drops_body(status, &method) {
+                method = "GET".into();
+                body = None;
+                headers.retain(|(name, _)| !name.eq_ignore_ascii_case("content-type"));
+            }
+            url = next;
+        }
+        Err(TransportError::Refused(
+            "refusing to follow another redirect".into(),
+        ))
+    }
+
+    fn send_once(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: Option<&[u8]>,
+        timeout: Duration,
+    ) -> std::result::Result<ureq::http::Response<ureq::Body>, TransportError> {
         let is_local = validate_endpoint_url(url).map_err(TransportError::Refused)?;
         let http_method = ureq::http::Method::from_bytes(method.as_bytes())
             .map_err(|e| TransportError::Refused(format!("invalid HTTP method: {e}")))?;
-
+        // max_redirects(0) is the control. A later history check cannot
+        // unsend headers ureq already forwarded.
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(timeout))
             .https_only(!is_local)
             .http_status_as_error(false)
-            .max_redirects(if is_local { 0 } else { 3 })
-            .save_redirect_history(true)
+            .max_redirects(0)
             .build();
         let agent: ureq::Agent = config.into();
 
@@ -577,16 +629,6 @@ impl UreqTransport {
             ureq::Error::Timeout(_) => TransportError::Timeout(e.to_string()),
             other => TransportError::Network(other.to_string()),
         })?;
-
-        if let Some(history) = <dyn ureq::ResponseExt>::get_redirect_history(&response) {
-            for hop in history.iter().skip(1) {
-                let hop_str = hop.to_string();
-                validate_endpoint_url(&hop_str).map_err(|reason| {
-                    TransportError::Refused(format!("unsafe redirect target: {reason}"))
-                })?;
-            }
-        }
-
         Ok(response)
     }
 }
@@ -648,6 +690,114 @@ fn collect_headers(map: &ureq::http::HeaderMap) -> Vec<(String, String)> {
                 .map(|val| (k.as_str().to_owned(), val.to_owned()))
         })
         .collect()
+}
+
+fn is_redirect(status: u16) -> bool {
+    matches!(status, 301 | 302 | 303 | 307 | 308)
+}
+
+/// 303 always becomes GET. 301/302 drop a non-GET/HEAD body so a POST is not
+/// replayed. 307/308 keep the method and body.
+fn redirect_drops_body(status: u16, method: &str) -> bool {
+    match status {
+        303 => true,
+        301 | 302 => !method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("HEAD"),
+        _ => false,
+    }
+}
+
+/// Headers that are not credentials. A host change keeps only these, so a
+/// new secret-header name cannot ride along. Same-host redirects keep the
+/// caller's headers, including auth.
+fn cross_host_safe(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "accept" | "content-type" | "user-agent" | "anthropic-version"
+    )
+}
+
+pub(crate) fn headers_after_redirect(
+    headers: &[(String, String)],
+    same_host: bool,
+) -> Vec<(String, String)> {
+    if same_host {
+        headers.to_vec()
+    } else {
+        headers
+            .iter()
+            .filter(|(name, _)| cross_host_safe(name))
+            .cloned()
+            .collect()
+    }
+}
+
+fn same_host(current: &str, next: &str) -> bool {
+    match (url_scheme_host(current), url_scheme_host(next)) {
+        (Ok((_, a)), Ok((_, b))) => a.eq_ignore_ascii_case(&b),
+        _ => false,
+    }
+}
+
+fn url_scheme_host(url: &str) -> std::result::Result<(String, String), String> {
+    let uri = url
+        .parse::<ureq::http::Uri>()
+        .map_err(|e| format!("invalid URL `{url}`: {e}"))?;
+    let scheme = uri
+        .scheme_str()
+        .ok_or_else(|| format!("URL `{url}` has no scheme"))?
+        .to_ascii_lowercase();
+    let host = uri
+        .host()
+        .ok_or_else(|| format!("URL `{url}` has no host"))?
+        .to_ascii_lowercase();
+    Ok((scheme, host))
+}
+
+/// Refuse a scheme downgrade and anything [`validate_endpoint_url`] refuses,
+/// including non-local `http`. Called before the next request is sent.
+pub(crate) fn reject_redirect(current: &str, next: &str) -> std::result::Result<(), String> {
+    let (cur_scheme, _) = url_scheme_host(current)?;
+    let (next_scheme, _) = url_scheme_host(next)?;
+    if cur_scheme == "https" && next_scheme != "https" {
+        return Err(format!(
+            "refusing scheme downgrade from {current} to {next}"
+        ));
+    }
+    validate_endpoint_url(next)
+        .map(|_| ())
+        .map_err(|reason| format!("refusing redirect to {next}: {reason}"))
+}
+
+pub(crate) fn resolve_redirect(current: &str, location: &str) -> std::result::Result<String, String> {
+    let loc = location.trim();
+    if loc.is_empty() || loc.contains(['\n', '\r', ' ']) {
+        return Err(format!("invalid redirect Location from {current}"));
+    }
+    if loc.contains("://") {
+        return Ok(loc.to_owned());
+    }
+    let base: ureq::http::Uri = current
+        .parse()
+        .map_err(|e| format!("invalid URL `{current}`: {e}"))?;
+    let scheme = base
+        .scheme_str()
+        .ok_or_else(|| format!("URL `{current}` has no scheme"))?;
+    let authority = base
+        .authority()
+        .ok_or_else(|| format!("URL `{current}` has no host"))?;
+    if loc.starts_with("//") {
+        return Ok(format!("{scheme}:{loc}"));
+    }
+    let origin = format!("{scheme}://{authority}");
+    if loc.starts_with('/') {
+        return Ok(format!("{origin}{loc}"));
+    }
+    let path = base.path();
+    let dir = match path.rsplit_once('/') {
+        Some((d, _)) if !d.is_empty() => d,
+        _ => "",
+    };
+    Ok(format!("{origin}{dir}/{loc}"))
 }
 
 /// Validate that `url` is `https://` (any non-userinfo host) or `http://`
@@ -1359,6 +1509,149 @@ mod tests {
             "cohere",
         ] {
             assert!(find_preset(name).is_some(), "missing preset {name}");
+        }
+    }
+
+    #[test]
+    fn cross_host_redirect_drops_every_secret_header() {
+        let headers = vec![
+            ("Authorization".into(), "Bearer sk-live".into()),
+            ("x-api-key".into(), "ant-secret".into()),
+            ("x-goog-api-key".into(), "goog-secret".into()),
+            ("api-key".into(), "azure-secret".into()),
+            ("X-Custom-Auth".into(), "custom-secret".into()),
+            ("X-Secret-Token".into(), "hdr-secret".into()),
+            ("anthropic-version".into(), "2023-06-01".into()),
+            ("Accept".into(), "application/json".into()),
+        ];
+        let kept = headers_after_redirect(&headers, false);
+        let names: Vec<String> = kept.iter().map(|(n, _)| n.to_ascii_lowercase()).collect();
+        assert_eq!(names, vec!["anthropic-version", "accept"]);
+        let blob = format!("{kept:?}");
+        for secret in [
+            "sk-live",
+            "ant-secret",
+            "goog-secret",
+            "azure-secret",
+            "custom-secret",
+            "hdr-secret",
+        ] {
+            assert!(!blob.contains(secret), "leaked {secret}");
+        }
+        assert_eq!(headers_after_redirect(&headers, true).len(), headers.len());
+    }
+
+    #[test]
+    fn redirect_refuses_scheme_downgrade_and_nonlocal_http() {
+        let err = reject_redirect(
+            "https://api.example.com/v1",
+            "http://127.0.0.1:9/v1",
+        )
+        .unwrap_err();
+        assert!(err.contains("scheme downgrade"), "{err}");
+        let err = reject_redirect(
+            "http://127.0.0.1:9/v1",
+            "http://example.com/v1",
+        )
+        .unwrap_err();
+        assert!(err.contains("plaintext http") || err.contains("http://"), "{err}");
+        assert!(reject_redirect(
+            "https://api.example.com/v1",
+            "https://other.example/v1"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn relative_redirect_stays_on_the_current_origin() {
+        assert_eq!(
+            resolve_redirect("http://127.0.0.1:9/start", "/land").unwrap(),
+            "http://127.0.0.1:9/land"
+        );
+    }
+
+    #[test]
+    fn cross_host_redirect_mock_does_not_forward_secret_headers() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        let hop = TcpListener::bind("127.0.0.1:0").unwrap();
+        let land = TcpListener::bind("127.0.0.2:0").unwrap();
+        let hop_addr = hop.local_addr().unwrap();
+        let land_addr = land.local_addr().unwrap();
+        let seen_hop = Arc::new(Mutex::new(String::new()));
+        let seen_land = Arc::new(Mutex::new(String::new()));
+        let hop_copy = seen_hop.clone();
+        let land_copy = seen_land.clone();
+        let redirect = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://{land_addr}/land\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        std::thread::spawn(move || {
+            let (mut sock, _) = hop.accept().unwrap();
+            let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut buf = vec![0u8; 8192];
+            let n = sock.read(&mut buf).unwrap_or(0);
+            *hop_copy.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).into_owned();
+            let _ = sock.write_all(redirect.as_bytes());
+        });
+        std::thread::spawn(move || {
+            let (mut sock, _) = land.accept().unwrap();
+            let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut buf = vec![0u8; 8192];
+            let n = sock.read(&mut buf).unwrap_or(0);
+            *land_copy.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).into_owned();
+            let _ = sock.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+            );
+        });
+
+        let response = UreqTransport::new()
+            .request(
+                "POST",
+                &format!("http://{hop_addr}/start"),
+                &[
+                    ("Authorization".into(), "Bearer sk-live".into()),
+                    ("x-api-key".into(), "ant-secret".into()),
+                    ("x-goog-api-key".into(), "goog-secret".into()),
+                    ("api-key".into(), "azure-secret".into()),
+                    ("X-Custom-Auth".into(), "custom-secret".into()),
+                    ("X-Secret-Token".into(), "hdr-secret".into()),
+                    ("Accept".into(), "application/json".into()),
+                ],
+                Some(b"{}"),
+                Duration::from_secs(3),
+            )
+            .expect("followed the local redirect");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"ok");
+
+        let hop_text = seen_hop.lock().unwrap().clone();
+        let land_text = seen_land.lock().unwrap().clone();
+        assert!(hop_text.contains("ant-secret"), "first hop lost the key: {hop_text}");
+        assert!(
+            land_text.to_ascii_lowercase().contains("accept: application/json"),
+            "landing request missing: {land_text}"
+        );
+        for secret in [
+            "sk-live",
+            "ant-secret",
+            "goog-secret",
+            "azure-secret",
+            "custom-secret",
+            "hdr-secret",
+            "Authorization",
+            "x-api-key",
+            "x-goog-api-key",
+            "api-key",
+            "X-Custom-Auth",
+            "X-Secret-Token",
+        ] {
+            assert!(
+                !land_text.to_ascii_lowercase().contains(&secret.to_ascii_lowercase()),
+                "cross-host landing saw {secret}: {land_text}"
+            );
         }
     }
 }

@@ -72,6 +72,28 @@ impl Collector {
     }
 }
 
+pub(crate) fn permission_ok_detail(windows: bool) -> &'static str {
+    if windows {
+        "user-only ACLs on directories and files"
+    } else {
+        "private directories (0700) and files (0600)"
+    }
+}
+
+#[cfg(windows)]
+fn apply_user_acl(path: &Path, actions: &mut Vec<String>) -> Result<()> {
+    match fsutil::private_acl_status(path) {
+        fsutil::PrivateAcl::UserOnly => Ok(()),
+        fsutil::PrivateAcl::Shared(_) | fsutil::PrivateAcl::Unchecked(_) => {
+            fsutil::restrict_private_acl(path).map_err(|e| {
+                Error::io(format!("setting a user-only ACL on {}", path.display()), e)
+            })?;
+            actions.push(format!("set user-only ACL on {}", path.display()));
+            Ok(())
+        }
+    }
+}
+
 fn perm_problems(path: &Path, want: u32) -> Option<String> {
     let mode = fsutil::mode_of(path)?;
     (mode & 0o077 != 0 || mode != want).then(|| {
@@ -198,6 +220,21 @@ impl App {
     }
 
     fn check_permissions(&self, c: &mut Collector) {
+        #[cfg(unix)]
+        self.check_unix_modes(c);
+        #[cfg(windows)]
+        self.check_windows_acls(c);
+        #[cfg(not(any(unix, windows)))]
+        c.add(
+            "permissions",
+            Level::Info,
+            "not checked",
+            Some("permission checks are not available on this platform"),
+        );
+    }
+
+    #[cfg(unix)]
+    fn check_unix_modes(&self, c: &mut Collector) {
         let mut problems = Vec::new();
         let endpoints_dir = endpoints::secrets_dir(&self.dirs);
         for d in [
@@ -228,7 +265,7 @@ impl App {
             problems.extend(perm_problems(f, fsutil::PRIVATE_FILE_MODE));
         }
         if problems.is_empty() {
-            c.ok("permissions", "private directories (0700) and files (0600)");
+            c.ok("permissions", permission_ok_detail(false));
         } else {
             c.add(
                 "permissions",
@@ -237,6 +274,63 @@ impl App {
                 Some("run `agyva doctor --fix` (or chmod 700 on dirs and 600 on files)"),
             );
         }
+    }
+
+    #[cfg(windows)]
+    fn check_windows_acls(&self, c: &mut Collector) {
+        let mut shared = Vec::new();
+        let mut unchecked = Vec::new();
+        for path in self.permission_paths() {
+            if !path.exists() {
+                continue;
+            }
+            match fsutil::private_acl_status(&path) {
+                fsutil::PrivateAcl::UserOnly => {}
+                fsutil::PrivateAcl::Shared(detail) => shared.push(detail),
+                fsutil::PrivateAcl::Unchecked(detail) => unchecked.push(detail),
+            }
+        }
+        if !shared.is_empty() {
+            c.add(
+                "permissions",
+                Level::Warn,
+                shared.join("; "),
+                Some("run `agyva doctor --fix` to set a user-only ACL"),
+            );
+        } else if !unchecked.is_empty() {
+            c.add(
+                "permissions",
+                Level::Info,
+                "not checked",
+                Some("the Windows ACL could not be read"),
+            );
+        } else {
+            c.ok("permissions", permission_ok_detail(true));
+        }
+    }
+
+    #[cfg(windows)]
+    fn permission_paths(&self) -> Vec<std::path::PathBuf> {
+        let endpoints_dir = endpoints::secrets_dir(&self.dirs);
+        let mut paths = vec![
+            self.dirs.config.clone(),
+            self.dirs.state.clone(),
+            self.dirs.cache.clone(),
+            self.dirs.accounts_dir(),
+            endpoints_dir.clone(),
+            self.dirs.registry_file(),
+            self.dirs.vault_meta_file(),
+            endpoints::registry_file(&self.dirs),
+            profile::profiles_file(&self.dirs),
+        ];
+        paths.extend(
+            fsutil::list_with_extension(&self.dirs.accounts_dir(), "snap").unwrap_or_default(),
+        );
+        paths.extend(fsutil::list_with_extension(&endpoints_dir, "snap").unwrap_or_default());
+        paths.extend(
+            fsutil::list_with_extension(&self.dirs.checkpoint_dir(), "ckpt").unwrap_or_default(),
+        );
+        paths
     }
 
     fn check_endpoints(&self, c: &mut Collector) {
@@ -541,6 +635,10 @@ impl App {
                         actions.push(format!("set mode 0700 on {}", dir.display()));
                     }
                 }
+                #[cfg(windows)]
+                {
+                    apply_user_acl(dir, &mut actions)?;
+                }
             }
         }
 
@@ -574,7 +672,11 @@ impl App {
                     actions.push(format!("set mode 0600 on {}", file.display()));
                 }
             }
-            #[cfg(not(unix))]
+            #[cfg(windows)]
+            {
+                apply_user_acl(&file, &mut actions)?;
+            }
+            #[cfg(not(any(unix, windows)))]
             let _ = file;
         }
 
@@ -629,5 +731,24 @@ impl App {
             actions,
             report,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::permission_ok_detail;
+
+    #[test]
+    fn permission_ok_does_not_claim_unix_modes_on_windows() {
+        assert_eq!(
+            permission_ok_detail(true),
+            "user-only ACLs on directories and files"
+        );
+        assert!(!permission_ok_detail(true).contains("0600"));
+        assert!(!permission_ok_detail(true).contains("0700"));
+        assert_eq!(
+            permission_ok_detail(false),
+            "private directories (0700) and files (0600)"
+        );
     }
 }

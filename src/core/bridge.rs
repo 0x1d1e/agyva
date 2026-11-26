@@ -45,6 +45,9 @@ pub struct BridgeTarget {
     pub extra_headers: BTreeMap<String, String>,
     pub secret_headers: BTreeMap<String, String>,
     pub cached_models: Vec<FetchedModel>,
+    /// When set, every non-OPTIONS request must present this bearer token.
+    /// `None` keeps the loopback-only open behavior.
+    pub local_token: Option<Zeroizing<String>>,
 }
 
 impl BridgeTarget {
@@ -65,6 +68,7 @@ impl BridgeTarget {
             extra_headers: record.extra_headers.clone(),
             secret_headers: secret.secret_headers.clone(),
             cached_models,
+            local_token: None,
         }
     }
 
@@ -101,6 +105,9 @@ impl BridgeTarget {
 impl Drop for BridgeTarget {
     fn drop(&mut self) {
         self.api_key.zeroize();
+        if let Some(token) = self.local_token.as_mut() {
+            token.zeroize();
+        }
         protocol::zeroize_string_map(&mut self.secret_headers);
     }
 }
@@ -117,6 +124,14 @@ impl fmt::Debug for BridgeTarget {
                     "<empty>"
                 } else {
                     "<redacted>"
+                },
+            )
+            .field(
+                "local_token",
+                &if self.local_token.as_ref().is_some_and(|t| !t.is_empty()) {
+                    "<redacted>"
+                } else {
+                    "<unset>"
                 },
             )
             .field("default_model", &self.default_model)
@@ -244,6 +259,7 @@ struct ParsedHttpRequest {
     method: String,
     path: String,
     query: String,
+    headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
@@ -271,6 +287,18 @@ fn handle_connection(mut stream: TcpStream, target: &BridgeTarget, transport: &d
                 ("Access-Control-Allow-Headers", "*"),
             ],
             b"",
+        );
+        return;
+    }
+
+    if let Some(expected) = target.local_token.as_deref()
+        && !bearer_matches(&req.headers, expected)
+    {
+        write_json_error(
+            &mut stream,
+            ClientKind::OpenAi,
+            401,
+            "missing or invalid bearer token",
         );
         return;
     }
@@ -398,6 +426,7 @@ fn read_http_request(
 
     let mut content_length: Option<usize> = None;
     let mut chunked = false;
+    let mut headers = Vec::new();
     for hline in lines {
         if hline.is_empty() {
             continue;
@@ -405,6 +434,7 @@ fn read_http_request(
         if let Some((name, val)) = hline.split_once(':') {
             let lname = name.trim().to_ascii_lowercase();
             let lval = val.trim();
+            headers.push((lname.clone(), lval.to_owned()));
             if lname == "content-length" {
                 let len = lval
                     .parse::<usize>()
@@ -436,8 +466,37 @@ fn read_http_request(
         method,
         path,
         query,
+        headers,
         body,
     }))
+}
+
+fn bearer_matches(headers: &[(String, String)], expected: &str) -> bool {
+    let Some(presented) = headers.iter().find_map(|(name, value)| {
+        name.eq_ignore_ascii_case("authorization").then_some(value.as_str())
+    }) else {
+        return false;
+    };
+    let Some((scheme, token)) = presented.split_once(' ') else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return false;
+    }
+    let token = token.trim();
+    if token.is_empty() || token.contains(' ') {
+        return false;
+    }
+    constant_time_eq(token.as_bytes(), expected.as_bytes())
+}
+
+fn constant_time_eq(presented: &[u8], expected: &[u8]) -> bool {
+    let mut diff = presented.len() ^ expected.len();
+    for (i, &y) in expected.iter().enumerate() {
+        let x = presented.get(i).copied().unwrap_or(0);
+        diff |= usize::from(x ^ y);
+    }
+    diff == 0
 }
 
 fn read_chunked_body(

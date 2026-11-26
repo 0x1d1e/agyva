@@ -616,21 +616,67 @@ fn replace_executable(stage: &Path, exe: &Path) -> Result<()> {
     fs::rename(stage, exe).map_err(|e| Error::io("replacing the binary", e))
 }
 
+/// Aside name for a running Windows binary. A fixed `.old` sibling can
+/// already exist or be locked; the pid and counter make a fresh name.
+#[cfg(any(windows, test))]
+pub(crate) fn running_binary_aside(exe: &Path, pid: u32, attempt: u64) -> PathBuf {
+    let mut name = exe.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{pid}.{attempt}.old"));
+    match exe.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(name),
+        _ => PathBuf::from(name),
+    }
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn aside_failure(old: &Path, err: &std::io::Error) -> String {
+    format!(
+        "moving the running binary aside to {}: {err}",
+        old.display()
+    )
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn rollback_failure(
+    old: &Path,
+    exe: &Path,
+    replace_err: &std::io::Error,
+    rollback_err: &std::io::Error,
+) -> String {
+    format!(
+        "replacing the binary failed ({replace_err}); restoring {} over {} also failed ({rollback_err})",
+        old.display(),
+        exe.display()
+    )
+}
+
 #[cfg(windows)]
 fn replace_executable(stage: &Path, exe: &Path) -> Result<()> {
     // Windows refuses to overwrite or unlink a running .exe, but allows
     // renaming it aside within the same directory.
-    let mut old_name = exe.as_os_str().to_os_string();
-    old_name.push(".old");
-    let old = PathBuf::from(old_name);
-    let _ = fs::remove_file(&old);
-    fs::rename(exe, &old).map_err(|e| Error::io("moving the running binary aside", e))?;
-    if let Err(e) = fs::rename(stage, exe) {
-        let _ = fs::rename(&old, exe);
-        return Err(Error::io("replacing the binary", e));
+    let pid = std::process::id();
+    let mut last_aside: Option<(PathBuf, std::io::Error)> = None;
+    for attempt in 0..8u64 {
+        let old = running_binary_aside(exe, pid, attempt);
+        match fs::rename(exe, &old) {
+            Ok(()) => {
+                if let Err(replace_err) = fs::rename(stage, exe) {
+                    return match fs::rename(&old, exe) {
+                        Ok(()) => Err(Error::io("replacing the binary", replace_err)),
+                        Err(rollback_err) => Err(Error::io(
+                            rollback_failure(&old, exe, &replace_err, &rollback_err),
+                            replace_err,
+                        )),
+                    };
+                }
+                let _ = fs::remove_file(&old);
+                return Ok(());
+            }
+            Err(e) => last_aside = Some((old, e)),
+        }
     }
-    let _ = fs::remove_file(&old);
-    Ok(())
+    let (old, err) = last_aside.expect("aside loop ran");
+    Err(Error::io(aside_failure(&old, &err), err))
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -1046,5 +1092,41 @@ mod tests {
             .unwrap_err();
         assert!(err.message().contains("too large"), "{}", err.message());
         assert_eq!(fs::read(&exe).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn aside_name_includes_pid_and_counter_and_is_not_a_fixed_old() {
+        let exe = Path::new("/opt/agyva.exe");
+        let a = running_binary_aside(exe, 42, 0);
+        let b = running_binary_aside(exe, 42, 1);
+        assert_ne!(a, b);
+        let name = a.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with("agyva.exe."), "{name}");
+        assert!(name.contains(".42."), "{name}");
+        assert!(name.ends_with(".old"), "{name}");
+        assert_ne!(name.as_ref(), "agyva.exe.old");
+        assert_eq!(a.parent(), Some(Path::new("/opt")));
+    }
+
+    #[test]
+    fn rollback_and_aside_errors_name_both_paths() {
+        let old = Path::new("/opt/agyva.exe.9.0.old");
+        let exe = Path::new("/opt/agyva.exe");
+        let msg = rollback_failure(
+            old,
+            exe,
+            &std::io::Error::new(std::io::ErrorKind::PermissionDenied, "replace-boom"),
+            &std::io::Error::new(std::io::ErrorKind::AlreadyExists, "rollback-boom"),
+        );
+        assert!(msg.contains(old.to_str().unwrap()), "{msg}");
+        assert!(msg.contains(exe.to_str().unwrap()), "{msg}");
+        assert!(msg.contains("replace-boom"), "{msg}");
+        assert!(msg.contains("rollback-boom"), "{msg}");
+        let aside = aside_failure(
+            old,
+            &std::io::Error::new(std::io::ErrorKind::PermissionDenied, "aside-boom"),
+        );
+        assert!(aside.contains(old.to_str().unwrap()), "{aside}");
+        assert!(aside.contains("aside-boom"), "{aside}");
     }
 }

@@ -342,20 +342,77 @@ impl App {
             return Ok(UnifiedUseOutcome::Endpoint { endpoint });
         }
         let outcome = self.switch(trimmed, force)?;
-        let ep_path = endpoints::registry_file(&self.dirs);
-        if ep_path.exists() {
-            let ep_reg = EndpointRegistry::load(&ep_path)?;
-            if ep_reg.active_endpoint.is_some() {
-                endpoints::clear_agy_custom_provider(&self.agy)?;
-                endpoints::clear_active_endpoint(&self.dirs)?;
-            }
+        let mut warnings = outcome.warnings;
+        if let Some(warning) = self.clear_endpoint_after_account_switch(&outcome.account.alias) {
+            warnings.push(warning);
         }
         Ok(UnifiedUseOutcome::Account {
             account: outcome.account,
             already_active: outcome.already_active,
-            warnings: outcome.warnings,
+            warnings,
             policy_notice: outcome.policy_notice,
         })
+    }
+
+    /// The login change is already committed. A failed clear is a warning,
+    /// not an error, and names what is still set so the retry is obvious.
+    pub(crate) fn clear_endpoint_after_account_switch(&self, alias: &str) -> Option<String> {
+        let ep_path = endpoints::registry_file(&self.dirs);
+        if !ep_path.exists() {
+            return None;
+        }
+        let active = match EndpointRegistry::load(&ep_path) {
+            Ok(reg) => reg.active_endpoint,
+            Err(e) => {
+                return Some(format!(
+                    "the login already changed to {alias}; could not read endpoints.json ({}); the custom endpoint may still be set; run `agyva use {alias}` again",
+                    e.message()
+                ));
+            }
+        };
+        active.as_ref()?;
+        let settings_err = match self.failpoints.hit("endpoint-clear") {
+            Err(e) => Some(e),
+            Ok(()) => endpoints::clear_agy_custom_provider(&self.agy).err(),
+        };
+        let registry_err = endpoints::clear_active_endpoint(&self.dirs).err();
+        if settings_err.is_none() && registry_err.is_none() {
+            return None;
+        }
+        let mut still = Vec::new();
+        match endpoints::agy_custom_provider_keys(&self.agy) {
+            Ok(keys) if !keys.is_empty() => {
+                still.push(format!("agy settings ({})", keys.join(", ")));
+            }
+            Ok(_) => {}
+            Err(e) => still.push(format!(
+                "agy settings (could not re-read: {})",
+                e.message()
+            )),
+        }
+        match EndpointRegistry::load(&ep_path) {
+            Ok(reg) => {
+                if let Some(id) = reg.active_endpoint {
+                    still.push(format!("endpoints.json active endpoint `{id}`"));
+                }
+            }
+            Err(e) => still.push(format!(
+                "endpoints.json (could not re-read: {})",
+                e.message()
+            )),
+        }
+        if still.is_empty() {
+            if let Some(e) = &settings_err {
+                still.push(format!("agy settings ({})", e.message()));
+            }
+            if let Some(e) = &registry_err {
+                still.push(format!("endpoints.json ({})", e.message()));
+            }
+        }
+        Some(format!(
+            "the login already changed to {alias}; still set: {}; run `agyva use {alias}` again",
+            still.join(", ")
+        ))
     }
 
     // ------------------------------------------------------------- profiles

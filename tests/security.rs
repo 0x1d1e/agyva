@@ -491,3 +491,66 @@ fn rekey_refuses_when_pending_recovery_or_bad_passphrase_and_rolls_back_on_error
     let err = empty.app().rekey(None).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::Refused);
 }
+
+#[test]
+fn use_reports_the_switch_when_endpoint_clear_fails_afterwards() {
+    use agyva::core::app_integrations::UnifiedUseOutcome;
+    use agyva::core::endpoints::{self, EndpointRecord, EndpointRegistry};
+    use agyva::core::protocol::EndpointProtocol;
+    use chrono::Utc;
+    use std::collections::BTreeMap;
+
+    let rig = Rig::new();
+    rig.add_all(&[ALICE, BOB]);
+    let now = Utc::now();
+    let id = "0123456789".to_owned();
+    let reg = EndpointRegistry {
+        schema_version: endpoints::ENDPOINT_REGISTRY_SCHEMA,
+        active_endpoint: Some(id.clone()),
+        endpoints: vec![EndpointRecord {
+            id: id.clone(),
+            alias: "openai".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            protocol: EndpointProtocol::OpenAi,
+            detected_protocol: None,
+            auth_scheme: None,
+            default_model: None,
+            api_version: None,
+            models_path: None,
+            chat_path: None,
+            extra_headers: BTreeMap::new(),
+            enabled: true,
+            added_at: now,
+            updated_at: now,
+            last_used_at: None,
+        }],
+    };
+    reg.save(&endpoints::registry_file(&rig.dirs())).unwrap();
+    std::fs::create_dir_all(rig.agy_home()).unwrap();
+    std::fs::write(
+        rig.agy_home().join("settings.json"),
+        br#"{"modelProvider":"custom","customModelsConfig":{"endpointId":"0123456789"}}"#,
+    )
+    .unwrap();
+
+    let app = rig.app_with(agyva::core::failpoint::Failpoints::armed(
+        "endpoint-clear",
+        agyva::core::failpoint::Fault::Error,
+    ));
+    let outcome = app.unified_use("alice", false).unwrap();
+    let UnifiedUseOutcome::Account {
+        account, warnings, ..
+    } = outcome
+    else {
+        panic!("expected an account switch");
+    };
+    assert_eq!(account.alias, "alice");
+    assert_eq!(rig.live_id(), Some(id_of(ALICE)));
+    let text = warnings.join("\n");
+    assert!(
+        text.contains("the login already changed to alice"),
+        "{text}"
+    );
+    assert!(text.contains("agyva use alice"), "{text}");
+    assert!(text.contains("still set"), "{text}");
+}

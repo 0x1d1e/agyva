@@ -44,7 +44,7 @@ Tests must never touch the real OS keyring, `$HOME`, `~/.gemini`, or the real `a
 
 ### Failpoints
 
-`AGYVA_FAILPOINT=<name>[:crash|:error]` faults switch/recovery/import steps (`crash` exits 99; `error` triggers normal error/rollback): `after-checkpoint`, `after-prepared`, `after-native-write`, `after-companion`, `after-credential-written`, `verify`, `after-verified`, `after-registry`, `post-commit-cleanup`, `rollback-after-native`, `recover-after-native`, `import-staged`, `import-marker`, `import-published`, `import-registry` (`src/core/failpoint.rs`).
+`AGYVA_FAILPOINT=<name>[:crash|:error]` faults switch/recovery/import steps (`crash` exits 99; `error` triggers normal error/rollback): `after-checkpoint`, `after-prepared`, `after-native-write`, `after-companion`, `after-credential-written`, `verify`, `after-verified`, `after-registry`, `post-commit-cleanup`, `endpoint-clear`, `rollback-after-native`, `recover-after-native`, `import-staged`, `import-marker`, `import-published`, `import-registry` (`src/core/failpoint.rs`).
 
 ## Testing strategy
 

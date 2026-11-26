@@ -18,6 +18,7 @@ pub mod health;
 pub mod health_report;
 pub mod ids;
 pub mod manage;
+pub mod model_auto;
 pub mod monitor;
 pub mod policy;
 pub mod profile;

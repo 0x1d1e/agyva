@@ -3,8 +3,9 @@
 //! "switching is always manual" promise in exactly one bounded way: when the
 //! gates below all pass, the monitor's evaluation cycle may run the same
 //! journaled switch a human would have typed. [`crate::core::monitor`]'s
-//! probe is the only caller — automation therefore runs exactly as often as
-//! the monitor is ticking, and never from a one-shot command.
+//! probe is the only caller of this engine — it runs only while the monitor
+//! is ticking, never from a one-shot command. `agyva auto` is a separate
+//! rotator ([`crate::core::model_auto`]) and does not enter these gates.
 //!
 //! Gates, all mandatory, evaluated in order and re-validated under the
 //! login lock:
@@ -138,6 +139,13 @@ pub fn note_switch(dirs: &crate::paths::Dirs, at: DateTime<Utc>, automatic: bool
         st.last_auto_switch = Some(at);
     }
     st.save(dirs)
+}
+
+/// Last switch of any kind recorded in `auto-switch.json`.
+/// Corrupt or unsupported state is an error so a caller can fail closed
+/// instead of treating a missing timestamp as "cooldown elapsed".
+pub fn last_any_switch(dirs: &crate::paths::Dirs) -> Result<Option<DateTime<Utc>>> {
+    Ok(AutoState::load(dirs)?.last_any_switch)
 }
 
 /// A hold is a decision, and a contended history lock must not replace it

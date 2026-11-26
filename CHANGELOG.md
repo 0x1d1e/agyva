@@ -6,6 +6,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Sem
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-26
+
+### Security
+
+- Endpoint redirects are followed by agyva, not ureq. A host change drops `Authorization`, `x-api-key`, `x-goog-api-key`, `api-key`, custom auth headers, and every other secret header. Scheme downgrade and non-local `http` are refused.
+- `agyva bridge --local-token-env` requires `Authorization: Bearer <token>` on every non-OPTIONS request. A missing or wrong token is 401 and is not forwarded. OPTIONS stays unauthenticated and is not forwarded.
+- Windows token and vault writes set a user-only DACL. `agyva doctor` reports that ACL (or `not checked`) and does not claim Unix `0600` when it did not look. Directory fsync and file identity fail closed when Windows cannot provide them.
+- Windows self-update renames the running binary aside to a pid-and-counter `.old` name and reports both paths if rollback also fails.
+
+### Fixed
+
+- `agyva use` no longer reports failure after the login already changed. A failed custom-endpoint clear is a warning that names what is still set and the retry (`agyva use <alias>`).
+
+### Added
+
+- `agyva auto --model gemini|claude` live-reads the active account and switches through the journaled path when that family's usage is over 90% (remaining under 10%). Other accounts come from cache. Cooldown is 300s and a manual `use` still wins. It does not bypass suspensions. A running agy keeps its loaded login; the command always prints the restart notice.
+
 ## [0.1.3] - 2026-11-21
 
 Cross-platform support, custom LLM endpoints with local protocol bridge, project/global profiles, quota burn-rate analytics, and a 5-tab TUI.

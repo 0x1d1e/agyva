@@ -50,7 +50,7 @@ Or download the raw binary and `SHA256SUMS` for your target from [GitHub Release
 
 ```sh
 sha256sum -c SHA256SUMS
-install -Dm755 agyva-0.1.3-x86_64-unknown-linux-gnu ~/.local/bin/agyva
+install -Dm755 agyva-0.1.4-x86_64-unknown-linux-gnu ~/.local/bin/agyva
 ```
 
 Or build from source:
@@ -69,6 +69,7 @@ agyva add --alias personal      # save agy's current login
 agyva list                      # list saved accounts
 agyva usage --all --no-refresh  # inspect cached quota
 agyva use personal              # manual switch (restart agy afterward)
+agyva auto --model gemini       # rotate when Gemini usage is over 90% (restart agy)
 agyva endpoint add openai --preset openai --api-key-env OPENAI_API_KEY
 agyva use ep:openai             # point agy settings at a custom endpoint
 agyva exec --endpoint openai -- my-tool
@@ -87,7 +88,7 @@ agyva                           # open the 5-tab terminal dashboard
 - `route history [--limit N]`: view recent routing decisions.
 - `agyva monitor [--group NAME]`: re-rank cached evidence on an interval with burn-rate ETAs.
 
-Auto-switch is off by default and requires both `auto_switch = true` on the group and `agyva config set auto_switch_ack true`. Only `agyva monitor --group NAME` drives it, subject to cooldown (`auto_switch_cooldown_secs`, default 900s), candidate max age (`auto_switch_candidate_max_age_secs`, default 21600s), thresholds/hysteresis (default 10%), fresh live evidence, and no active `agy` sessions. See [Opt-in auto-switch](docs/commands.md#opt-in-auto-switch).
+`agyva auto --model gemini|claude` is a separate explicit rotator: it live-reads the active account and switches through the journaled path when that family's remaining quota is under 10% (usage over 90%). It does not need `routing.toml` or `auto_switch_ack`. A running agy does not pick up the new login; the command prints the restart notice. Monitor auto-switch is still off by default and requires both `auto_switch = true` on the group and `agyva config set auto_switch_ack true`. Only `agyva monitor --group NAME` drives that path, subject to cooldown (`auto_switch_cooldown_secs`, default 900s), candidate max age (`auto_switch_candidate_max_age_secs`, default 21600s), thresholds/hysteresis (default 10%), fresh live evidence, and no active `agy` sessions. See [Opt-in auto-switch](docs/commands.md#opt-in-auto-switch).
 
 ## Tasks
 

@@ -106,6 +106,7 @@ fn base_target(proto: EndpointProtocol, base_url: &str, auth: AuthScheme) -> Bri
         models_path: None,
         extra_headers: BTreeMap::new(),
         secret_headers: BTreeMap::new(),
+        local_token: None,
         cached_models: vec![FetchedModel {
             id: "test-model".into(),
             display_name: Some("Test Model".into()),
@@ -663,4 +664,77 @@ fn openai_client_to_responses_azure_and_cohere_upstreams() {
     let v3: Value = serde_json::from_slice(&r3.body).unwrap();
     assert_eq!(v3["choices"][0]["message"]["content"], "From Cohere");
     h3.stop();
+}
+
+fn raw_request(addr: std::net::SocketAddr, request: &str) -> String {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut buf = String::new();
+    let _ = stream.read_to_string(&mut buf);
+    buf
+}
+
+#[test]
+fn local_token_rejects_missing_or_wrong_bearer_and_does_not_forward() {
+    let upstream = Arc::new(MockUpstream::new(|_, _, _, _| {
+        Ok(HttpResponse {
+            status: 200,
+            headers: vec![("Content-Type".into(), "application/json".into())],
+            body: br#"{"ok":true}"#.to_vec(),
+        })
+    }));
+    let mut target = base_target(
+        EndpointProtocol::OpenAi,
+        "https://api.openai.com/v1",
+        AuthScheme::Bearer,
+    );
+    target.local_token = Some(Zeroizing::new("bridge-local-token".into()));
+    let mut handle = start_loopback_bridge(target, upstream.clone()).unwrap();
+    let addr = handle.addr();
+
+    let body = r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#;
+    let chat = |auth: Option<&str>| {
+        let mut req = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+            body.len()
+        );
+        if let Some(auth) = auth {
+            req.push_str(auth);
+            req.push_str("\r\n");
+        }
+        req.push_str("\r\n");
+        req.push_str(body);
+        req
+    };
+
+    let missing = raw_request(addr, &chat(None));
+    assert!(missing.starts_with("HTTP/1.1 401"), "{missing}");
+    assert!(!missing.contains("bridge-local-token"));
+    assert!(upstream.take_calls().is_empty(), "missing token was forwarded");
+
+    let wrong = raw_request(addr, &chat(Some("Authorization: Bearer wrong-token")));
+    assert!(wrong.starts_with("HTTP/1.1 401"), "{wrong}");
+    assert!(!wrong.contains("bridge-local-token"));
+    assert!(upstream.take_calls().is_empty(), "wrong token was forwarded");
+
+    let options = raw_request(
+        addr,
+        "OPTIONS /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+    );
+    assert!(options.starts_with("HTTP/1.1 204"), "{options}");
+    assert!(upstream.take_calls().is_empty(), "OPTIONS was forwarded");
+
+    let ok = raw_request(
+        addr,
+        &chat(Some("Authorization: Bearer bridge-local-token")),
+    );
+    assert!(ok.starts_with("HTTP/1.1 200"), "{ok}");
+    assert_eq!(upstream.take_calls().len(), 1);
+
+    handle.stop();
 }

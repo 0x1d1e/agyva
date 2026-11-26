@@ -1059,6 +1059,21 @@ pub fn sync_agy_settings(
     write_agy_settings_map(agy_paths, &map)
 }
 
+/// Keys a failed clear may have left in `agy`'s `settings.json`.
+pub(crate) fn agy_custom_provider_keys(paths: &AgyPaths) -> Result<Vec<&'static str>> {
+    let Some(map) = read_agy_settings_map(paths)? else {
+        return Ok(Vec::new());
+    };
+    let mut keys = Vec::new();
+    if map.contains_key("modelProvider") {
+        keys.push("modelProvider");
+    }
+    if map.contains_key("customModelsConfig") {
+        keys.push("customModelsConfig");
+    }
+    Ok(keys)
+}
+
 /// Remove `modelProvider` and `customModelsConfig` from `agy`'s `settings.json`,
 /// preserving all other keys and failing closed on corrupt JSON.
 pub fn clear_agy_custom_provider(agy_paths: &AgyPaths) -> Result<()> {

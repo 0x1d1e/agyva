@@ -1,5 +1,6 @@
 //! Command-line definition (clap) and dispatch.
 
+mod auto_cmd;
 mod commands;
 mod endpoints_cmd;
 pub mod monitor_cmd;
@@ -46,10 +47,10 @@ with AGYVA_TEST_MODE=1.";
     about = "Account manager for Google's Antigravity CLI (agy)",
     long_about = "Save agy logins in an encrypted vault and switch between them on request.\n\
                   Manage custom LLM endpoints, local protocol bridge, and project profiles.\n\
-                  Switching is manual unless a route group opts in to automation\n\
-                  (auto_switch = true plus `config set auto_switch_ack true`).",
+                  Switching is manual (`agyva use`) unless you run `agyva auto` or a route\n\
+                  group opts in (auto_switch = true plus `config set auto_switch_ack true`).",
     after_help = EXIT_CODES,
-    help_template = "{name} {version}\n{about-with-newline}\n{usage-heading} {usage}\n\nAccounts:\n  add          Save the current agy login\n  list (ls)    List saved accounts\n  use (switch) Switch account, `ep:<name>`, or `--profile`\n  current      Inspect agy's login\n  rename       Change an alias\n  remove       Forget a saved account\n\nCustom endpoints and workflows:\n  endpoint (ep) Manage custom endpoints and presets\n  bridge       Start a local protocol-translating HTTP bridge\n  env          Print shell exports for an endpoint or profile\n  exec         Run a command with endpoint/profile env (and optional --bridge)\n  profile (prof) Manage local `.agyva.toml` and global profiles\n\nQuota and health:\n  usage        Remaining quota by group and window\n  statusline   Fast cache-only summary for prompts and status bars\n  health       Account health and evidence\n  models       Cached model catalog (--refresh to update)\n  watch        Read-only foreground monitor\n  monitor (mon) Route-aware cache-only monitor (--interval)\n\nRouting:\n  route        Rank saved accounts from cached quota (--for-model, apply)\n\nDiagnostics and recovery:\n  status (st)  State and pending recovery\n  doctor       Diagnose problems (--fix for safe repairs)\n  checkpoints (ckpt) List, restore, or prune encrypted checkpoints\n  recover      Finish or undo an interrupted switch\n\nTransfer and updates:\n  export       Save accounts to a portable encrypted archive\n  import       Add accounts from an archive (skips existing)\n  update       Check GitHub for a newer release; install on request\n\nSetup:\n  config       View, change, or reset settings\n  rekey        Rotate the vault key or passphrase\n  completions  Fish, Bash, Zsh, PowerShell or Elvish completion\n  version      agyva and agy versions\n  help         Help for a command\n\nOptions:\n{options}\n{after-help}",
+    help_template = "{name} {version}\n{about-with-newline}\n{usage-heading} {usage}\n\nAccounts:\n  add          Save the current agy login\n  list (ls)    List saved accounts\n  use (switch) Switch account, `ep:<name>`, or `--profile`\n  current      Inspect agy's login\n  rename       Change an alias\n  remove       Forget a saved account\n\nCustom endpoints and workflows:\n  endpoint (ep) Manage custom endpoints and presets\n  bridge       Start a local protocol-translating HTTP bridge\n  env          Print shell exports for an endpoint or profile\n  exec         Run a command with endpoint/profile env (and optional --bridge)\n  profile (prof) Manage local `.agyva.toml` and global profiles\n\nQuota and health:\n  usage        Remaining quota by group and window\n  statusline   Fast cache-only summary for prompts and status bars\n  health       Account health and evidence\n  models       Cached model catalog (--refresh to update)\n  watch        Read-only foreground monitor\n  monitor (mon) Route-aware cache-only monitor (--interval)\n  auto         Rotate one model family when usage is over 90% (restart agy)\n\nRouting:\n  route        Rank saved accounts from cached quota (--for-model, apply)\n\nDiagnostics and recovery:\n  status (st)  State and pending recovery\n  doctor       Diagnose problems (--fix for safe repairs)\n  checkpoints (ckpt) List, restore, or prune encrypted checkpoints\n  recover      Finish or undo an interrupted switch\n\nTransfer and updates:\n  export       Save accounts to a portable encrypted archive\n  import       Add accounts from an archive (skips existing)\n  update       Check GitHub for a newer release; install on request\n\nSetup:\n  config       View, change, or reset settings\n  rekey        Rotate the vault key or passphrase\n  completions  Fish, Bash, Zsh, PowerShell or Elvish completion\n  version      agyva and agy versions\n  help         Help for a command\n\nOptions:\n{options}\n{after-help}",
     propagate_version = true
 )]
 pub struct Cli {
@@ -105,6 +106,8 @@ pub enum Command {
     /// active refresh, never switches by itself.
     #[command(alias = "mon")]
     Monitor(MonitorArgs),
+    /// Rotate one model family when usage is over 90% (restart agy).
+    Auto(AutoArgs),
     /// Show per-account health (refreshes the active account).
     Health(HealthArgs),
     /// Show the cached model catalog (`agy models`); `--refresh` runs it now.
@@ -364,7 +367,10 @@ pub struct BridgeArgs {
     /// Override the listen port (e.g. `8787`).
     #[arg(long)]
     pub port: Option<u16>,
-    /// Optional environment variable name referencing a local bridge token.
+    /// Environment variable holding a local bearer token. When set, every
+    /// non-OPTIONS request must send `Authorization: Bearer <value>` or the
+    /// bridge returns 401 and does not forward. OPTIONS stays open and is
+    /// not forwarded. Omit the flag to keep loopback-only open access.
     #[arg(long, value_name = "VAR")]
     pub local_token_env: Option<String>,
 }
@@ -839,6 +845,25 @@ pub struct WatchArgs {
     /// Run a single watch cycle and exit.
     #[arg(long)]
     pub once: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum AutoModel {
+    Gemini,
+    Claude,
+}
+
+#[derive(Debug, Args)]
+pub struct AutoArgs {
+    /// Model family to rotate (`gemini` or `claude`).
+    #[arg(long, value_enum, ignore_case = true)]
+    pub model: AutoModel,
+    /// Evaluate once and exit. Implied by `--json`.
+    #[arg(long)]
+    pub once: bool,
+    /// Print one JSON result and exit.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]

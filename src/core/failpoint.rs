@@ -34,6 +34,7 @@ pub const NAMES: &[&str] = &[
     "after-verified",
     "after-registry",
     "post-commit-cleanup",
+    "endpoint-clear",
     "rollback-after-native",
     "recover-after-native",
     "rekey-before-meta",

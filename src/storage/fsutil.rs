@@ -87,21 +87,97 @@ fn write_temp_and_rename(
     file.write_all(data)?;
     file.sync_all()?;
     drop(file);
+    // Set the Windows ACL on the temp file first. A failed ACL must not
+    // replace the previous file, and must not leave the new bytes readable
+    // by other users.
+    apply_private_windows(tmp, mode)?;
     fs::rename(tmp, path)?;
     sync_dir(dir)
 }
 
 /// fsync a directory so a preceding rename/unlink is durable.
+/// On Windows this opens the directory and calls `FlushFileBuffers`.
+/// A failed open or flush is returned; it is not reported as success.
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         File::open(dir)?.sync_all()
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        sync_dir_windows(dir)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = dir;
         Ok(())
     }
+}
+
+#[cfg(windows)]
+fn sync_dir_windows(dir: &Path) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // FILE_FLAG_BACKUP_SEMANTICS: open a directory handle so FlushFileBuffers
+    // can make the preceding rename durable.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(dir)?;
+    file.sync_all()
+}
+
+/// Result of looking at a Windows DACL. Unix builds do not call this.
+#[derive(Debug)]
+pub enum PrivateAcl {
+    UserOnly,
+    Shared(String),
+    Unchecked(String),
+}
+
+pub fn private_acl_status(path: &Path) -> PrivateAcl {
+    #[cfg(windows)]
+    {
+        crate::storage::windows::acl_status(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        PrivateAcl::Unchecked("ACL checks are only implemented on Windows".into())
+    }
+}
+
+pub fn restrict_private_acl(path: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        crate::storage::windows::restrict_to_current_user(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "user-only ACLs are only applied on Windows",
+        ))
+    }
+}
+
+fn apply_private_windows(path: &Path, mode: u32) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        if mode & 0o077 == 0 {
+            if let Err(e) = crate::storage::windows::restrict_to_current_user(path) {
+                let _ = fs::remove_file(path);
+                return Err(io::Error::new(
+                    e.kind(),
+                    format!("setting a user-only ACL on {}: {e}", path.display()),
+                ));
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (path, mode);
+    Ok(())
 }
 
 /// Read a file, mapping "not found" to `None`.
@@ -161,6 +237,7 @@ pub fn atomic_create(path: &Path, data: &[u8]) -> io::Result<()> {
         file.sync_all()?;
         drop(file);
         fs::hard_link(&tmp, path)?;
+        apply_private_windows(path, PRIVATE_FILE_MODE)?;
         sync_dir(dir)
     })();
     // The temp name is always ours to remove: on failure so no debris is
@@ -211,47 +288,58 @@ pub fn make_executable(path: &Path) -> io::Result<()> {
 /// Whether `a` and `b` refer to the same directory entry / underlying file
 /// without following symlinks.
 pub fn same_file(a: &Path, b: &Path) -> io::Result<bool> {
-    let ma = fs::symlink_metadata(a)?;
-    let mb = fs::symlink_metadata(b)?;
     #[cfg(unix)]
     {
+        let ma = fs::symlink_metadata(a)?;
+        let mb = fs::symlink_metadata(b)?;
         use std::os::unix::fs::MetadataExt;
         Ok(ma.dev() == mb.dev() && ma.ino() == mb.ino())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        if ma.file_type() != mb.file_type() {
+        crate::storage::windows::same_file_index(a, b)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        same_file_fallback(a, b)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_file_fallback(a: &Path, b: &Path) -> io::Result<bool> {
+    let ma = fs::symlink_metadata(a)?;
+    let mb = fs::symlink_metadata(b)?;
+    if ma.file_type() != mb.file_type() {
+        return Ok(false);
+    }
+    if !ma.is_symlink()
+        && let (Ok(ca), Ok(cb)) = (fs::canonicalize(a), fs::canonicalize(b))
+        && ca == cb
+    {
+        return Ok(true);
+    }
+    if !ma.is_file() || !mb.is_file() {
+        return Ok(false);
+    }
+    if ma.len() != mb.len()
+        || ma.modified().ok() != mb.modified().ok()
+        || ma.created().ok() != mb.created().ok()
+    {
+        return Ok(false);
+    }
+    use std::io::Read;
+    let mut fa = File::open(a)?;
+    let mut fb = File::open(b)?;
+    let mut ba = [0u8; 8192];
+    let mut bb = [0u8; 8192];
+    loop {
+        let na = fa.read(&mut ba)?;
+        let nb = fb.read(&mut bb)?;
+        if na != nb || ba[..na] != bb[..nb] {
             return Ok(false);
         }
-        if !ma.is_symlink()
-            && let (Ok(ca), Ok(cb)) = (fs::canonicalize(a), fs::canonicalize(b))
-            && ca == cb
-        {
+        if na == 0 {
             return Ok(true);
-        }
-        if !ma.is_file() || !mb.is_file() {
-            return Ok(false);
-        }
-        if ma.len() != mb.len()
-            || ma.modified().ok() != mb.modified().ok()
-            || ma.created().ok() != mb.created().ok()
-        {
-            return Ok(false);
-        }
-        use std::io::Read;
-        let mut fa = File::open(a)?;
-        let mut fb = File::open(b)?;
-        let mut ba = [0u8; 8192];
-        let mut bb = [0u8; 8192];
-        loop {
-            let na = fa.read(&mut ba)?;
-            let nb = fb.read(&mut bb)?;
-            if na != nb || ba[..na] != bb[..nb] {
-                return Ok(false);
-            }
-            if na == 0 {
-                return Ok(true);
-            }
         }
     }
 }
